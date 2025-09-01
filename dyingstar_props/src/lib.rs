@@ -188,18 +188,16 @@ impl SimplePlugin for DyingstarPropsPlugin {
         // Setup GORC handlers
         self.setup_gorc_handlers(events.clone()).await?;
 
-        register_handlers!(events; client {
-            "box50cm", "spawn" => |event: serde_json::Value| {
-                println!("Received prop event: {:?}", event);
-                // let box50cm = Box50cm::new(Vec3::new(500.0, 100.0, 300.0), Vec3::new(0.0, 0.0, 0.0));
-                // let box50cm_id = "box50cm_001".to_string();
-                // {
-                //     let mut boxes50cm = self.boxes50cm.write();
-                //     boxes50cm.insert(box50cm_id.clone(), box50cm.clone());
-                // }
-                Ok(())
-            }
-        })?;
+        events.on_client("box50cm", "spawn", |event: serde_json::Value| {
+            println!("Received prop event: {:?}", event);
+            // let box50cm = Box50cm::new(Vec3::new(500.0, 100.0, 300.0), Vec3::new(0.0, 0.0, 0.0));
+            // let box50cm_id = "box50cm_001".to_string();
+            // {
+            //     let mut boxes50cm = self.boxes50cm.write();
+            //     boxes50cm.insert(box50cm_id.clone(), box50cm.clone());
+            // }
+            Ok(())
+        }).await.unwrap();
         
         info!("🔧 DyingstarPropsPlugin: ✅ All handlers registered successfully!");
         Ok(())

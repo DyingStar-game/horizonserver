@@ -1,0 +1,27 @@
+[package]
+name = "plugin_dyingstar"
+version = "0.1.0"
+edition = "2021"
+description = "Sample Horizon plugin demonstrating core functionality"
+authors = ["Your Name <your.email@example.com>"]
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# Event system (CLI will update this to horizon_event_system)
+horizon_event_system = { path = "../Horizon/crates/horizon_event_system" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.0", features = ["full"] }
+async-trait = "0.1"
+tracing = { version = "0.1", features = ["log"] }
+futures = { version = "0.3.31" }
+
+# Optional: Additional commonly used dependencies
+uuid = { version = "1.0", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+[dev-dependencies]
+tokio-test = "0.4"

@@ -247,7 +247,8 @@ impl DyingstarPropsPlugin {
         let player = props::player::Player::new(
             session.username.clone(), 
             Vec3::new(15067000000.0, 12000.0, 0.0), 
-            Vec3::new(0.0, 0.0, 0.0)
+            Vec3::new(0.0, 0.0, 0.0),
+            "".to_string(),
         );
         self.players.write().await.insert(session.player_id.clone(), player.clone());
         player
@@ -285,6 +286,11 @@ impl SimplePlugin for DyingstarPropsPlugin {
             }
         };
 
+        // Make distinct clones of the runtime handle for each closure so none of them
+        // takes ownership of the original `rt_handle`.
+        let rt_handle_for_new_player = rt_handle.clone();
+        let rt_handle_for_position_update = rt_handle.clone();
+
         // on_plugin expects a synchronous callback returning Result<_, EventError>.
         // spawn a tokio task to perform async work inside the handler.
         let players_clone = self.players.clone();
@@ -297,7 +303,7 @@ impl SimplePlugin for DyingstarPropsPlugin {
             let planets = planets_clone.clone();
             let events = events_clone.clone();
             // use the captured runtime handle (may point to an existing runtime or the owned one)
-            let rt = rt_handle.clone();
+            let rt = rt_handle_for_new_player.clone();
             // keep the owned runtime alive for the lifetime of the spawned task (if any)
             let _owned_rt = owned_runtime_clone.clone();
             rt.spawn(async move {
@@ -305,9 +311,11 @@ impl SimplePlugin for DyingstarPropsPlugin {
                 info!("🔧 DyingstarPropsPlugin: ✅ New player connected: {} ({})", event.username, event.player_id);
 
                 let mut new_players: Vec<Player> = Vec::new();
+                let mut first_player: bool = false;
 
                 // if players list is empty -> create server initial planets inline (avoid calling self)
                 if players.read().await.is_empty() {
+                    first_player = true;
                     let sandbox = Testplanet::new(
                         "Sandbox".to_string(),
                         Vec3::new(15067000000.0, 0.0, 0.0),
@@ -321,9 +329,35 @@ impl SimplePlugin for DyingstarPropsPlugin {
                     event.username.clone(),
                     Vec3::new(15067000000.0, 12000.0, 0.0),
                     Vec3::new(0.0, 0.0, 0.0),
+                    event.player_id.to_string(),
+                    
                 );
                 players.write().await.insert(event.player_id.clone(), player.clone());
                 new_players.push(player.clone());
+
+                if first_player {
+                    // Send to plugin gameserverplugin to init server connection
+                    // std::thread::spawn(move || {
+                    //     let rt = tokio::runtime::Builder::new_current_thread()
+                    //         .enable_all()
+                    //         .build()
+                    //         .expect("failed to build temp runtime");
+
+                    //     rt.block_on(async move {
+                            let payload = serde_json::json!({
+                                "planets": planets.read().await.values().cloned().collect::<Vec<Testplanet>>(),
+                                "player": player.clone(),
+                            });
+
+                            if let Err(e) = events.emit_plugin("gameserverplugin", "init_server", &payload)
+                                .await
+                            {
+                                tracing::error!("Failed to emit plugin event to propsplugin: {}", e);
+                            }
+                    //     });
+                    // });
+                }
+                
 
                 // send all props to the new client
                 let props = serde_json::json!({
@@ -332,15 +366,16 @@ impl SimplePlugin for DyingstarPropsPlugin {
                     "players": players.read().await.values().cloned().collect::<Vec<Player>>(),
                 });
                 // TODO
-                if let Err(e) = events.send_to_player(&event.player_id, &props).await {
-                    error!("Failed to send props to new player: {}", e);
-                }
+                // if let Err(e) = events.send_to_player(&event.player_id, &props).await {
+                //     error!("Failed to send props to new player: {}", e);
+                // }
 
                 // send new props to all clients
                 let announcement = serde_json::json!({
-                    "type": "new_props",
-                    "planets": Vec::new(),
-                    "players": new_players.clone(),
+                    "type": "player_props", //"new_props",
+                    "planets": planets.read().await.values().cloned().collect::<Vec<Testplanet>>(),
+                    "player": player.clone(),
+                    "players": players.read().await.values().cloned().collect::<Vec<Player>>(),
                 });
 
                 if let Err(e) = events.broadcast(&announcement).await {
@@ -361,11 +396,58 @@ impl SimplePlugin for DyingstarPropsPlugin {
         }).await.unwrap();
 
 
+        let events_clone2 = events.clone();
+        let owned_runtime_clone2 = owned_runtime.clone();
+        // use the separate clone for the second handler
+        let rt_handle2 = rt_handle_for_position_update.clone();
+        events.on_plugin("propsplugin", "player_position_update", move |event: serde_json::Value| {
+ 
+            // TODO update position and rotation of the player
+            println!("PROP Receive player position update: {:?}", event);
+            // search in players the player has uuid of event["player"]["player_id"]
+            // let player_id = event["player_id"].as_str().unwrap_or("");
+            // let new_position = event["player"]["pos"].as_array().unwrap_or(&vec![]);
+            // let new_rotation = event["player"]["rot"].as_array().unwrap_or(&vec![]);
+            // if player_id != "" && new_position.len() == 3 && new_rotation.len() == 3 {
+            //     let mut players = players_clone.write();
+            //     if let Some(player) = players.get_mut(player_id) {
+            //         player.position = Vec3::new(
+            //             new_position[0],
+            //             new_position[1],
+            //             new_position[2],
+            //         );
+            //         player.rotation = Vec3::new(
+            //             new_rotation[0],
+            //             new_rotation[1],
+            //             new_rotation[2],
+            //         );
+            //         // println!("Updated player position: {:?}", player);
+            //     }
+            // }
 
 
+            // broadcast new position to all clients
+            let events = events_clone2.clone();
+            let rt = rt_handle2.clone();
+            let _owned_rt = owned_runtime_clone2.clone();
+            rt.spawn(async move {
+                let mut update_player = vec![];
+                update_player.push(event["player"].clone());
+
+                let announcement = serde_json::json!({
+                    "type": "update_props",
+                    "planets": serde_json::json!([]),
+                    "players": update_player,
+                });
+
+                if let Err(e) = events.broadcast(&announcement).await {
+                    error!("Failed to broadcast event: {}", e);
+                }
+            });
 
 
-
+            Ok(())
+        }).await.unwrap();
 
 
 

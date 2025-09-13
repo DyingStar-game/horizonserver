@@ -12,12 +12,15 @@ pub struct Player {
 }
 
 impl Player {
-    pub fn new(name: String, position: Vec3, rotation: Vec3) -> Self {
+    pub fn new(name: String, position: Vec3, rotation: Vec3, mut uuid: String) -> Self {
+        if uuid.is_empty() {
+            uuid = Uuid::new_v4().to_string();
+        }
         Self {
             name,
             position,
             rotation,
-            uuid: Uuid::new_v4().to_string()
+            uuid,
         }
     }
 }

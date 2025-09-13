@@ -298,7 +298,7 @@ impl SimplePlugin for DyingstarPropsPlugin {
         let events_clone = events.clone();
         // clone owned_runtime to keep it alive inside the closure if we created one
         let owned_runtime_clone = owned_runtime.clone();
-        events.on_plugin("propsplugin", "new_player", move |event: PlayerSession| {
+        events.on_plugin("propsplugin", "new_player", move |event: serde_json::Value| {
             let players = players_clone.clone();
             let planets = planets_clone.clone();
             let events = events_clone.clone();
@@ -308,7 +308,7 @@ impl SimplePlugin for DyingstarPropsPlugin {
             let _owned_rt = owned_runtime_clone.clone();
             rt.spawn(async move {
                 println!("PROP Receive new player: {:?}", event);
-                info!("🔧 DyingstarPropsPlugin: ✅ New player connected: {} ({})", event.username, event.player_id);
+                info!("🔧 DyingstarPropsPlugin: ✅ New player connected: {} ({})", event["username"], event["player_id"]);
 
                 let mut new_players: Vec<Player> = Vec::new();
                 let mut first_player: bool = false;
@@ -316,6 +316,7 @@ impl SimplePlugin for DyingstarPropsPlugin {
                 // if players list is empty -> create server initial planets inline (avoid calling self)
                 if players.read().await.is_empty() {
                     first_player = true;
+                    // create sandbox planet and store it
                     let sandbox = Testplanet::new(
                         "Sandbox".to_string(),
                         Vec3::new(15067000000.0, 0.0, 0.0),
@@ -325,37 +326,40 @@ impl SimplePlugin for DyingstarPropsPlugin {
                 }
 
                 // create player and store it
+                
+                // store in variable z the number of players and multiply it by 10.0
+                let z = players.read().await.len() as f64 * 10.0;
+
                 let player = props::player::Player::new(
-                    event.username.clone(),
-                    Vec3::new(15067000000.0, 12000.0, 0.0),
+                    event["username"].as_str().unwrap_or("").to_string(),
+                    Vec3::new(15067000000.0, 12000.0, z),
                     Vec3::new(0.0, 0.0, 0.0),
-                    event.player_id.to_string(),
-                    
+                    event["uuid"].as_str().unwrap_or("").to_string(),
                 );
-                players.write().await.insert(event.player_id.clone(), player.clone());
+                players.write().await.insert(PlayerId::from_str(&player.uuid).unwrap(), player.clone());
                 new_players.push(player.clone());
 
                 if first_player {
-                    // Send to plugin gameserverplugin to init server connection
-                    // std::thread::spawn(move || {
-                    //     let rt = tokio::runtime::Builder::new_current_thread()
-                    //         .enable_all()
-                    //         .build()
-                    //         .expect("failed to build temp runtime");
+                    let payload = serde_json::json!({
+                        "planets": planets.read().await.values().cloned().collect::<Vec<Testplanet>>(),
+                        "player": player.clone(),
+                    });
 
-                    //     rt.block_on(async move {
-                            let payload = serde_json::json!({
-                                "planets": planets.read().await.values().cloned().collect::<Vec<Testplanet>>(),
-                                "player": player.clone(),
-                            });
+                    if let Err(e) = events.emit_plugin("gameserverplugin", "init_server", &payload)
+                        .await
+                    {
+                        tracing::error!("Failed to emit plugin event to propsplugin: {}", e);
+                    }
+                } else {
+                    let payload = serde_json::json!({
+                        "player": player.clone(),
+                    });
 
-                            if let Err(e) = events.emit_plugin("gameserverplugin", "init_server", &payload)
-                                .await
-                            {
-                                tracing::error!("Failed to emit plugin event to propsplugin: {}", e);
-                            }
-                    //     });
-                    // });
+                    if let Err(e) = events.emit_plugin("gameserverplugin", "add_props", &payload)
+                        .await
+                    {
+                        tracing::error!("Failed to emit plugin event to propsplugin: {}", e);
+                    }
                 }
                 
 
@@ -374,15 +378,13 @@ impl SimplePlugin for DyingstarPropsPlugin {
                 let announcement = serde_json::json!({
                     "type": "player_props", //"new_props",
                     "planets": planets.read().await.values().cloned().collect::<Vec<Testplanet>>(),
-                    "player": player.clone(),
+                    // "player": player.clone(),
                     "players": players.read().await.values().cloned().collect::<Vec<Player>>(),
                 });
 
                 if let Err(e) = events.broadcast(&announcement).await {
                     error!("Failed to broadcast event: {}", e);
                 }
-
-
 
 
                 // emit plugin event to gameserverplugin using the same EventSystem
@@ -432,7 +434,11 @@ impl SimplePlugin for DyingstarPropsPlugin {
             let _owned_rt = owned_runtime_clone2.clone();
             rt.spawn(async move {
                 let mut update_player = vec![];
-                update_player.push(event["player"].clone());
+                update_player.push(serde_json::json!({
+                    "uuid": event["player_id"],
+                    "pos": event["player"]["pos"],
+                    "rot": event["player"]["rot"],
+                }));
 
                 let announcement = serde_json::json!({
                     "type": "update_props",

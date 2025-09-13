@@ -44,7 +44,7 @@ impl DsGameServerPlugin {
 
         Self {
             name: "ds_game_server".to_string(),
-            socket_url: "ws://192.168.20.174:8980".to_string(),
+            socket_url: "ws://127.0.0.1:8980".to_string(),
             websocket: Arc::new(Mutex::new(None)),
         }
     }
@@ -183,6 +183,30 @@ impl SimplePlugin for DsGameServerPlugin {
 
             Ok(())
         }).await.unwrap();
+
+        let websocket = Arc::clone(&self.websocket);
+        events.on_plugin("gameserverplugin", "add_props", move |event: serde_json::Value| {
+            println!("🔧 DsGameServerPlugin: Adding props with event {:?}", event);
+            let message = json!({
+                "namespace": "server",
+                "event": "add_props",
+                "data": {
+                    "planets": [],
+                    "player": event["player"]
+                },
+            });
+            let mut ws_guard = websocket.lock().unwrap();
+            if let Err(e) = ws_guard
+                .as_mut()
+                .expect("Problem for send to game server")
+                .send_message(&OwnedMessage::Text(message.to_string()))
+            {
+                return Err(EventError::HandlerExecution(format!("Message blocked: {e}")));
+            }
+            Ok(())
+        }).await.unwrap();
+
+
 
         let websocket = Arc::clone(&self.websocket);
         events.on_client_with_connection(

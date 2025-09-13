@@ -7,6 +7,7 @@ use std::sync::Arc;
 // use tokio::time::{timeout, Duration};
 use tracing::{info};
 use serde_json::json;
+use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlayerInit {
@@ -167,10 +168,10 @@ impl SimplePlugin for DsPlayerAuthenticationPlugin {
 
                 rt.block_on(async move {
                     if let Err(e) = events_system
-                        .emit_plugin("propsplugin", "new_player", &PlayerSession {
-                            username: event.data.login,
-                            player_id: event.player_id,
-                        })
+                        .emit_plugin("propsplugin", "new_player", &serde_json::json!({
+                            "username": event.data.login,
+                            "uuid": Uuid::new_v4().to_string(),
+                        }))
                         .await
                     {
                         tracing::error!("Failed to emit plugin event to propsplugin: {}", e);

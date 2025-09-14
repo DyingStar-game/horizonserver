@@ -314,7 +314,7 @@ impl SimplePlugin for DyingstarPropsPlugin {
                 let mut first_player: bool = false;
 
                 // if players list is empty -> create server initial planets inline (avoid calling self)
-                if players.read().await.is_empty() {
+                if players.read().await.len() == 0 {
                     first_player = true;
                     // create sandbox planet and store it
                     let sandbox = Testplanet::new(

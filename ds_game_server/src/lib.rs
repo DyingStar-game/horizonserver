@@ -1,10 +1,16 @@
 use async_trait::async_trait;
 use horizon_event_system::{
-    create_simple_plugin, EventError, EventSystem, PlayerId, LogLevel, PluginError, ServerContext, SimplePlugin, ClientEventWrapper,
+    create_simple_plugin, EventError, EventSystem, PlayerId, LogLevel, PluginError, ServerContext, SimplePlugin, ClientEventWrapper, PlayerDisconnectedEvent,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
-use tracing::{info, error};
+use tracing::{info, error, debug};
+use tracing_appender::rolling;
+use tracing_appender::non_blocking;
+use tracing_subscriber::fmt::MakeWriter;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+use std::path::Path;
 
 use websocket::ClientBuilder;
 // use websocket::client::sync::Client;
@@ -117,6 +123,7 @@ impl SimplePlugin for DsGameServerPlugin {
                         "player": event["player"]
                     },
                 });
+                debug!("[message][to][gamesever]: {:?}", message);
                 websocket.lock().unwrap().as_mut().unwrap().send_message(&OwnedMessage::Text(message.to_string())).unwrap();
                 
                 std::thread::spawn(move || {
@@ -125,7 +132,7 @@ impl SimplePlugin for DsGameServerPlugin {
                     for message in receiver.incoming_messages() {
                         match message {
                             Ok(msg) => {
-                                println!("Receive message from the game server {:?}", msg);
+                                debug!("[message][from][gamesever]: {:?}", msg);
                                 // convert OwnedMessage -> String (Text or Binary)
                                 let text_opt: Option<String> = match msg {
                                     OwnedMessage::Text(s) => Some(s.clone()),
@@ -196,6 +203,7 @@ impl SimplePlugin for DsGameServerPlugin {
                 },
             });
             let mut ws_guard = websocket.lock().unwrap();
+            debug!("[message][to][gamesever]: {:?}", message);
             if let Err(e) = ws_guard
                 .as_mut()
                 .expect("Problem for send to game server")
@@ -214,7 +222,7 @@ impl SimplePlugin for DsGameServerPlugin {
             "update_position",
             move |wrapper: ClientEventWrapper<serde_json::Value>, _connection| {
                 info!("📝 LoggerPlugin: 🦘 Client movement from player {}", wrapper.player_id);
-                println!("player movement {:?}", wrapper);
+                // println!("player movement {:?}", wrapper);
                 // println!("📝 LoggerPlugin: 🦘 Client movement");
 
                 let websocket = Arc::clone(&websocket);
@@ -228,6 +236,7 @@ impl SimplePlugin for DsGameServerPlugin {
                         "player_id": wrapper.player_id.to_string(),
                         "data": wrapper.data.clone(),
                     });
+                    debug!("[message][to][gamesever]: {:?}", message);
                     websocket.lock().unwrap().as_mut().unwrap().send_message(&OwnedMessage::Text(message.to_string())).unwrap();
                 });
  
@@ -237,6 +246,11 @@ impl SimplePlugin for DsGameServerPlugin {
         .await
         .map_err(|e| PluginError::ExecutionError(e.to_string()))?;
 
+        events.on_core("player_disconnected", move |event: PlayerDisconnectedEvent| {
+            debug!("[disconnected]: {:?}", event);
+            println!("Player disconnected.");
+            Ok(())
+        }).await.map_err(|e| PluginError::ExecutionError(e.to_string()))?;
 
         info!("🔧 DsGameServerPlugin: ✅ All handlers registered successfully!");
         Ok(())
@@ -247,6 +261,24 @@ impl SimplePlugin for DsGameServerPlugin {
         context: Arc<dyn ServerContext>,
     ) -> Result<(), PluginError> {
         context.log(LogLevel::Info, "🔧 DsGameServerPlugin: Starting up!");
+
+        // --- plugin-specific file logger ---
+        // ensure logs directory exists (optional)
+        let log_dir = "logs";
+        let _ = std::fs::create_dir_all(log_dir);
+        // never rotate, single file in logs/
+        let file_appender = rolling::never(log_dir, "ds_game_server.log");
+        let (non_blocking, guard) = non_blocking(file_appender);
+        // keep guard alive for program lifetime so logs flush on exit
+        std::mem::forget(Box::new(guard));
+        // create a layer that writes into the file (non-ANSI)
+        let file_layer = tracing_subscriber::fmt::layer()
+            .with_ansi(false)
+            .with_writer(non_blocking);
+        // Try to add the file layer to the global subscriber. If the global subscriber
+        // is already initialized elsewhere this will return Err — ignore in that case.
+        let _ = tracing_subscriber::registry().with(file_layer).try_init();
+        // --- end file logger ---
 
         info!("🔧 DsGameServerPlugin: ✅ Initialization complete!");
         Ok(())

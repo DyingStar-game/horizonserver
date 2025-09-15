@@ -405,7 +405,7 @@ impl SimplePlugin for DyingstarPropsPlugin {
         events.on_plugin("propsplugin", "player_position_update", move |event: serde_json::Value| {
  
             // TODO update position and rotation of the player
-            println!("PROP Receive player position update: {:?}", event);
+            // println!("PROP Receive player position update: {:?}", event);
             // search in players the player has uuid of event["player"]["player_id"]
             // let player_id = event["player_id"].as_str().unwrap_or("");
             // let new_position = event["player"]["pos"].as_array().unwrap_or(&vec![]);

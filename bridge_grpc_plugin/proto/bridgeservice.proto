@@ -1,0 +1,54 @@
+syntax = "proto3";
+
+package bridgeservice;
+
+// Service principal pour le bridge Horizon <-> Go
+service BridgeService {
+    // Initialise le bridge côté Go
+    rpc Initialize(InitRequest) returns (InitResponse);
+    
+    // Forward tous les événements Horizon vers Go
+    rpc ForwardEvent(EventRequest) returns (EventResponse);
+    
+    // Health check
+    rpc HealthCheck(HealthRequest) returns (HealthResponse);
+    
+    // Notification de fermeture
+    rpc Shutdown(ShutdownRequest) returns (ShutdownResponse);
+}
+
+// Messages d'initialisation
+message InitRequest {
+    string plugin_name = 1;
+    string plugin_version = 2;
+}
+
+message InitResponse {
+    string message = 1;
+    string server_version = 2;
+}
+
+// Messages pour les événements
+message EventRequest {
+    string event_json = 1; // Tout l'événement sérialisé en JSON
+}
+
+message EventResponse {
+    bool success = 1;
+    string message = 2;
+    string response_data = 3; // JSON optionnel de réponse vers Horizon
+}
+
+// Messages de health check
+message HealthRequest {}
+
+message HealthResponse {
+    string status = 1; // "healthy", "unhealthy", etc.
+}
+
+// Messages de fermeture
+message ShutdownRequest {}
+
+message ShutdownResponse {
+    string message = 1;
+}

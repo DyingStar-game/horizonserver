@@ -13,29 +13,6 @@ crate-type = ["cdylib"]
 [dependencies]
 # Event system (CLI will update this to horizon_event_system)
 horizon_event_system = { path = "../Horizon/crates/horizon_event_system" }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-tokio = { version = "1.0", features = ["full"] }
+grpc_bridge_lib = { path = "../libs/grpc_bridge_lib" }
 async-trait = "0.1"
-tracing = { version = "0.1", features = ["log"] }
-reqwest = "0.12.23"
 futures = { version = "0.3" }
-
-# Optional: Additional commonly used dependencies
-uuid = { version = "1.0", features = ["v4"] }
-chrono = { version = "0.4", features = ["serde"] }
-#GRPC
-tonic = "0.14.2"
-prost = "0.14.1"
-tonic-prost = "0.14.2"
-# Error handling
-thiserror = "2.0.16"
-anyhow = "1"
-
-
-
-[dev-dependencies]
-tokio-test = "0.4"
-
-[build-dependencies]
-tonic-prost-build = "0.14.2"

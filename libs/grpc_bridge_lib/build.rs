@@ -3,7 +3,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     configure()
          .build_server(false)
          .compile_protos(
-             &["proto/bridgeservice.proto"],
+             &["proto/bridge.proto"],
              &["proto"],
          )?;
     Ok(())

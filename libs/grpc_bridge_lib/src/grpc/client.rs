@@ -5,13 +5,13 @@ use tonic::Request;
 use tracing::{debug, error, info};
 
 pub mod bridge_service {
-    tonic::include_proto!("bridgeservice");
+    tonic::include_proto!("bridge");
 }
 
 use bridge_service::{
     bridge_service_client::BridgeServiceClient,
-    EventRequest, EventResponse, HealthRequest, HealthResponse,
-    InitRequest, InitResponse, ShutdownRequest, ShutdownResponse,
+    EventRequest, HealthRequest,
+    InitRequest, ShutdownRequest,
 };
 
 #[derive(Debug, Clone)]

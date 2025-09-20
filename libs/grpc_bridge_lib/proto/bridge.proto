@@ -1,6 +1,6 @@
 syntax = "proto3";
 
-package bridgeservice;
+package bridge;
 
 // Service principal pour le bridge Horizon <-> Go
 service BridgeService {

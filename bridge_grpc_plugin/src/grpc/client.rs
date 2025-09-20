@@ -4,7 +4,6 @@ use tonic::transport::Channel;
 use tonic::Request;
 use tracing::{debug, error, info};
 
-// Utiliser les types générés par tonic directement
 pub mod bridge_service {
     tonic::include_proto!("bridgeservice");
 }
@@ -21,7 +20,7 @@ pub struct GrpcBridge {
 }
 
 impl GrpcBridge {
-    /// Connexion au serveur gRPC
+
     pub async fn connect(endpoint: &str) -> Result<Self> {
         info!("🔗 Connecting to gRPC server at {}", endpoint);
         
@@ -36,7 +35,7 @@ impl GrpcBridge {
         Ok(Self { client })
     }
 
-    /// Initialise le bridge côté Go
+
     pub async fn initialize(&self) -> Result<String> {
         debug!("🚀 Sending initialization request to Go server");
         
@@ -54,7 +53,6 @@ impl GrpcBridge {
         Ok(format!("{} (server: {})", init_response.message, init_response.server_version))
     }
 
-    /// Forward un événement vers le serveur Go
     pub async fn forward_event(&self, event_data: Value) -> Result<Option<String>> {
         debug!("📤 Forwarding event to Go server");
         
@@ -73,7 +71,6 @@ impl GrpcBridge {
         if event_response.success {
             debug!("✅ Event forwarded successfully: {}", event_response.message);
             
-            // Retourner les données de réponse si elles existent
             if !event_response.response_data.is_empty() {
                 Ok(Some(event_response.response_data))
             } else {
@@ -85,7 +82,6 @@ impl GrpcBridge {
         }
     }
 
-    /// Vérifie la santé du serveur Go
     pub async fn health_check(&self) -> Result<String> {
         debug!("💚 Performing health check");
         
@@ -100,7 +96,6 @@ impl GrpcBridge {
         Ok(health_response.status)
     }
 
-    /// Notifie le serveur Go de la fermeture
     pub async fn shutdown(&self) -> Result<String> {
         info!("🔌 Notifying Go server of shutdown");
         

@@ -5,7 +5,7 @@ use horizon_event_system::{
 use serde_json::{json, Value};
 use std::sync::Arc;
 use tokio::sync::{RwLock, mpsc};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 mod grpc;
 use crate::grpc::client::GrpcBridge;
@@ -15,7 +15,6 @@ const GRPC_ENDPOINT: &str = "http://172.22.0.1:50051";
 const ENABLE_HEALTH_CHECK: bool = true;
 const HEALTH_CHECK_INTERVAL_SECONDS: u64 = 30;
 
-// Événements
 const CLIENT_EVENTS: &[(&str, &str)] = &[
     ("chat", "message"), ("chat", "whisper"),
     ("movement", "update"), ("movement", "jump"), ("movement", "teleport"),
@@ -49,23 +48,28 @@ struct EventMessage {
     timestamp: u64,
 }
 
-/// Worker gRPC avec runtime Tokio
+/// Worker gRPC avec runtime Tokio et support bidirectionnel
 struct GrpcWorker {
     grpc_bridge: Arc<RwLock<Option<GrpcBridge>>>,
     is_running: Arc<RwLock<bool>>,
+    event_system: Arc<EventSystem>,
 }
 
 impl GrpcWorker {
-    fn spawn(mut receiver: mpsc::Receiver<EventMessage>) -> Arc<Self> {
+    fn spawn(
+        mut receiver: mpsc::Receiver<EventMessage>,
+        event_system: Arc<EventSystem>
+    ) -> Arc<Self> {
         let grpc_bridge = Arc::new(RwLock::new(None));
         let is_running = Arc::new(RwLock::new(true));
 
         let worker = Arc::new(Self {
             grpc_bridge: Arc::clone(&grpc_bridge),
             is_running: Arc::clone(&is_running),
+            event_system,
         });
 
-        let worker_clone = Arc::clone(&worker);
+        let worker_for_thread = Arc::clone(&worker);
 
         std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_multi_thread()
@@ -75,19 +79,19 @@ impl GrpcWorker {
                 .expect("Failed to build Tokio runtime");
 
             rt.block_on(async move {
-                // Connexion gRPC
+                // Connexion to gRPC
                 match GrpcBridge::connect(GRPC_ENDPOINT).await {
                     Ok(bridge) => {
                         *grpc_bridge.write().await = Some(bridge.clone());
                         info!("gRPC bridge initialized successfully");
 
-                        // Appel initialize côté serveur Go
+                        // initial call
                         match bridge.initialize().await {
                             Ok(msg) => info!("Bridge initialized on server: {}", msg),
                             Err(e) => error!("Failed to initialize bridge on server: {}", e),
                         }
 
-                        // Health check périodique
+                        // Health check
                         if ENABLE_HEALTH_CHECK {
                             let bridge_clone = bridge.clone();
                             let is_running_clone = Arc::clone(&is_running);
@@ -110,7 +114,7 @@ impl GrpcWorker {
                     Err(e) => error!("Failed to connect to gRPC server: {}", e),
                 }
 
-                // Boucle d'événements
+                // evenement loop
                 while *is_running.read().await {
                     if let Some(event_msg) = receiver.recv().await {
                         if let Some(bridge) = grpc_bridge.read().await.as_ref() {
@@ -127,16 +131,24 @@ impl GrpcWorker {
                                 event_data["plugin"] = json!(plugin);
                             }
 
-                            if let Err(e) = bridge.forward_event(event_data).await {
-                                error!("Failed to forward event: {}", e);
-                            } else {
-                                debug!("Event forwarded successfully");
+                            match bridge.forward_event(event_data).await {
+                                Ok(response_data) => {
+                                    debug!("Event forwarded successfully");
+                                    
+                                    // traitement for the response
+                                    if let Some(response_json) = response_data {
+                                        if let Err(e) = worker_for_thread.process_grpc_response(response_json).await {
+                                            error!("Failed to process gRPC response: {}", e);
+                                        }
+                                    }
+                                }
+                                Err(e) => error!("Failed to forward event: {}", e),
                             }
                         }
                     }
                 }
 
-                // Shutdown côté serveur Go
+                // Shutdown on the Go server
                 if let Some(bridge) = grpc_bridge.read().await.as_ref() {
                     match bridge.shutdown().await {
                         Ok(msg) => info!("Bridge shutdown on server: {}", msg),
@@ -146,11 +158,76 @@ impl GrpcWorker {
             });
         });
 
-        worker_clone
+        worker
+    }
+
+    async fn process_grpc_response(&self, response_json: String) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        debug!("Processing gRPC response: {}", response_json);
+        
+        let response: Value = serde_json::from_str(&response_json)?;
+        
+        if let Some(events_to_trigger) = response.get("trigger_events") {
+            if let Some(events_array) = events_to_trigger.as_array() {
+                for event_json in events_array {
+                    if let Err(e) = self.trigger_horizon_event(event_json).await {
+                        error!("Failed to trigger Horizon event: {}", e);
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn trigger_horizon_event(&self, event_json: &Value) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+
+        let event_type = event_json.get("type")
+            .and_then(|t| t.as_str())
+            .ok_or("Missing 'type' field in event")?;
+
+        let category = event_json.get("category")
+            .and_then(|c| c.as_str())
+            .unwrap_or("plugin");
+
+        let data = event_json.get("data")
+            .cloned()
+            .unwrap_or(json!({}));
+
+        info!("Triggering Horizon event: {} (category: {})", event_type, category);
+
+        match category {
+            "client" => {
+                if let Some(namespace) = event_json.get("namespace").and_then(|n| n.as_str()) {
+                    self.event_system.emit_client(namespace, event_type, &data).await
+                        .map_err(|e| format!("Failed to emit client event: {:?}", e))?;
+                } else {
+                    warn!("Client event missing namespace: {}", event_type);
+                }
+            }
+            "core" => {
+                self.event_system.emit_core(event_type, &data).await
+                    .map_err(|e| format!("Failed to emit core event: {:?}", e))?;
+            }
+            "plugin" => {
+                let plugin_name = event_json.get("plugin")
+                    .and_then(|p| p.as_str())
+                    .unwrap_or("bridge_grpc_plugin");
+                
+                self.event_system.emit_plugin(plugin_name, event_type, &data).await
+                    .map_err(|e| format!("Failed to emit plugin event: {:?}", e))?;
+            }
+            _ => {
+                warn!("Unknown event category: {}", category);
+                self.event_system.emit_plugin("bridge_grpc_plugin", event_type, &data).await
+                    .map_err(|e| format!("Failed to emit default plugin event: {:?}", e))?;
+            }
+        }
+
+        debug!("Successfully triggered Horizon event: {}", event_type);
+        Ok(())
     }
 }
 
-/// Plugin principal
 pub struct BridgeGrpcPluginPlugin {
     name: String,
     event_sender: Option<mpsc::Sender<EventMessage>>,
@@ -158,19 +235,18 @@ pub struct BridgeGrpcPluginPlugin {
 
 impl BridgeGrpcPluginPlugin {
     pub fn new() -> Self {
-        info!("BridgeGrpcPlugin: Creating universal bridge to {}", GRPC_ENDPOINT);
+        info!("BridgeGrpcPlugin: Creating clean bidirectional bridge to {}", GRPC_ENDPOINT);
         Self {
             name: "bridge_grpc_plugin".to_string(),
             event_sender: None,
         }
     }
 
-    fn start_event_processor(&mut self) -> mpsc::Sender<EventMessage> {
+    fn start_event_processor(&mut self, event_system: Arc<EventSystem>) -> mpsc::Sender<EventMessage> {
         let (sender, receiver) = mpsc::channel::<EventMessage>(100);
         self.event_sender = Some(sender.clone());
 
-        // Spawn worker gRPC avec runtime Tokio
-        GrpcWorker::spawn(receiver);
+        GrpcWorker::spawn(receiver, event_system);
 
         sender
     }
@@ -283,7 +359,7 @@ impl BridgeGrpcPluginPlugin {
     }
 
     async fn register_all_handlers(&mut self, events: Arc<EventSystem>) -> Result<(), PluginError> {
-        let sender = self.start_event_processor();
+        let sender = self.start_event_processor(events.clone());
         self.register_client_handlers(events.clone(), sender.clone()).await?;
         self.register_core_handlers(events.clone(), sender.clone()).await?;
         self.register_plugin_handlers(events.clone(), sender.clone()).await?;
@@ -294,21 +370,21 @@ impl BridgeGrpcPluginPlugin {
 #[async_trait]
 impl SimplePlugin for BridgeGrpcPluginPlugin {
     fn name(&self) -> &str { &self.name }
-    fn version(&self) -> &str { "2.2.0" }
+    fn version(&self) -> &str { "2.4.0" } // Version mise à jour
 
     async fn register_handlers(&mut self, events: Arc<EventSystem>, _context: Arc<dyn ServerContext>) -> Result<(), PluginError> {
-        info!("BridgeGrpcPlugin: Registering all event handlers...");
+        info!("BridgeGrpcPlugin: Registering clean bidirectional event handlers...");
         self.register_all_handlers(events).await?;
         Ok(())
     }
 
     async fn on_init(&mut self, context: Arc<dyn ServerContext>) -> Result<(), PluginError> {
-        context.log(LogLevel::Info, "BridgeGrpcPlugin: Initialization complete!");
+        context.log(LogLevel::Info, "BridgeGrpcPlugin: Clean bidirectional bridge initialization complete!");
         Ok(())
     }
 
     async fn on_shutdown(&mut self, context: Arc<dyn ServerContext>) -> Result<(), PluginError> {
-        context.log(LogLevel::Info, "BridgeGrpcPlugin: Shutdown complete!");
+        context.log(LogLevel::Info, "BridgeGrpcPlugin: Clean bidirectional bridge shutdown complete!");
         Ok(())
     }
 }

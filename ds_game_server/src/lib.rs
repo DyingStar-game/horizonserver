@@ -109,83 +109,89 @@ impl SimplePlugin for DsGameServerPlugin {
             let url = url.clone();
             let websocket = Arc::clone(&websocket);
             let events2 = events1.clone();
+            let initial_event = event.clone();
 
             std::thread::spawn(move || {
+                // Connect and store writer
                 let socket = ClientBuilder::new(&url).unwrap().connect_insecure().unwrap();
                 let (mut receiver, sender) = socket.split().unwrap();
                 *websocket.lock().unwrap() = Some(sender);
 
+                // Send initial add_props
                 let message = json!({
                     "namespace": "server",
-		            "event": "add_props",
+                    "event": "add_props",
                     "data": {
-                        "planets": event["planets"],
-                        "player": event["player"]
+                        "planets": initial_event["planets"],
+                        "player": initial_event["player"]
                     },
                 });
                 debug!("[message][to][gamesever]: {:?}", message);
-                websocket.lock().unwrap().as_mut().unwrap().send_message(&OwnedMessage::Text(message.to_string())).unwrap();
-                
-                std::thread::spawn(move || {
-                    println!("WebSocket reader thread spawned");
+                if let Some(w) = websocket.lock().unwrap().as_mut() {
+                    let _ = w.send_message(&OwnedMessage::Text(message.to_string()));
+                }
 
-                    for message in receiver.incoming_messages() {
-                        match message {
-                            Ok(msg) => {
-                                debug!("[message][from][gamesever]: {:?}", msg);
-                                // convert OwnedMessage -> String (Text or Binary)
-                                let text_opt: Option<String> = match msg {
-                                    OwnedMessage::Text(s) => Some(s.clone()),
-                                    OwnedMessage::Binary(b) => Some(String::from_utf8_lossy(&b).into_owned()),
-                                    _ => None,
-                                };
-                                if let Some(text) = text_opt {
-                                    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
-                                        if value["namespace"] == "player" && value["event"] == "position" {
-                                            let events3 = events2.clone();
-                                            std::thread::spawn(move || {
-                                                let rt = tokio::runtime::Builder::new_current_thread()
-                                                    .enable_all()
-                                                    .build()
-                                                    .expect("failed to build temp runtime");
+                // local runtime to call async event system from this blocking thread
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("failed to build temp runtime");
 
-                                                rt.block_on(async move {                                            
-                                                    // send to plugin props
-                                                    let payload = serde_json::json!({
-                                                        "player": value["data"],
-                                                        "player_id": value["player_id"],
-                                                    });
-
-                                                    if let Err(e) = events3.emit_plugin("propsplugin", "player_position_update", &payload)
-                                                        .await
-                                                    {
-                                                        tracing::error!("Failed to emit plugin event to propsplugin: {}", e);
-                                                    }
-                                                });
-                                            });
+                println!("WebSocket reader thread started");
+                for msg in receiver.incoming_messages() {
+                    match msg {
+                        Ok(OwnedMessage::Text(s)) => {
+                            debug!("[message][from][gamesever]: {}", s);
+                            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&s) {
+                                if value["namespace"] == "players" && value["event"] == "position" {
+                                    let payload = serde_json::json!({ "players": value["data"] });
+                                    let events_clone = events2.clone();
+                                    let _ = rt.block_on(async move {
+                                        if let Err(e) = events_clone.emit_plugin("propsplugin", "players_position_update", &payload).await {
+                                            tracing::error!("Failed to emit plugin event to propsplugin: {}", e);
                                         }
-                                    }
+                                    });
+                                } else if value["namespace"] == "props" && value["event"] == "position" {
+                                    println!("Props position update received: {:?}", value);
+                                    let payload = serde_json::json!({ "props": value["data"] });
+                                    let events_clone = events2.clone();
+                                    let _ = rt.block_on(async move {
+                                        if let Err(e) = events_clone.emit_plugin("propsplugin", "props_position_update", &payload).await {
+                                            tracing::error!("Failed to emit plugin event to propsplugin: {}", e);
+                                        }
+                                    });
                                 }
+                            } else {
+                                debug!("Failed to parse incoming JSON: {}", s);
                             }
-                            Err(err) => {
-
-                                // Handle the different types of possible errors
-                                match err {
-                                    WebSocketError::NoDataAvailable => {
-                                        println!("\nDisconnected!");
-                                        println!("Error: {:?}", err);
-                                        exit(2);
-                                    },
-                                    _ => {
-                                        println!("Error: {:?}", err);
-                                        println!("Error in WebSocket reader: {}", err);
-                                        exit(2);
+                        }
+                        Ok(OwnedMessage::Binary(b)) => {
+                            if let Ok(s) = String::from_utf8(b) {
+                                debug!("[message][from][gamesever] (binary->text): {}", s);
+                                if let Ok(value) = serde_json::from_str::<serde_json::Value>(&s) {
+                                    if value["namespace"] == "players" && value["event"] == "position" {
+                                        let payload = serde_json::json!({ "players": value["data"] });
+                                        let events_clone = events2.clone();
+                                        let _ = rt.block_on(async move {
+                                            if let Err(e) = events_clone.emit_plugin("propsplugin", "players_position_update", &payload).await {
+                                                tracing::error!("Failed to emit plugin event to propsplugin: {}", e);
+                                            }
+                                        });
                                     }
                                 }
                             }
                         }
+                        Ok(_) => { /* ignore ping/pong/close frames */ }
+                        Err(WebSocketError::NoDataAvailable) => {
+                            println!("\nDisconnected!");
+                            exit(2);
+                        }
+                        Err(e) => {
+                            println!("WebSocket read error: {:?}", e);
+                            exit(2);
+                        }
                     }
-                });                
+                }
             });
 
             Ok(())
@@ -202,19 +208,38 @@ impl SimplePlugin for DsGameServerPlugin {
                     "player": event["player"]
                 },
             });
-            let mut ws_guard = websocket.lock().unwrap();
+            let mut ws_guard = websocket.lock().map_err(|e| EventError::HandlerExecution(format!("websocket lock error: {}", e))).unwrap();
             debug!("[message][to][gamesever]: {:?}", message);
-            if let Err(e) = ws_guard
-                .as_mut()
-                .expect("Problem for send to game server")
-                .send_message(&OwnedMessage::Text(message.to_string()))
-            {
-                return Err(EventError::HandlerExecution(format!("Message blocked: {e}")));
+            if let Some(w) = ws_guard.as_mut() {
+                if let Err(e) = w.send_message(&OwnedMessage::Text(message.to_string())) {
+                    return Err(EventError::HandlerExecution(format!("Message blocked: {}", e)));
+                }
+            } else {
+                return Err(EventError::HandlerExecution("No websocket writer available".to_string()));
             }
             Ok(())
         }).await.unwrap();
 
 
+        let websocket = Arc::clone(&self.websocket);
+        events.on_plugin("gameserverplugin", "add_prop", move |event: serde_json::Value| {
+            println!("🔧 DsGameServerPlugin: Adding prop with event {:?}", event);
+            let message = json!({
+                "namespace": "server",
+                "event": "add_prop",
+                "data": event,
+            });
+            let mut ws_guard = websocket.lock().map_err(|e| EventError::HandlerExecution(format!("websocket lock error: {}", e))).unwrap();
+            debug!("[message][to][gamesever]: {:?}", message);
+            if let Some(w) = ws_guard.as_mut() {
+                if let Err(e) = w.send_message(&OwnedMessage::Text(message.to_string())) {
+                    return Err(EventError::HandlerExecution(format!("Message blocked: {}", e)));
+                }
+            } else {
+                return Err(EventError::HandlerExecution("No websocket writer available".to_string()));
+            }
+            Ok(())
+        }).await.unwrap();
 
         let websocket = Arc::clone(&self.websocket);
         events.on_client_with_connection(
@@ -228,7 +253,6 @@ impl SimplePlugin for DsGameServerPlugin {
                 let websocket = Arc::clone(&websocket);
 
                 std::thread::spawn(move || {
-
                     // Parse the movement data
                     let message = json!({
                         "namespace": "player",
@@ -237,7 +261,20 @@ impl SimplePlugin for DsGameServerPlugin {
                         "data": wrapper.data.clone(),
                     });
                     debug!("[message][to][gamesever]: {:?}", message);
-                    websocket.lock().unwrap().as_mut().unwrap().send_message(&OwnedMessage::Text(message.to_string())).unwrap();
+                    match websocket.lock() {
+                        Ok(mut guard) => {
+                            if let Some(w) = guard.as_mut() {
+                                if let Err(e) = w.send_message(&OwnedMessage::Text(message.to_string())) {
+                                    error!("Failed to send websocket message: {}", e);
+                                }
+                            } else {
+                                error!("No websocket writer available to send movement");
+                            }
+                        }
+                        Err(e) => {
+                            error!("Failed to lock websocket mutex: {}", e);
+                        }
+                    }
                 });
  
                 Ok(())

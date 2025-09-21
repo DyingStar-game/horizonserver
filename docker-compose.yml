@@ -1,0 +1,12 @@
+services:
+    horizon:
+      container_name: horizon_1
+      build: 
+        context: ./.docker
+      restart: always
+      user: "1000:1000"
+      volumes:
+        - .:/app/
+      ports:
+        - 7040:7040
+        - 8980:8980

@@ -50,7 +50,7 @@ impl DsGameServerPlugin {
 
         Self {
             name: "ds_game_server".to_string(),
-            socket_url: "ws://192.168.20.174:8980".to_string(),
+            socket_url: "ws://host.docker.internal:8980".to_string(),
             websocket: Arc::new(Mutex::new(None)),
         }
     }

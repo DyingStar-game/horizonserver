@@ -171,6 +171,7 @@ impl SimplePlugin for DsPlayerAuthenticationPlugin {
                         .emit_plugin("propsplugin", "new_player", &serde_json::json!({
                             "username": event.data.login,
                             "uuid": Uuid::new_v4().to_string(),
+                            "internal_uuid": event.player_id.to_string()
                         }))
                         .await
                     {

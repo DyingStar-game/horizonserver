@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use horizon_event_system::{
-    CompressionType, create_simple_plugin, defObject, EventSystem, PlayerId, LogLevel, PluginError, ReplicationLayer, ReplicationPriority, ServerContext, SimplePlugin, Vec3
+    CompressionType, create_simple_plugin, defObject, EventSystem, PlayerId, LogLevel, PluginError, ReplicationLayer, ReplicationPriority, ServerContext, SimplePlugin, Vec3, PlayerDisconnectedEvent
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -22,6 +22,7 @@ pub struct PlayerSession {
 pub struct NewPlayerData {
     pub username: String,
     pub uuid: String,
+    pub internal_uuid: String,
 }
 
 /// DyingstarProps Plugin
@@ -121,6 +122,7 @@ impl DyingstarPropsPlugin {
             session.username.clone(), 
             Vec3::new(15067000000.0, 12000.0, 0.0), 
             Vec3::new(0.0, 0.0, 0.0),
+            session.player_id.to_string(),
             "".to_string(),
         );
         self.players.write().await.insert(session.player_id.clone(), player.clone());
@@ -207,6 +209,7 @@ impl SimplePlugin for DyingstarPropsPlugin {
                     event.username.clone(),
                     Vec3::new(86785.898, 13339.8, -10386.2), // Vec3::new(15067000000.0, 12000.0, z),
                     Vec3::new(0.0, 0.0, 0.0),
+                    event.internal_uuid.clone(),
                     event.uuid.clone(),
                 );
                 players.write().await.insert(PlayerId::from_str(&player.uuid).unwrap(), player.clone());
@@ -383,6 +386,48 @@ impl SimplePlugin for DyingstarPropsPlugin {
 
             Ok(())
         }).await.unwrap();
+
+        // prepare clones for player-disconnected handler (no await in sync closure)
+        let players_for_disconnect = self.players.clone();
+        let events_for_disconnect = events.clone();
+        let rt_handle_for_disconnect = rt_handle_for_position_update.clone();
+        let owned_runtime_for_disconnect = owned_runtime.clone();
+
+        events.on_core("player_disconnected", move |event: PlayerDisconnectedEvent| {
+            // move clones into the handler
+            let players = players_for_disconnect.clone();
+            let events = events_for_disconnect.clone();
+            let rt = rt_handle_for_disconnect.clone();
+            let _owned_rt = owned_runtime_for_disconnect.clone();
+
+            let internal_uuid = event.player_id.clone();
+
+            // spawn async task to use .await inside
+            rt.spawn(async move {
+                // println!("PROP Player disconnected event: {:?}", event);
+                // println!("PROP Player disconnected, list of players {:?}", players.read().await);
+                // acquire write lock to remove the player
+                let mut players_map = players.write().await;
+                // loop on players_map for player have the internal_uuid = internal_uuid
+                for (uuid, player) in players_map.iter() {
+                    if player.internal_uuid == internal_uuid.to_string() {
+                        println!("Found player: {:?}", player);
+                        // send to all clients the player disconnected
+                        let payload = serde_json::json!({
+                            "type": "delete_player",
+                            "player_uuid": player.uuid.clone(),
+                        });
+                        println!("Broadcasting player disconnected: {:?}", payload);
+                        if let Err(e) = events.broadcast(&payload).await {
+                            error!("Failed to broadcast event: {}", e);
+                        }
+                    }
+                }
+            });
+
+            Ok(())
+        }).await.map_err(|e| PluginError::ExecutionError(e.to_string()))?;
+
 
         let events_clone3 = events.clone();
         let owned_runtime_clone3 = owned_runtime.clone();

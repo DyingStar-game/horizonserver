@@ -1,5 +1,17 @@
 # Horizon usage
 
+## Local setup
+
+To build the plugins and launch the horizon server follow the steps:
+- Install Docker
+- Clone the repository `git clone https://github.com/DyingStar-game/horizonserver.git`
+- Run `docker compose up -d` to start the dev environment
+- Enter the docker container with `docker exec -it horizon_1 bash`
+- Run `scripts/install.sh` to clone the horizon repository
+- Modify the bind address in `Horizon/config.toml` to `0.0.0.0:7040`
+- Run `scripts/build.sh` to build the plugins
+- Run `scripts/run.sh` to start the horizon server
+
 ## Send a message to all players
 
 To broadcast a message to all players connected in a plugin event part, use:

@@ -1,0 +1,40 @@
+FROM ubuntu:22.04
+
+ARG UID=1000
+ARG GID=1000
+
+# Install required tools
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    passwd \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create a non-privileged user that the app will run under.
+RUN groupadd --gid $GID appgroup \
+    && useradd --uid $UID --gid $GID -m appuser
+
+# Create app directory
+RUN mkdir -p /app
+
+# Copy plugins
+ADD plugins /app/plugins
+
+# Copy config
+COPY production_config.toml /app/config.toml
+
+# Copy server
+COPY horizon /app/server
+
+# Set permissions for user
+RUN chown -R appuser:appgroup /app
+
+# Switch to non-privileged user
+USER appuser
+
+# Expose the port that the application listens on.
+EXPOSE 7040
+
+WORKDIR /app
+
+RUN ls /app/server
+
+ENTRYPOINT [ "/app/server" ]

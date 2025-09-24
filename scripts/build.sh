@@ -5,7 +5,7 @@ set -e
 
 build() {
     cd "$1"
-    cargo build --release
+    RUSTFLAGS="" cargo build --release
     cp target/release/*.so ../Horizon/plugins
     cd ..
 }

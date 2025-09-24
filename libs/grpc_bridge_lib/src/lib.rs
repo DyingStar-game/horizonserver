@@ -10,7 +10,7 @@ use tracing::{debug, error, info, warn};
 pub mod grpc;
 use crate::grpc::client::GrpcBridge;
 
-/// Configuration pour un plugin gRPC
+/// Configuration pour un plugin gRPC bidirectionnel
 #[derive(Debug, Clone)]
 pub struct GrpcBridgeConfig {
     /// Nom du plugin
@@ -19,7 +19,7 @@ pub struct GrpcBridgeConfig {
     pub version: String,
     /// Endpoint gRPC (ex: "http://172.22.0.1:50051")
     pub grpc_endpoint: String,
-    /// Activer les health checks
+    /// Activer les health checks périodiques
     pub enable_health_check: bool,
     /// Intervalle des health checks en secondes
     pub health_check_interval_seconds: u64,
@@ -33,6 +33,10 @@ pub struct GrpcBridgeConfig {
     pub event_buffer_size: usize,
     /// Nombre de worker threads pour le runtime Tokio
     pub worker_threads: usize,
+    /// Activer le ping automatique pour maintenir la connexion
+    pub enable_keepalive: bool,
+    /// Intervalle des pings en secondes
+    pub keepalive_interval_seconds: u64,
 }
 
 impl Default for GrpcBridgeConfig {
@@ -48,6 +52,8 @@ impl Default for GrpcBridgeConfig {
             plugin_events: vec![],
             event_buffer_size: 100,
             worker_threads: 2,
+            enable_keepalive: true,
+            keepalive_interval_seconds: 10,
         }
     }
 }
@@ -98,6 +104,13 @@ impl GrpcBridgeConfig {
         self
     }
 
+    /// Builder pattern pour configurer le keepalive
+    pub fn with_keepalive(mut self, enable: bool, interval_seconds: u64) -> Self {
+        self.enable_keepalive = enable;
+        self.keepalive_interval_seconds = interval_seconds;
+        self
+    }
+
     /// Builder pattern pour configurer la taille du buffer
     pub fn with_buffer_size(mut self, size: usize) -> Self {
         self.event_buffer_size = size;
@@ -121,9 +134,8 @@ struct EventMessage {
     timestamp: u64,
 }
 
-/// Worker gRPC générique avec runtime Tokio et support bidirectionnel
+/// Worker gRPC bidirectionnel avec runtime Tokio
 struct GrpcWorker {
-    grpc_bridge: Arc<RwLock<Option<GrpcBridge>>>,
     is_running: Arc<RwLock<bool>>,
     event_system: Arc<EventSystem>,
     config: GrpcBridgeConfig,
@@ -135,11 +147,9 @@ impl GrpcWorker {
         event_system: Arc<EventSystem>,
         config: GrpcBridgeConfig,
     ) -> Arc<Self> {
-        let grpc_bridge = Arc::new(RwLock::new(None));
         let is_running = Arc::new(RwLock::new(true));
 
         let worker = Arc::new(Self {
-            grpc_bridge: Arc::clone(&grpc_bridge),
             is_running: Arc::clone(&is_running),
             event_system,
             config: config.clone(),
@@ -158,82 +168,51 @@ impl GrpcWorker {
                 // Connexion au serveur gRPC
                 match GrpcBridge::connect(&config.grpc_endpoint).await {
                     Ok(bridge) => {
-                        *grpc_bridge.write().await = Some(bridge.clone());
-                        info!("[{}] gRPC bridge initialized successfully", config.name);
+                        info!("[{}] gRPC bridge connected successfully", config.name);
 
-                        // Appel d'initialisation
+                        // Initialisation
                         match bridge.initialize().await {
-                            Ok(msg) => info!("[{}] Bridge initialized on server: {}", config.name, msg),
-                            Err(e) => error!("[{}] Failed to initialize bridge on server: {}", config.name, e),
+                            Ok(msg) => info!("[{}] Bridge initialized: {}", config.name, msg),
+                            Err(e) => error!("[{}] Failed to initialize: {}", config.name, e),
                         }
 
-                        // Health check task
-                        if config.enable_health_check {
-                            let bridge_clone = bridge.clone();
-                            let is_running_clone = Arc::clone(&is_running);
-                            let plugin_name = config.name.clone();
-                            let interval_secs = config.health_check_interval_seconds;
-                            
-                            tokio::spawn(async move {
-                                let mut interval = tokio::time::interval(
-                                    tokio::time::Duration::from_secs(interval_secs)
-                                );
-                                loop {
-                                    interval.tick().await;
-                                    if !*is_running_clone.read().await { break; }
-
-                                    match bridge_clone.health_check().await {
-                                        Ok(status) => debug!("[{}] Health check OK: {}", plugin_name, status),
-                                        Err(e) => error!("[{}] Health check failed: {}", plugin_name, e),
+                        // Démarrage du stream bidirectionnel
+                        let event_system_clone = Arc::clone(&worker_for_thread.event_system);
+                        let plugin_name = config.name.clone();
+                        
+                        let on_go_event = {
+                            let event_system = Arc::clone(&event_system_clone);
+                            let plugin_name = plugin_name.clone();
+                            move |event_data: Value| {
+                                // Spawn une tâche async au lieu de block_on
+                                let event_system = Arc::clone(&event_system);
+                                let plugin_name = plugin_name.clone();
+                                tokio::spawn(async move {
+                                    if let Err(e) = Self::process_go_event(&event_system, &plugin_name, event_data).await {
+                                        error!("[{}] Failed to process Go event: {}", plugin_name, e);
                                     }
+                                });
+                            }
+                        };
+
+                        if let Err(e) = bridge.start_event_stream(on_go_event).await {
+                            error!("[{}] Failed to start event stream: {}", config.name, e);
+                            return;
+                        }
+
+                        // Tâches périodiques
+                        worker_for_thread.start_periodic_tasks(&bridge).await;
+
+                        // Boucle principale de traitement des événements Horizon -> Go
+                        while *is_running.read().await {
+                            if let Some(event_msg) = receiver.recv().await {
+                                if let Err(e) = worker_for_thread.forward_horizon_event(&bridge, event_msg).await {
+                                    error!("[{}] Failed to forward Horizon event: {}", config.name, e);
                                 }
-                            });
+                            }
                         }
                     }
                     Err(e) => error!("[{}] Failed to connect to gRPC server: {}", config.name, e),
-                }
-
-                // Boucle principale de traitement des événements
-                while *is_running.read().await {
-                    if let Some(event_msg) = receiver.recv().await {
-                        if let Some(bridge) = grpc_bridge.read().await.as_ref() {
-                            let mut event_data = json!({
-                                "category": event_msg.category,
-                                "event": event_msg.event,
-                                "data": event_msg.data,
-                                "timestamp": event_msg.timestamp,
-                            });
-                            
-                            if let Some(ns) = event_msg.namespace {
-                                event_data["namespace"] = json!(ns);
-                            }
-                            if let Some(plugin) = event_msg.plugin {
-                                event_data["plugin"] = json!(plugin);
-                            }
-
-                            match bridge.forward_event(event_data).await {
-                                Ok(response_data) => {
-                                    debug!("[{}] Event forwarded successfully", config.name);
-                                    
-                                    // Traitement de la réponse
-                                    if let Some(response_json) = response_data {
-                                        if let Err(e) = worker_for_thread.process_grpc_response(response_json).await {
-                                            error!("[{}] Failed to process gRPC response: {}", config.name, e);
-                                        }
-                                    }
-                                }
-                                Err(e) => error!("[{}] Failed to forward event: {}", config.name, e),
-                            }
-                        }
-                    }
-                }
-
-                // Shutdown sur le serveur Go
-                if let Some(bridge) = grpc_bridge.read().await.as_ref() {
-                    match bridge.shutdown().await {
-                        Ok(msg) => info!("[{}] Bridge shutdown on server: {}", config.name, msg),
-                        Err(e) => error!("[{}] Failed to shutdown bridge on server: {}", config.name, e),
-                    }
                 }
             });
         });
@@ -241,16 +220,99 @@ impl GrpcWorker {
         worker
     }
 
-    async fn process_grpc_response(&self, response_json: String) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        debug!("[{}] Processing gRPC response: {}", self.config.name, response_json);
+    async fn start_periodic_tasks(&self, bridge: &GrpcBridge) {
+        let config = &self.config;
+        let bridge = Arc::new(bridge.clone());
+        let is_running = Arc::clone(&self.is_running);
+
+        // Health check périodique
+        if config.enable_health_check {
+            let bridge_clone = Arc::clone(&bridge);
+            let is_running_clone = Arc::clone(&is_running);
+            let plugin_name = config.name.clone();
+            let interval_secs = config.health_check_interval_seconds;
+            
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(
+                    tokio::time::Duration::from_secs(interval_secs)
+                );
+                
+                loop {
+                    interval.tick().await;
+                    if !*is_running_clone.read().await { break; }
+
+                    match bridge_clone.health_check().await {
+                        Ok(status) => debug!("[{}] Health check OK: {}", plugin_name, status),
+                        Err(e) => error!("[{}] Health check failed: {}", plugin_name, e),
+                    }
+                }
+            });
+        }
+
+        // Keepalive périodique
+        if config.enable_keepalive {
+            let bridge_clone = Arc::clone(&bridge);
+            let is_running_clone = Arc::clone(&is_running);
+            let plugin_name = config.name.clone();
+            let interval_secs = config.keepalive_interval_seconds;
+            
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(
+                    tokio::time::Duration::from_secs(interval_secs)
+                );
+                
+                loop {
+                    interval.tick().await;
+                    if !*is_running_clone.read().await { break; }
+
+                    if !bridge_clone.is_connected().await {
+                        warn!("[{}] Connection lost, attempting to reconnect...", plugin_name);
+                        continue;
+                    }
+
+                    if let Err(e) = bridge_clone.send_ping().await {
+                        error!("[{}] Failed to send keepalive ping: {}", plugin_name, e);
+                    } else {
+                        debug!("[{}] Keepalive ping sent", plugin_name);
+                    }
+                }
+            });
+        }
+    }
+
+    async fn forward_horizon_event(&self, bridge: &GrpcBridge, event_msg: EventMessage) -> anyhow::Result<()> {
+        let mut event_data = json!({
+            "category": event_msg.category,
+            "event": event_msg.event,
+            "data": event_msg.data,
+            "timestamp": event_msg.timestamp,
+        });
         
-        let response: Value = serde_json::from_str(&response_json)?;
+        if let Some(ns) = event_msg.namespace {
+            event_data["namespace"] = json!(ns);
+        }
+        if let Some(plugin) = event_msg.plugin {
+            event_data["plugin"] = json!(plugin);
+        }
+
+        bridge.forward_event(event_data).await?;
+        debug!("[{}] Horizon event forwarded to Go", self.config.name);
         
-        if let Some(events_to_trigger) = response.get("trigger_events") {
+        Ok(())
+    }
+
+    async fn process_go_event(
+        event_system: &Arc<EventSystem>,
+        plugin_name: &str,
+        event_data: Value,
+    ) -> anyhow::Result<()> {
+        debug!("[{}] Processing Go event: {}", plugin_name, event_data);
+        
+        if let Some(events_to_trigger) = event_data.get("trigger_events") {
             if let Some(events_array) = events_to_trigger.as_array() {
                 for event_json in events_array {
-                    if let Err(e) = self.trigger_horizon_event(event_json).await {
-                        error!("[{}] Failed to trigger Horizon event: {}", self.config.name, e);
+                    if let Err(e) = Self::trigger_horizon_event(event_system, plugin_name, event_json).await {
+                        error!("[{}] Failed to trigger Horizon event: {}", plugin_name, e);
                     }
                 }
             }
@@ -259,10 +321,14 @@ impl GrpcWorker {
         Ok(())
     }
 
-    async fn trigger_horizon_event(&self, event_json: &Value) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    async fn trigger_horizon_event(
+        event_system: &Arc<EventSystem>,
+        plugin_name: &str,
+        event_json: &Value,
+    ) -> anyhow::Result<()> {
         let event_type = event_json.get("type")
             .and_then(|t| t.as_str())
-            .ok_or("Missing 'type' field in event")?;
+            .ok_or_else(|| anyhow::anyhow!("Missing 'type' field in event"))?;
 
         let category = event_json.get("category")
             .and_then(|c| c.as_str())
@@ -272,53 +338,55 @@ impl GrpcWorker {
             .cloned()
             .unwrap_or(json!({}));
 
-        info!("[{}] Triggering Horizon event: {} (category: {})", self.config.name, event_type, category);
+        info!("[{}] Triggering Horizon event: {} (category: {})", plugin_name, event_type, category);
 
         match category {
             "client" => {
                 if let Some(namespace) = event_json.get("namespace").and_then(|n| n.as_str()) {
-                    self.event_system.emit_client(namespace, event_type, &data).await
-                        .map_err(|e| format!("Failed to emit client event: {:?}", e))?;
+                    event_system.emit_client(namespace, event_type, &data).await
+                        .map_err(|e| anyhow::anyhow!("Failed to emit client event: {:?}", e))?;
                 } else {
-                    warn!("[{}] Client event missing namespace: {}", self.config.name, event_type);
+                    warn!("[{}] Client event missing namespace: {}", plugin_name, event_type);
                 }
             }
             "core" => {
-                self.event_system.emit_core(event_type, &data).await
-                    .map_err(|e| format!("Failed to emit core event: {:?}", e))?;
+                event_system.emit_core(event_type, &data).await
+                    .map_err(|e| anyhow::anyhow!("Failed to emit core event: {:?}", e))?;
             }
             "plugin" => {
-                let plugin_name = event_json.get("plugin")
+                let target_plugin = event_json.get("plugin")
                     .and_then(|p| p.as_str())
-                    .unwrap_or(&self.config.name);
+                    .unwrap_or(plugin_name);
                 
-                self.event_system.emit_plugin(plugin_name, event_type, &data).await
-                    .map_err(|e| format!("Failed to emit plugin event: {:?}", e))?;
+                event_system.emit_plugin(target_plugin, event_type, &data).await
+                    .map_err(|e| anyhow::anyhow!("Failed to emit plugin event: {:?}", e))?;
             }
             _ => {
-                warn!("[{}] Unknown event category: {}", self.config.name, category);
-                self.event_system.emit_plugin(&self.config.name, event_type, &data).await
-                    .map_err(|e| format!("Failed to emit default plugin event: {:?}", e))?;
+                warn!("[{}] Unknown event category: {}", plugin_name, category);
+                event_system.emit_plugin(plugin_name, event_type, &data).await
+                    .map_err(|e| anyhow::anyhow!("Failed to emit default plugin event: {:?}", e))?;
             }
         }
 
-        debug!("[{}] Successfully triggered Horizon event: {}", self.config.name, event_type);
+        debug!("[{}] Successfully triggered Horizon event: {}", plugin_name, event_type);
         Ok(())
     }
 }
 
-/// Plugin gRPC générique configurable
+/// Plugin gRPC bidirectionnel
 pub struct GrpcBridgePlugin {
     config: GrpcBridgeConfig,
     event_sender: Option<mpsc::Sender<EventMessage>>,
+    worker: Option<Arc<GrpcWorker>>,
 }
 
 impl GrpcBridgePlugin {
     pub fn new(config: GrpcBridgeConfig) -> Self {
-        info!("[{}] Creating gRPC bridge to {}", config.name, config.grpc_endpoint);
+        info!("[{}] Creating bidirectional gRPC bridge to {}", config.name, config.grpc_endpoint);
         Self {
             config,
             event_sender: None,
+            worker: None,
         }
     }
 
@@ -326,7 +394,8 @@ impl GrpcBridgePlugin {
         let (sender, receiver) = mpsc::channel::<EventMessage>(self.config.event_buffer_size);
         self.event_sender = Some(sender.clone());
 
-        GrpcWorker::spawn(receiver, event_system, self.config.clone());
+        let worker = GrpcWorker::spawn(receiver, event_system, self.config.clone());
+        self.worker = Some(worker);
 
         sender
     }
@@ -461,23 +530,28 @@ impl SimplePlugin for GrpcBridgePlugin {
     }
 
     async fn register_handlers(&mut self, events: Arc<EventSystem>, _context: Arc<dyn ServerContext>) -> Result<(), PluginError> {
-        info!("[{}] Registering gRPC bridge event handlers...", self.config.name);
+        info!("[{}] Registering bidirectional gRPC bridge event handlers...", self.config.name);
         self.register_all_handlers(events).await?;
         Ok(())
     }
 
     async fn on_init(&mut self, context: Arc<dyn ServerContext>) -> Result<(), PluginError> {
-        context.log(LogLevel::Info, &format!("[{}] gRPC bridge initialization complete!", self.config.name));
+        context.log(LogLevel::Info, &format!("[{}] Bidirectional gRPC bridge initialization complete!", self.config.name));
         Ok(())
     }
 
     async fn on_shutdown(&mut self, context: Arc<dyn ServerContext>) -> Result<(), PluginError> {
-        context.log(LogLevel::Info, &format!("[{}] gRPC bridge shutdown complete!", self.config.name));
+        // Arrêt gracieux du worker
+        if let Some(worker) = &self.worker {
+            *worker.is_running.write().await = false;
+        }
+        
+        context.log(LogLevel::Info, &format!("[{}] Bidirectional gRPC bridge shutdown complete!", self.config.name));
         Ok(())
     }
 }
 
-/// Fonction utilitaire pour créer facilement un plugin gRPC
+/// Fonction utilitaire pour créer facilement un plugin gRPC bidirectionnel
 pub fn create_grpc_plugin(config: GrpcBridgeConfig) -> Box<dyn SimplePlugin> {
     Box::new(GrpcBridgePlugin::new(config))
 }

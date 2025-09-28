@@ -37,6 +37,14 @@ pub struct GrpcBridgeConfig {
     pub enable_keepalive: bool,
     /// Intervalle des pings en secondes
     pub keepalive_interval_seconds: u64,
+    /// Activer la reconnexion automatique
+    pub enable_auto_reconnect: bool,
+    /// Délai initial entre les tentatives de reconnexion en secondes
+    pub initial_reconnect_delay_seconds: u64,
+    /// Délai maximum entre les tentatives de reconnexion en secondes
+    pub max_reconnect_delay_seconds: u64,
+    /// Multiplicateur pour le backoff exponentiel
+    pub reconnect_backoff_multiplier: f32,
 }
 
 impl Default for GrpcBridgeConfig {
@@ -54,6 +62,10 @@ impl Default for GrpcBridgeConfig {
             worker_threads: 2,
             enable_keepalive: true,
             keepalive_interval_seconds: 10,
+            enable_auto_reconnect: true,
+            initial_reconnect_delay_seconds: 5,
+            max_reconnect_delay_seconds: 300, // 5 minutes max
+            reconnect_backoff_multiplier: 2.0,
         }
     }
 }
@@ -122,6 +134,15 @@ impl GrpcBridgeConfig {
         self.worker_threads = threads;
         self
     }
+
+    /// Builder pattern pour configurer la reconnexion automatique
+    pub fn with_auto_reconnect(mut self, enable: bool, initial_delay: u64, max_delay: u64, multiplier: f32) -> Self {
+        self.enable_auto_reconnect = enable;
+        self.initial_reconnect_delay_seconds = initial_delay;
+        self.max_reconnect_delay_seconds = max_delay;
+        self.reconnect_backoff_multiplier = multiplier;
+        self
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -134,7 +155,7 @@ struct EventMessage {
     timestamp: u64,
 }
 
-/// Worker gRPC bidirectionnel avec runtime Tokio
+/// Worker gRPC bidirectionnel avec runtime Tokio et reconnexion automatique
 struct GrpcWorker {
     is_running: Arc<RwLock<bool>>,
     event_system: Arc<EventSystem>,
@@ -165,59 +186,139 @@ impl GrpcWorker {
                 .expect("Failed to build Tokio runtime");
 
             rt.block_on(async move {
-                // Connexion au serveur gRPC
-                match GrpcBridge::connect(&config.grpc_endpoint).await {
-                    Ok(bridge) => {
-                        info!("[{}] gRPC bridge connected successfully", config.name);
-
-                        // Initialisation
-                        match bridge.initialize().await {
-                            Ok(msg) => info!("[{}] Bridge initialized: {}", config.name, msg),
-                            Err(e) => error!("[{}] Failed to initialize: {}", config.name, e),
-                        }
-
-                        // Démarrage du stream bidirectionnel
-                        let event_system_clone = Arc::clone(&worker_for_thread.event_system);
-                        let plugin_name = config.name.clone();
-                        
-                        let on_go_event = {
-                            let event_system = Arc::clone(&event_system_clone);
-                            let plugin_name = plugin_name.clone();
-                            move |event_data: Value| {
-                                // Spawn une tâche async au lieu de block_on
-                                let event_system = Arc::clone(&event_system);
-                                let plugin_name = plugin_name.clone();
-                                tokio::spawn(async move {
-                                    if let Err(e) = Self::process_go_event(&event_system, &plugin_name, event_data).await {
-                                        error!("[{}] Failed to process Go event: {}", plugin_name, e);
-                                    }
-                                });
-                            }
-                        };
-
-                        if let Err(e) = bridge.start_event_stream(on_go_event).await {
-                            error!("[{}] Failed to start event stream: {}", config.name, e);
-                            return;
-                        }
-
-                        // Tâches périodiques
-                        worker_for_thread.start_periodic_tasks(&bridge).await;
-
-                        // Boucle principale de traitement des événements Horizon -> Go
-                        while *is_running.read().await {
-                            if let Some(event_msg) = receiver.recv().await {
-                                if let Err(e) = worker_for_thread.forward_horizon_event(&bridge, event_msg).await {
-                                    error!("[{}] Failed to forward Horizon event: {}", config.name, e);
-                                }
-                            }
-                        }
-                    }
-                    Err(e) => error!("[{}] Failed to connect to gRPC server: {}", config.name, e),
-                }
+                worker_for_thread.run_with_reconnection(&mut receiver).await;
             });
         });
 
         worker
+    }
+
+    async fn run_with_reconnection(&self, receiver: &mut mpsc::Receiver<EventMessage>) {
+        let mut reconnect_delay = self.config.initial_reconnect_delay_seconds;
+        let mut pending_events = Vec::new();
+
+        while *self.is_running.read().await {
+            match self.connect_and_run(receiver, &mut pending_events).await {
+                Ok(_) => {
+                    // Connexion fermée proprement, reset du délai
+                    reconnect_delay = self.config.initial_reconnect_delay_seconds;
+                }
+                Err(e) => {
+                    error!("[{}] Connection error: {}", self.config.name, e);
+                    
+                    if !self.config.enable_auto_reconnect {
+                        error!("[{}] Auto-reconnect disabled, stopping worker", self.config.name);
+                        break;
+                    }
+
+                    warn!("[{}] Attempting to reconnect in {} seconds...", self.config.name, reconnect_delay);
+                    tokio::time::sleep(tokio::time::Duration::from_secs(reconnect_delay)).await;
+
+                    // Augmenter le délai avec backoff exponentiel
+                    reconnect_delay = ((reconnect_delay as f32 * self.config.reconnect_backoff_multiplier) as u64)
+                        .min(self.config.max_reconnect_delay_seconds);
+                }
+            }
+        }
+    }
+
+    async fn connect_and_run(
+        &self,
+        receiver: &mut mpsc::Receiver<EventMessage>,
+        pending_events: &mut Vec<EventMessage>,
+    ) -> anyhow::Result<()> {
+        // Tentative de connexion
+        let bridge = match GrpcBridge::connect(&self.config.grpc_endpoint).await {
+            Ok(bridge) => {
+                info!("[{}] gRPC bridge connected successfully", self.config.name);
+                bridge
+            }
+            Err(e) => {
+                return Err(anyhow::anyhow!("Failed to connect to gRPC server: {}", e));
+            }
+        };
+
+        // Initialisation
+        match bridge.initialize().await {
+            Ok(msg) => info!("[{}] Bridge initialized: {}", self.config.name, msg),
+            Err(e) => warn!("[{}] Failed to initialize: {}", self.config.name, e),
+        }
+
+        // Traitement des événements en attente
+        if !pending_events.is_empty() {
+            info!("[{}] Processing {} pending events", self.config.name, pending_events.len());
+            for event in pending_events.drain(..) {
+                if let Err(e) = self.forward_horizon_event(&bridge, event).await {
+                    error!("[{}] Failed to forward pending event: {}", self.config.name, e);
+                }
+            }
+        }
+
+        // Démarrage du stream bidirectionnel
+        let event_system_clone = Arc::clone(&self.event_system);
+        let plugin_name = self.config.name.clone();
+        
+        let on_go_event = {
+            let event_system = Arc::clone(&event_system_clone);
+            let plugin_name = plugin_name.clone();
+            move |event_data: Value| {
+                let event_system = Arc::clone(&event_system);
+                let plugin_name = plugin_name.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = Self::process_go_event(&event_system, &plugin_name, event_data).await {
+                        error!("[{}] Failed to process Go event: {}", plugin_name, e);
+                    }
+                });
+            }
+        };
+
+        if let Err(e) = bridge.start_event_stream(on_go_event).await {
+            return Err(anyhow::anyhow!("Failed to start event stream: {}", e));
+        }
+
+        // Tâches périodiques
+        self.start_periodic_tasks(&bridge).await;
+
+        // Boucle principale de traitement des événements Horizon -> Go
+        loop {
+            if !*self.is_running.read().await {
+                break;
+            }
+
+            // Vérifier la connexion avant de traiter les événements
+            if !bridge.is_connected().await {
+                warn!("[{}] Connection lost, will attempt to reconnect", self.config.name);
+                return Err(anyhow::anyhow!("Connection lost"));
+            }
+
+            // Timeout pour éviter de bloquer indéfiniment
+            match tokio::time::timeout(
+                tokio::time::Duration::from_secs(5),
+                receiver.recv()
+            ).await {
+                Ok(Some(event_msg)) => {
+                    match self.forward_horizon_event(&bridge, event_msg.clone()).await {
+                        Ok(_) => {},
+                        Err(e) => {
+                            error!("[{}] Failed to forward Horizon event: {}", self.config.name, e);
+                            // Sauvegarder l'événement pour le renvoyer après reconnexion
+                            pending_events.push(event_msg);
+                            return Err(anyhow::anyhow!("Failed to forward event: {}", e));
+                        }
+                    }
+                }
+                Ok(None) => {
+                    // Channel fermé
+                    break;
+                }
+                Err(_) => {
+                    // Timeout - continuer la boucle pour vérifier is_running
+                    continue;
+                }
+            }
+        }
+
+        Ok(())
     }
 
     async fn start_periodic_tasks(&self, bridge: &GrpcBridge) {
@@ -225,7 +326,7 @@ impl GrpcWorker {
         let bridge = Arc::new(bridge.clone());
         let is_running = Arc::clone(&self.is_running);
 
-        // Health check périodique
+        // Health check périodique avec détection de déconnexion
         if config.enable_health_check {
             let bridge_clone = Arc::clone(&bridge);
             let is_running_clone = Arc::clone(&is_running);
@@ -236,14 +337,27 @@ impl GrpcWorker {
                 let mut interval = tokio::time::interval(
                     tokio::time::Duration::from_secs(interval_secs)
                 );
+                let mut consecutive_failures = 0;
                 
                 loop {
                     interval.tick().await;
                     if !*is_running_clone.read().await { break; }
 
                     match bridge_clone.health_check().await {
-                        Ok(status) => debug!("[{}] Health check OK: {}", plugin_name, status),
-                        Err(e) => error!("[{}] Health check failed: {}", plugin_name, e),
+                        Ok(status) => {
+                            debug!("[{}] Health check OK: {}", plugin_name, status);
+                            consecutive_failures = 0;
+                        }
+                        Err(e) => {
+                            consecutive_failures += 1;
+                            error!("[{}] Health check failed (attempt {}): {}", plugin_name, consecutive_failures, e);
+                            
+                            // Après 3 échecs consécutifs, considérer la connexion comme perdue
+                            if consecutive_failures >= 3 {
+                                warn!("[{}] Multiple health check failures, connection may be lost", plugin_name);
+                                break;
+                            }
+                        }
                     }
                 }
             });
@@ -266,12 +380,13 @@ impl GrpcWorker {
                     if !*is_running_clone.read().await { break; }
 
                     if !bridge_clone.is_connected().await {
-                        warn!("[{}] Connection lost, attempting to reconnect...", plugin_name);
-                        continue;
+                        warn!("[{}] Connection lost during keepalive check", plugin_name);
+                        break;
                     }
 
                     if let Err(e) = bridge_clone.send_ping().await {
                         error!("[{}] Failed to send keepalive ping: {}", plugin_name, e);
+                        break;
                     } else {
                         debug!("[{}] Keepalive ping sent", plugin_name);
                     }

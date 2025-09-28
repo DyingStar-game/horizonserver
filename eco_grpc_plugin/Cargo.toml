@@ -1,5 +1,5 @@
 [package]
-name = "plugin_bridge_grpc_plugin"
+name = "plugin_eco_grpc_plugin"
 version = "0.1.0"
 edition = "2021"
 description = "Sample Horizon plugin demonstrating core functionality"

@@ -7,13 +7,13 @@ use horizon_event_system::{
 use std::sync::Arc;
 
 
-pub struct BridgeGrpcPlugin {
+pub struct PersistanceGrpcPlugin {
     inner: Box<dyn SimplePlugin>,
 }
 
-impl BridgeGrpcPlugin {
+impl PersistanceGrpcPlugin {
     pub fn new() -> Self {
-        let config = GrpcBridgeConfig::new("bridge_grpc_plugin", "http://172.22.0.1:50051")
+        let config = GrpcBridgeConfig::new("Persistance_grpc_plugin", "http://172.22.0.1:50051")
             .with_version("2.4.0")
             .with_health_check(true, 30)
             .with_client_events(vec![
@@ -46,7 +46,7 @@ impl BridgeGrpcPlugin {
 }
 
 #[async_trait::async_trait]
-impl SimplePlugin for BridgeGrpcPlugin {
+impl SimplePlugin for PersistanceGrpcPlugin {
     fn name(&self) -> &str {
         self.inner.name()
     }
@@ -78,4 +78,4 @@ impl SimplePlugin for BridgeGrpcPlugin {
     }
 }
 
-create_simple_plugin!(BridgeGrpcPlugin);
+create_simple_plugin!(PersistanceGrpcPlugin);

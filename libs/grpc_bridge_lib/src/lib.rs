@@ -1,0 +1,672 @@
+use async_trait::async_trait;
+use horizon_event_system::{
+    EventSystem, LogLevel, PluginError, ServerContext, SimplePlugin, EventError
+};
+use serde_json::{json, Value};
+use std::sync::Arc;
+use tokio::sync::{RwLock, mpsc};
+use tracing::{debug, error, info, warn};
+
+pub mod grpc;
+use crate::grpc::client::GrpcBridge;
+
+/// Configuration pour un plugin gRPC bidirectionnel
+#[derive(Debug, Clone)]
+pub struct GrpcBridgeConfig {
+    /// Nom du plugin
+    pub name: String,
+    /// Version du plugin
+    pub version: String,
+    /// Endpoint gRPC (ex: "http://172.22.0.1:50051")
+    pub grpc_endpoint: String,
+    /// Activer les health checks périodiques
+    pub enable_health_check: bool,
+    /// Intervalle des health checks en secondes
+    pub health_check_interval_seconds: u64,
+    /// Events client à écouter (namespace, event)
+    pub client_events: Vec<(String, String)>,
+    /// Events core à écouter
+    pub core_events: Vec<String>,
+    /// Events plugin à écouter (plugin_name, event)
+    pub plugin_events: Vec<(String, String)>,
+    /// Taille du buffer pour les events
+    pub event_buffer_size: usize,
+    /// Nombre de worker threads pour le runtime Tokio
+    pub worker_threads: usize,
+    /// Activer le ping automatique pour maintenir la connexion
+    pub enable_keepalive: bool,
+    /// Intervalle des pings en secondes
+    pub keepalive_interval_seconds: u64,
+    /// Activer la reconnexion automatique
+    pub enable_auto_reconnect: bool,
+    /// Délai initial entre les tentatives de reconnexion en secondes
+    pub initial_reconnect_delay_seconds: u64,
+    /// Délai maximum entre les tentatives de reconnexion en secondes
+    pub max_reconnect_delay_seconds: u64,
+    /// Multiplicateur pour le backoff exponentiel
+    pub reconnect_backoff_multiplier: f32,
+}
+
+impl Default for GrpcBridgeConfig {
+    fn default() -> Self {
+        Self {
+            name: "grpc_bridge_plugin".to_string(),
+            version: "1.0.0".to_string(),
+            grpc_endpoint: "http://localhost:50051".to_string(),
+            enable_health_check: true,
+            health_check_interval_seconds: 30,
+            client_events: vec![],
+            core_events: vec![],
+            plugin_events: vec![],
+            event_buffer_size: 100,
+            worker_threads: 2,
+            enable_keepalive: true,
+            keepalive_interval_seconds: 10,
+            enable_auto_reconnect: true,
+            initial_reconnect_delay_seconds: 5,
+            max_reconnect_delay_seconds: 300, // 5 minutes max
+            reconnect_backoff_multiplier: 2.0,
+        }
+    }
+}
+
+impl GrpcBridgeConfig {
+    pub fn new(name: impl Into<String>, grpc_endpoint: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            grpc_endpoint: grpc_endpoint.into(),
+            ..Default::default()
+        }
+    }
+
+    /// Builder pattern pour configurer les events client
+    pub fn with_client_events(mut self, events: Vec<(&str, &str)>) -> Self {
+        self.client_events = events.into_iter()
+            .map(|(ns, evt)| (ns.to_string(), evt.to_string()))
+            .collect();
+        self
+    }
+
+    /// Builder pattern pour configurer les events core
+    pub fn with_core_events(mut self, events: Vec<&str>) -> Self {
+        self.core_events = events.into_iter()
+            .map(|evt| evt.to_string())
+            .collect();
+        self
+    }
+
+    /// Builder pattern pour configurer les events plugin
+    pub fn with_plugin_events(mut self, events: Vec<(&str, &str)>) -> Self {
+        self.plugin_events = events.into_iter()
+            .map(|(plugin, evt)| (plugin.to_string(), evt.to_string()))
+            .collect();
+        self
+    }
+
+    /// Builder pattern pour configurer la version
+    pub fn with_version(mut self, version: impl Into<String>) -> Self {
+        self.version = version.into();
+        self
+    }
+
+    /// Builder pattern pour configurer les health checks
+    pub fn with_health_check(mut self, enable: bool, interval_seconds: u64) -> Self {
+        self.enable_health_check = enable;
+        self.health_check_interval_seconds = interval_seconds;
+        self
+    }
+
+    /// Builder pattern pour configurer le keepalive
+    pub fn with_keepalive(mut self, enable: bool, interval_seconds: u64) -> Self {
+        self.enable_keepalive = enable;
+        self.keepalive_interval_seconds = interval_seconds;
+        self
+    }
+
+    /// Builder pattern pour configurer la taille du buffer
+    pub fn with_buffer_size(mut self, size: usize) -> Self {
+        self.event_buffer_size = size;
+        self
+    }
+
+    /// Builder pattern pour configurer le nombre de worker threads
+    pub fn with_worker_threads(mut self, threads: usize) -> Self {
+        self.worker_threads = threads;
+        self
+    }
+
+    /// Builder pattern pour configurer la reconnexion automatique
+    pub fn with_auto_reconnect(mut self, enable: bool, initial_delay: u64, max_delay: u64, multiplier: f32) -> Self {
+        self.enable_auto_reconnect = enable;
+        self.initial_reconnect_delay_seconds = initial_delay;
+        self.max_reconnect_delay_seconds = max_delay;
+        self.reconnect_backoff_multiplier = multiplier;
+        self
+    }
+}
+
+#[derive(Debug, Clone)]
+struct EventMessage {
+    category: String,
+    namespace: Option<String>,
+    plugin: Option<String>,
+    event: String,
+    data: Value,
+    timestamp: u64,
+}
+
+/// Worker gRPC bidirectionnel avec runtime Tokio et reconnexion automatique
+struct GrpcWorker {
+    is_running: Arc<RwLock<bool>>,
+    event_system: Arc<EventSystem>,
+    config: GrpcBridgeConfig,
+}
+
+impl GrpcWorker {
+    fn spawn(
+        mut receiver: mpsc::Receiver<EventMessage>,
+        event_system: Arc<EventSystem>,
+        config: GrpcBridgeConfig,
+    ) -> Arc<Self> {
+        let is_running = Arc::new(RwLock::new(true));
+
+        let worker = Arc::new(Self {
+            is_running: Arc::clone(&is_running),
+            event_system,
+            config: config.clone(),
+        });
+
+        let worker_for_thread = Arc::clone(&worker);
+
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .worker_threads(config.worker_threads)
+                .build()
+                .expect("Failed to build Tokio runtime");
+
+            rt.block_on(async move {
+                worker_for_thread.run_with_reconnection(&mut receiver).await;
+            });
+        });
+
+        worker
+    }
+
+    async fn run_with_reconnection(&self, receiver: &mut mpsc::Receiver<EventMessage>) {
+        let mut reconnect_delay = self.config.initial_reconnect_delay_seconds;
+        let mut pending_events = Vec::new();
+
+        while *self.is_running.read().await {
+            match self.connect_and_run(receiver, &mut pending_events).await {
+                Ok(_) => {
+                    // Connexion fermée proprement, reset du délai
+                    reconnect_delay = self.config.initial_reconnect_delay_seconds;
+                }
+                Err(e) => {
+                    error!("[{}] Connection error: {}", self.config.name, e);
+                    
+                    if !self.config.enable_auto_reconnect {
+                        error!("[{}] Auto-reconnect disabled, stopping worker", self.config.name);
+                        break;
+                    }
+
+                    warn!("[{}] Attempting to reconnect in {} seconds...", self.config.name, reconnect_delay);
+                    tokio::time::sleep(tokio::time::Duration::from_secs(reconnect_delay)).await;
+
+                    // Augmenter le délai avec backoff exponentiel
+                    reconnect_delay = ((reconnect_delay as f32 * self.config.reconnect_backoff_multiplier) as u64)
+                        .min(self.config.max_reconnect_delay_seconds);
+                }
+            }
+        }
+    }
+
+    async fn connect_and_run(
+        &self,
+        receiver: &mut mpsc::Receiver<EventMessage>,
+        pending_events: &mut Vec<EventMessage>,
+    ) -> anyhow::Result<()> {
+        // Tentative de connexion
+        let bridge = match GrpcBridge::connect(&self.config.grpc_endpoint).await {
+            Ok(bridge) => {
+                info!("[{}] gRPC bridge connected successfully", self.config.name);
+                bridge
+            }
+            Err(e) => {
+                return Err(anyhow::anyhow!("Failed to connect to gRPC server: {}", e));
+            }
+        };
+
+        // Initialisation
+        match bridge.initialize().await {
+            Ok(msg) => info!("[{}] Bridge initialized: {}", self.config.name, msg),
+            Err(e) => warn!("[{}] Failed to initialize: {}", self.config.name, e),
+        }
+
+        // Traitement des événements en attente
+        if !pending_events.is_empty() {
+            info!("[{}] Processing {} pending events", self.config.name, pending_events.len());
+            for event in pending_events.drain(..) {
+                if let Err(e) = self.forward_horizon_event(&bridge, event).await {
+                    error!("[{}] Failed to forward pending event: {}", self.config.name, e);
+                }
+            }
+        }
+
+        // Démarrage du stream bidirectionnel
+        let event_system_clone = Arc::clone(&self.event_system);
+        let plugin_name = self.config.name.clone();
+        
+        let on_go_event = {
+            let event_system = Arc::clone(&event_system_clone);
+            let plugin_name = plugin_name.clone();
+            move |event_data: Value| {
+                let event_system = Arc::clone(&event_system);
+                let plugin_name = plugin_name.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = Self::process_go_event(&event_system, &plugin_name, event_data).await {
+                        error!("[{}] Failed to process Go event: {}", plugin_name, e);
+                    }
+                });
+            }
+        };
+
+        if let Err(e) = bridge.start_event_stream(on_go_event).await {
+            return Err(anyhow::anyhow!("Failed to start event stream: {}", e));
+        }
+
+        // Tâches périodiques
+        self.start_periodic_tasks(&bridge).await;
+
+        // Boucle principale de traitement des événements Horizon -> Go
+        loop {
+            if !*self.is_running.read().await {
+                break;
+            }
+
+            // Vérifier la connexion avant de traiter les événements
+            if !bridge.is_connected().await {
+                warn!("[{}] Connection lost, will attempt to reconnect", self.config.name);
+                return Err(anyhow::anyhow!("Connection lost"));
+            }
+
+            // Timeout pour éviter de bloquer indéfiniment
+            match tokio::time::timeout(
+                tokio::time::Duration::from_secs(5),
+                receiver.recv()
+            ).await {
+                Ok(Some(event_msg)) => {
+                    match self.forward_horizon_event(&bridge, event_msg.clone()).await {
+                        Ok(_) => {},
+                        Err(e) => {
+                            error!("[{}] Failed to forward Horizon event: {}", self.config.name, e);
+                            // Sauvegarder l'événement pour le renvoyer après reconnexion
+                            pending_events.push(event_msg);
+                            return Err(anyhow::anyhow!("Failed to forward event: {}", e));
+                        }
+                    }
+                }
+                Ok(None) => {
+                    // Channel fermé
+                    break;
+                }
+                Err(_) => {
+                    // Timeout - continuer la boucle pour vérifier is_running
+                    continue;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn start_periodic_tasks(&self, bridge: &GrpcBridge) {
+        let config = &self.config;
+        let bridge = Arc::new(bridge.clone());
+        let is_running = Arc::clone(&self.is_running);
+
+        // Health check périodique avec détection de déconnexion
+        if config.enable_health_check {
+            let bridge_clone = Arc::clone(&bridge);
+            let is_running_clone = Arc::clone(&is_running);
+            let plugin_name = config.name.clone();
+            let interval_secs = config.health_check_interval_seconds;
+            
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(
+                    tokio::time::Duration::from_secs(interval_secs)
+                );
+                let mut consecutive_failures = 0;
+                
+                loop {
+                    interval.tick().await;
+                    if !*is_running_clone.read().await { break; }
+
+                    match bridge_clone.health_check().await {
+                        Ok(status) => {
+                            debug!("[{}] Health check OK: {}", plugin_name, status);
+                            consecutive_failures = 0;
+                        }
+                        Err(e) => {
+                            consecutive_failures += 1;
+                            error!("[{}] Health check failed (attempt {}): {}", plugin_name, consecutive_failures, e);
+                            
+                            // Après 3 échecs consécutifs, considérer la connexion comme perdue
+                            if consecutive_failures >= 3 {
+                                warn!("[{}] Multiple health check failures, connection may be lost", plugin_name);
+                                break;
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        // Keepalive périodique
+        if config.enable_keepalive {
+            let bridge_clone = Arc::clone(&bridge);
+            let is_running_clone = Arc::clone(&is_running);
+            let plugin_name = config.name.clone();
+            let interval_secs = config.keepalive_interval_seconds;
+            
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(
+                    tokio::time::Duration::from_secs(interval_secs)
+                );
+                
+                loop {
+                    interval.tick().await;
+                    if !*is_running_clone.read().await { break; }
+
+                    if !bridge_clone.is_connected().await {
+                        warn!("[{}] Connection lost during keepalive check", plugin_name);
+                        break;
+                    }
+
+                    if let Err(e) = bridge_clone.send_ping().await {
+                        error!("[{}] Failed to send keepalive ping: {}", plugin_name, e);
+                        break;
+                    } else {
+                        debug!("[{}] Keepalive ping sent", plugin_name);
+                    }
+                }
+            });
+        }
+    }
+
+    async fn forward_horizon_event(&self, bridge: &GrpcBridge, event_msg: EventMessage) -> anyhow::Result<()> {
+        let mut event_data = json!({
+            "category": event_msg.category,
+            "event": event_msg.event,
+            "data": event_msg.data,
+            "timestamp": event_msg.timestamp,
+        });
+        
+        if let Some(ns) = event_msg.namespace {
+            event_data["namespace"] = json!(ns);
+        }
+        if let Some(plugin) = event_msg.plugin {
+            event_data["plugin"] = json!(plugin);
+        }
+
+        bridge.forward_event(event_data).await?;
+        debug!("[{}] Horizon event forwarded to Go", self.config.name);
+        
+        Ok(())
+    }
+
+    async fn process_go_event(
+        event_system: &Arc<EventSystem>,
+        plugin_name: &str,
+        event_data: Value,
+    ) -> anyhow::Result<()> {
+        debug!("[{}] Processing Go event: {}", plugin_name, event_data);
+        
+        if let Some(events_to_trigger) = event_data.get("trigger_events") {
+            if let Some(events_array) = events_to_trigger.as_array() {
+                for event_json in events_array {
+                    if let Err(e) = Self::trigger_horizon_event(event_system, plugin_name, event_json).await {
+                        error!("[{}] Failed to trigger Horizon event: {}", plugin_name, e);
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn trigger_horizon_event(
+        event_system: &Arc<EventSystem>,
+        plugin_name: &str,
+        event_json: &Value,
+    ) -> anyhow::Result<()> {
+        let event_type = event_json.get("type")
+            .and_then(|t| t.as_str())
+            .ok_or_else(|| anyhow::anyhow!("Missing 'type' field in event"))?;
+
+        let category = event_json.get("category")
+            .and_then(|c| c.as_str())
+            .unwrap_or("plugin");
+
+        let data = event_json.get("data")
+            .cloned()
+            .unwrap_or(json!({}));
+
+        info!("[{}] Triggering Horizon event: {} (category: {})", plugin_name, event_type, category);
+
+        match category {
+            "client" => {
+                if let Some(namespace) = event_json.get("namespace").and_then(|n| n.as_str()) {
+                    event_system.emit_client(namespace, event_type, &data).await
+                        .map_err(|e| anyhow::anyhow!("Failed to emit client event: {:?}", e))?;
+                } else {
+                    warn!("[{}] Client event missing namespace: {}", plugin_name, event_type);
+                }
+            }
+            "core" => {
+                event_system.emit_core(event_type, &data).await
+                    .map_err(|e| anyhow::anyhow!("Failed to emit core event: {:?}", e))?;
+            }
+            "plugin" => {
+                let target_plugin = event_json.get("plugin")
+                    .and_then(|p| p.as_str())
+                    .unwrap_or(plugin_name);
+                
+                event_system.emit_plugin(target_plugin, event_type, &data).await
+                    .map_err(|e| anyhow::anyhow!("Failed to emit plugin event: {:?}", e))?;
+            }
+            _ => {
+                warn!("[{}] Unknown event category: {}", plugin_name, category);
+                event_system.emit_plugin(plugin_name, event_type, &data).await
+                    .map_err(|e| anyhow::anyhow!("Failed to emit default plugin event: {:?}", e))?;
+            }
+        }
+
+        debug!("[{}] Successfully triggered Horizon event: {}", plugin_name, event_type);
+        Ok(())
+    }
+}
+
+/// Plugin gRPC bidirectionnel
+pub struct GrpcBridgePlugin {
+    config: GrpcBridgeConfig,
+    event_sender: Option<mpsc::Sender<EventMessage>>,
+    worker: Option<Arc<GrpcWorker>>,
+}
+
+impl GrpcBridgePlugin {
+    pub fn new(config: GrpcBridgeConfig) -> Self {
+        info!("[{}] Creating bidirectional gRPC bridge to {}", config.name, config.grpc_endpoint);
+        Self {
+            config,
+            event_sender: None,
+            worker: None,
+        }
+    }
+
+    fn start_event_processor(&mut self, event_system: Arc<EventSystem>) -> mpsc::Sender<EventMessage> {
+        let (sender, receiver) = mpsc::channel::<EventMessage>(self.config.event_buffer_size);
+        self.event_sender = Some(sender.clone());
+
+        let worker = GrpcWorker::spawn(receiver, event_system, self.config.clone());
+        self.worker = Some(worker);
+
+        sender
+    }
+
+    async fn register_client_handlers(
+        &self,
+        events: Arc<EventSystem>,
+        sender: mpsc::Sender<EventMessage>,
+    ) -> Result<(), PluginError> {
+        for (namespace, event_type) in &self.config.client_events {
+            let sender = sender.clone();
+            let ns = namespace.clone();
+            let et = event_type.clone();
+
+            let handler = move |data: Value| -> Result<(), EventError> {
+                let event_msg = EventMessage {
+                    category: "client".to_string(),
+                    namespace: Some(ns.clone()),
+                    plugin: None,
+                    event: et.clone(),
+                    data,
+                    timestamp: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs(),
+                };
+                sender.try_send(event_msg).map_err(|e| {
+                    error!("Failed to send event: {}", e);
+                    EventError::HandlerExecution(format!("Failed to send event: {}", e))
+                })?;
+                Ok(())
+            };
+
+            events.on_client(namespace, event_type, handler).await.map_err(|e| {
+                PluginError::ExecutionError(format!("Failed to register client handler {}.{}: {:?}", namespace, event_type, e))
+            })?;
+        }
+
+        Ok(())
+    }
+
+    async fn register_core_handlers(
+        &self,
+        events: Arc<EventSystem>,
+        sender: mpsc::Sender<EventMessage>,
+    ) -> Result<(), PluginError> {
+        for event_type in &self.config.core_events {
+            let sender = sender.clone();
+            let et = event_type.clone();
+            
+            let handler = move |data: Value| -> Result<(), EventError> {
+                let event_msg = EventMessage {
+                    category: "core".to_string(),
+                    namespace: None,
+                    plugin: None,
+                    event: et.clone(),
+                    data,
+                    timestamp: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs(),
+                };
+                sender.try_send(event_msg).map_err(|e| {
+                    error!("Failed to send event: {}", e);
+                    EventError::HandlerExecution(format!("Failed to send event: {}", e))
+                })?;
+                Ok(())
+            };
+            
+            events.on_core(event_type, handler).await.map_err(|e| {
+                PluginError::ExecutionError(format!("Failed to register core handler {}: {:?}", event_type, e))
+            })?;
+        }
+
+        Ok(())
+    }
+
+    async fn register_plugin_handlers(
+        &self,
+        events: Arc<EventSystem>,
+        sender: mpsc::Sender<EventMessage>,
+    ) -> Result<(), PluginError> {
+        for (plugin_name, event_type) in &self.config.plugin_events {
+            let sender = sender.clone();
+            let pn = plugin_name.clone();
+            let et = event_type.clone();
+            
+            let handler = move |data: Value| -> Result<(), EventError> {
+                let event_msg = EventMessage {
+                    category: "plugin".to_string(),
+                    namespace: None,
+                    plugin: Some(pn.clone()),
+                    event: et.clone(),
+                    data,
+                    timestamp: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs(),
+                };
+                sender.try_send(event_msg).map_err(|e| {
+                    error!("Failed to send event: {}", e);
+                    EventError::HandlerExecution(format!("Failed to send event: {}", e))
+                })?;
+                Ok(())
+            };
+
+            events.on_plugin(plugin_name, event_type, handler).await.map_err(|e| {
+                PluginError::ExecutionError(format!("Failed to register plugin handler {}.{}: {:?}", plugin_name, event_type, e))
+            })?;
+        }
+
+        Ok(())
+    }
+
+    async fn register_all_handlers(&mut self, events: Arc<EventSystem>) -> Result<(), PluginError> {
+        let sender = self.start_event_processor(events.clone());
+        self.register_client_handlers(events.clone(), sender.clone()).await?;
+        self.register_core_handlers(events.clone(), sender.clone()).await?;
+        self.register_plugin_handlers(events.clone(), sender.clone()).await?;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl SimplePlugin for GrpcBridgePlugin {
+    fn name(&self) -> &str { 
+        &self.config.name 
+    }
+    
+    fn version(&self) -> &str { 
+        &self.config.version 
+    }
+
+    async fn register_handlers(&mut self, events: Arc<EventSystem>, _context: Arc<dyn ServerContext>) -> Result<(), PluginError> {
+        info!("[{}] Registering bidirectional gRPC bridge event handlers...", self.config.name);
+        self.register_all_handlers(events).await?;
+        Ok(())
+    }
+
+    async fn on_init(&mut self, context: Arc<dyn ServerContext>) -> Result<(), PluginError> {
+        context.log(LogLevel::Info, &format!("[{}] Bidirectional gRPC bridge initialization complete!", self.config.name));
+        Ok(())
+    }
+
+    async fn on_shutdown(&mut self, context: Arc<dyn ServerContext>) -> Result<(), PluginError> {
+        // Arrêt gracieux du worker
+        if let Some(worker) = &self.worker {
+            *worker.is_running.write().await = false;
+        }
+        
+        context.log(LogLevel::Info, &format!("[{}] Bidirectional gRPC bridge shutdown complete!", self.config.name));
+        Ok(())
+    }
+}
+
+/// Fonction utilitaire pour créer facilement un plugin gRPC bidirectionnel
+pub fn create_grpc_plugin(config: GrpcBridgeConfig) -> Box<dyn SimplePlugin> {
+    Box::new(GrpcBridgePlugin::new(config))
+}

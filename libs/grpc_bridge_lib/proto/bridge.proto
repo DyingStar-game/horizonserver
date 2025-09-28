@@ -1,0 +1,61 @@
+syntax = "proto3";
+
+package bridge;
+
+// Service principal pour le bridge Horizon <-> Go avec support bidirectionnel
+service BridgeService {
+    // Initialise le bridge côté Go
+    rpc Initialize(InitRequest) returns (InitResponse);
+    
+    // Stream bidirectionnel pour les événements
+    rpc EventStream(stream EventMessage) returns (stream EventMessage);
+    
+    // Health check
+    rpc HealthCheck(HealthRequest) returns (HealthResponse);
+    
+    // Notification de fermeture
+    rpc Shutdown(ShutdownRequest) returns (ShutdownResponse);
+}
+
+// Messages d'initialisation
+message InitRequest {
+    string plugin_name = 1;
+    string plugin_version = 2;
+}
+
+message InitResponse {
+    string message = 1;
+    string server_version = 2;
+}
+
+// Message unifié pour les événements bidirectionnels
+message EventMessage {
+    string message_id = 1;      // ID unique pour tracking
+    EventType type = 2;         // Type de message
+    string event_json = 3;      // Données de l'événement en JSON
+    int64 timestamp = 4;        // Timestamp Unix
+    string source = 5;          // "rust" ou "go"
+}
+
+enum EventType {
+    EVENT_TYPE_UNSPECIFIED = 0;
+    HORIZON_EVENT = 1;          // Événement depuis Horizon vers Go
+    GO_EVENT = 2;              // Événement depuis Go vers Horizon  
+    PING = 3;                  // Keep-alive/heartbeat
+    PONG = 4;                  // Réponse au ping
+    ERROR = 5;                 // Message d'erreur
+}
+
+// Messages de health check
+message HealthRequest {}
+
+message HealthResponse {
+    string status = 1; // "healthy", "unhealthy", etc.
+}
+
+// Messages de fermeture
+message ShutdownRequest {}
+
+message ShutdownResponse {
+    string message = 1;
+}

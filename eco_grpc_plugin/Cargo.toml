@@ -1,0 +1,18 @@
+[package]
+name = "plugin_eco_grpc_plugin"
+version = "0.1.0"
+edition = "2021"
+description = "Sample Horizon plugin demonstrating core functionality"
+authors = ["Your Name <your.email@example.com>"]
+license = "MIT"
+repository = "https://github.com/Far-Beyond-Dev/your-plugin"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# Event system (CLI will update this to horizon_event_system)
+horizon_event_system = { path = "../Horizon/crates/horizon_event_system" }
+grpc_bridge_lib = { path = "../libs/grpc_bridge_lib" }
+async-trait = "0.1"
+futures = { version = "0.3" }

@@ -6,15 +6,15 @@ bind_address = "0.0.0.0:7040"
 max_connections = 10000
 connection_timeout = 120
 use_reuse_port = true
-tick_interval_ms = 16  # 60 FPS
+tick_interval_ms = 33  # 60 FPS
 
 [server.region]
-min_x = -5000.0
-max_x = 5000.0
-min_y = -5000.0
-max_y = 5000.0
-min_z = -500.0
-max_z = 500.0
+min_x = -1000000000.0
+max_x = 1000000000.0
+min_y = -1000000000.0
+max_y = 1000000000.0
+min_z = -1000000000.0
+max_z = 1000000000.0
 
 [server.security]
 enable_rate_limiting = true

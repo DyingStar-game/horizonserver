@@ -166,6 +166,11 @@ impl SimplePlugin for DsPlayerAuthenticationPlugin {
                     .build()
                     .expect("failed to build temp runtime");
 
+                if event.data.login == "I am an idiot !" {
+                    return;
+                }
+
+
                 rt.block_on(async move {
                     if let Err(e) = events_system
                         .emit_plugin("propsplugin", "new_player", &serde_json::json!({

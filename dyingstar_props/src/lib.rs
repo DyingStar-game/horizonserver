@@ -194,7 +194,7 @@ impl SimplePlugin for DyingstarPropsPlugin {
                     // create sandbox planet and store it
                     let sandbox = Testplanet::new(
                         "Sandbox".to_string(),
-                        Vec3::new(98785.898, 13339.8, -10386.2), // Vec3::new(15067000000.0, 0.0, 0.0),
+                        Vec3::new(19000098785.898, 13339.8, -10386.2), // Vec3::new(15067000000.0, 0.0, 0.0),
                         Vec3::new(0.0, 0.0, 0.0),
                     );
                     planets.write().await.insert(sandbox.uuid.clone(), sandbox.clone());
@@ -207,7 +207,7 @@ impl SimplePlugin for DyingstarPropsPlugin {
 
                 let player = props::player::Player::new(
                     event.username.clone(),
-                    Vec3::new(86785.898, 13339.8, -10386.2), // Vec3::new(15067000000.0, 12000.0, z),
+                    Vec3::new(18999588785.9, 13339.8, (-10386.2 + z)), // Vec3::new(15067000000.0, 12000.0, z),
                     Vec3::new(0.0, 0.0, 0.0),
                     event.internal_uuid.clone(),
                     event.uuid.clone(),
@@ -240,11 +240,11 @@ impl SimplePlugin for DyingstarPropsPlugin {
                 
 
                 // send all props to the new client
-                let props = serde_json::json!({
-                    "type": "player_props",
-                    "planets": planets.read().await.values().cloned().collect::<Vec<Testplanet>>(),
-                    "players": players.read().await.values().cloned().collect::<Vec<Player>>(),
-                });
+                // let props = serde_json::json!({
+                //     "type": "player_props",
+                //     "planets": planets.read().await.values().cloned().collect::<Vec<Testplanet>>(),
+                //     "players": players.read().await.values().cloned().collect::<Vec<Player>>(),
+                // });
                 // TODO
                 // if let Err(e) = events.send_to_player(&event.player_id, &props).await {
                 //     error!("Failed to send props to new player: {}", e);

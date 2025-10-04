@@ -283,6 +283,47 @@ impl SimplePlugin for DsGameServerPlugin {
         .await
         .map_err(|e| PluginError::ExecutionError(e.to_string()))?;
 
+
+        let websocket2 = Arc::clone(&self.websocket);
+        events.on_client_with_connection(
+            "actions",
+            "action_pressed",
+            move |wrapper: ClientEventWrapper<serde_json::Value>, _connection| {
+                info!("📝 LoggerPlugin: 🦘 Client action from player {}", wrapper.player_id);
+ 
+                let websocket = Arc::clone(&websocket2);
+
+                std::thread::spawn(move || {
+                    // Parse the movement data
+                    let message = json!({
+                        "namespace": "player",
+                        "event": "action",
+                        "player_id": wrapper.player_id.to_string(),
+                        "data": wrapper.data.clone(),
+                    });
+                    debug!("[message][to][gamesever]: {:?}", message);
+                    match websocket.lock() {
+                        Ok(mut guard) => {
+                            if let Some(w) = guard.as_mut() {
+                                if let Err(e) = w.send_message(&OwnedMessage::Text(message.to_string())) {
+                                    error!("Failed to send websocket message: {}", e);
+                                }
+                            } else {
+                                error!("No websocket writer available to send action");
+                            }
+                        }
+                        Err(e) => {
+                            error!("Failed to lock websocket mutex: {}", e);
+                        }
+                    }
+                });
+ 
+                Ok(())
+            },
+        )
+        .await
+        .map_err(|e| PluginError::ExecutionError(e.to_string()))?;
+
         events.on_core("player_disconnected", move |event: PlayerDisconnectedEvent| {
             debug!("[disconnected]: {:?}", event);
             println!("Player disconnected.");

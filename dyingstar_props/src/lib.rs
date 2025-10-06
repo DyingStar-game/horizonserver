@@ -272,6 +272,34 @@ impl SimplePlugin for DyingstarPropsPlugin {
                 .expect("failed to spawn gorc loop thread");
         }
 
+        // Spawn the GORC tick loop in a dedicated OS thread with its own current-thread Tokio runtime.
+        // This avoids requiring the gorc tick future to be `Send`.
+        {
+            // take ownership of gorc_system
+            let mut gorc_loop = gorc_system;
+            std::thread::Builder::new()
+                .name("dyingstar-gorc-loop".into())
+                .spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("failed to build gorc loop runtime");
+
+                    rt.block_on(async move {
+                        loop {
+                            // Process GORC replication
+                            if let Err(e) = gorc_loop.tick().await {
+                                error!("GORC tick error: {}", e);
+                            }
+
+                            // Run at ~60Hz
+                            tokio::time::sleep(std::time::Duration::from_millis(16)).await;
+                        }
+                    });
+                })
+                .expect("failed to spawn gorc loop thread");
+        }
+
         info!("🔧 DyingstarPropsPlugin: ✅ All handlers registered successfully!");
         Ok(())
     }

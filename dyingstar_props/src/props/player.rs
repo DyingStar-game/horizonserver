@@ -11,6 +11,7 @@ pub struct Player {
     pub uuid: PlayerId,
     pub equipment: Vec<String>,
     pub health: f32,
+    pub hs_player_id: PlayerId,
 }
 
 impl Player {
@@ -22,6 +23,7 @@ impl Player {
             uuid,
             equipment: Vec::new(),
             health: 100.0,
+            hs_player_id,
         }
     }
 }

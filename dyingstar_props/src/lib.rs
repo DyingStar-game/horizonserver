@@ -291,6 +291,10 @@ impl SimplePlugin for DyingstarPropsPlugin {
                             if let Err(e) = gorc_loop.tick().await {
                                 error!("GORC tick error: {}", e);
                             }
+                            
+                            // print result of gorc_loop.get_stats()
+                            // let stats = gorc_loop.get_stats().await;
+                            // println!("GORC stats: {:?}", stats);
 
                             // Run at ~60Hz
                             tokio::time::sleep(std::time::Duration::from_millis(16)).await;

@@ -1,9 +1,5 @@
-import { WebSocketServer, WebSocket } from "ws";
-import {
-  aMessageDataPlayerLoginWs,
-  aMessagePlayerLoginWs,
-  aMessageWs,
-} from "../builder/builders";
+import { WebSocket } from "ws";
+import { aPlayerLoginWs } from "../builder/builders";
 const { expect } = require("chai");
 
 let ws: WebSocket;
@@ -123,14 +119,7 @@ describe("WebSocket server 127.0.0.1:7040", function () {
     ws.on("open", function open() {
       ws.send(
         JSON.stringify(
-          aMessagePlayerLoginWs()
-            .withData(
-              aMessageDataPlayerLoginWs()
-                .withLogin("ddurieux")
-                .withPassword("pass")
-                .build()
-            )
-            .build()
+          aPlayerLoginWs().withLogin("ddurieux").withPassword("pass").build()
         )
       );
     });

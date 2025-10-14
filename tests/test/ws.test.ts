@@ -1,17 +1,23 @@
 import { WebSocket } from "ws";
-import { aPlayerLoginWs } from "../builder/builders";
+import { aMovePlayerEventWs, aPlayerLoginWs } from "../builder/builders";
 import {
   gorcPlayerCh0WsSchema,
   GorcPlayerCh0WsType,
 } from "../builder/model/gorc/gorcPlayer.ws.model";
 import { expect } from "chai";
 import {
+  delay,
   simulatePlayers,
   waitForMessage,
   waitForPlayerId,
   WS_ADDRESS,
 } from "./helper";
-import { GorcObjectType } from "../builder/model/gorc/gorcBase.ws.model";
+import {
+  GorcEventEnum,
+  GorcObjectTypeEnum,
+  GorcZoneEnterWsType,
+} from "../builder/model/gorc/gorcBase.ws.model";
+import { GorcEventCh0WsType } from "../builder/model/gorc/gorcEvent.ws.model";
 
 describe("WebSocket GORC Player Channel 0", function () {
   this.timeout(5000);
@@ -54,13 +60,16 @@ describe("WebSocket GORC Player Channel 0", function () {
     );
 
     // Step 1 : wait for player identification
-    const playerId = await waitForPlayerId(ws, expectedPlayerName);
-    console.log(`✅ Player (${expectedPlayerName}) identified :`, playerId);
+    const player = await waitForPlayerId(ws, expectedPlayerName);
+    console.log(
+      `✅ Player (${expectedPlayerName}) identified :`,
+      player.playerId
+    );
 
     // Étape 2 : wait for a message for this player on channel 0
     const message = await waitForMessage<GorcPlayerCh0WsType>(
       ws,
-      (m) => m.player_id === playerId && m.channel === 0
+      (m) => m.player_id === player.playerId && m.channel === 0
     );
 
     const result = gorcPlayerCh0WsSchema.safeParse(message);
@@ -70,9 +79,9 @@ describe("WebSocket GORC Player Channel 0", function () {
 
   it("should handle multiple simultaneous players", async () => {
     const players = [
-      { login: "ddurieux", password: "pass" },
-      { login: "Hugo Lizoir", password: "pass" },
-      { login: "YnotnA", password: "pass" },
+      aPlayerLoginWs().build().data,
+      aPlayerLoginWs().build().data,
+      aPlayerLoginWs().build().data,
     ];
 
     // Simulate players
@@ -96,13 +105,15 @@ describe("WebSocket GORC Player Channel 0", function () {
   // TODO: Change test
   it("close first connection, others players disconnect message", async () => {
     const players = [
-      { login: "ddurieux", password: "pass" },
-      { login: "Hugo Lizoir", password: "pass" },
-      { login: "YnotnA", password: "pass" },
+      aPlayerLoginWs().build().data,
+      aPlayerLoginWs().build().data,
+      aPlayerLoginWs().build().data,
     ];
 
     // Simulate players
-    const playerConnections = await simulatePlayers(players);
+    const playerConnections = await simulatePlayers<GorcZoneEnterWsType>(
+      players
+    );
 
     // Close first player connection
     playerConnections[0].ws.close();
@@ -114,7 +125,10 @@ describe("WebSocket GORC Player Channel 0", function () {
     // TODO : Change test for check player_disconnect message
     const messages = await Promise.all(
       otherPlayerConnections.map((conn) =>
-        conn.getMessages((m) => m.object_type !== GorcObjectType.PLAYER, 1000)
+        conn.getMessages(
+          (m) => m.object_type !== GorcObjectTypeEnum.PLAYER,
+          1000
+        )
       )
     );
 
@@ -129,5 +143,56 @@ describe("WebSocket GORC Player Channel 0", function () {
 
     // Close all remaining connections
     playerConnections.slice(1).forEach((conn) => conn.ws.close());
+  });
+
+  it("Player 1 go very far away, second player will not receive message", async () => {
+    const players = [
+      aPlayerLoginWs().build().data,
+      aPlayerLoginWs().build().data,
+    ];
+
+    // Simulate players
+    const playerConnections = await simulatePlayers<GorcEventCh0WsType>(
+      players
+    );
+
+    const playerOne = playerConnections[0];
+
+    const message = await playerOne.getMessage(
+      (m) => m.player_id === playerOne.playerId && m.channel === 0
+    );
+
+    console.log({ playerId: playerOne.playerId, objectId: playerOne.objectId });
+    console.log(message);
+
+    playerOne.ws.send(
+      JSON.stringify(
+        aMovePlayerEventWs()
+          .withObjectId(`GorcObjectId(${message.object_id})`)
+          .withPlayerId(playerOne.playerId)
+          .withNewPosition({ x: 2, y: 1, z: 1 })
+          .build()
+      )
+    );
+
+    await delay(300);
+
+    playerOne.ws.send(
+      JSON.stringify(
+        aMovePlayerEventWs()
+          .withObjectId(`GorcObjectId(${message.object_id})`)
+          .withPlayerId(playerOne.playerId)
+          .withNewPosition({ x: 3, y: 1, z: 1 })
+          .build()
+      )
+    );
+
+    const messages = await Promise.all(
+      playerConnections.map((conn) => conn.getOtherMessages(), 3000)
+    );
+
+    console.log(messages);
+
+    playerConnections.forEach((conn) => conn.ws.close());
   });
 });

@@ -9,7 +9,7 @@ export function waitForPlayerId(
   ws: WebSocket,
   playerName: string,
   timeoutMs = 4000
-): Promise<string> {
+): Promise<{ playerId: string; objectId: string }> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       ws.off("message", onMessage);
@@ -19,10 +19,11 @@ export function waitForPlayerId(
     const onMessage = (raw: any) => {
       try {
         const msg = JSON.parse(raw.toString());
-        if (msg.zone_data?.name === playerName) {
+        // console.log(msg);
+        if (msg.zone_data?.name === playerName && msg.channel === 2) {
           clearTimeout(timer);
           ws.off("message", onMessage);
-          resolve(msg.player_id);
+          resolve({ playerId: msg.player_id, objectId: msg.object_id });
         }
       } catch (err) {
         console.warn("Invalid JSON message:", raw.toString());
@@ -88,9 +89,14 @@ export function waitForMessages<
 type PlayerConnectionType<T = GorcBaseWsType> = {
   ws: WebSocket;
   playerId: string;
+  objectId: string;
   login: string;
   getMessage: (filter: (msg: T) => boolean, timeoutMs?: number) => Promise<T>;
   getMessages: (
+    filter?: (msg: T) => boolean,
+    timeoutMs?: number
+  ) => Promise<T[]>;
+  getOtherMessages: (
     filter?: (msg: T) => boolean,
     timeoutMs?: number
   ) => Promise<T[]>;
@@ -131,26 +137,39 @@ export async function simulatePlayers<
   );
 
   // Creation of reusable connection objects
-  playerIds.forEach((playerId, i) => {
+  playerIds.forEach((player, i) => {
     const ws = webs[i];
     connections.push({
       ws,
-      playerId,
+      playerId: player.playerId,
+      objectId: player.objectId,
       login: players[i].login,
       getMessage: (filter, timeoutMs = 4000) =>
         waitForMessage<T>(
           ws,
-          (msg) => msg.player_id === playerId && filter(msg),
+          (msg) => msg.player_id === player.playerId && filter(msg),
           timeoutMs
         ),
       getMessages: (filter, timeoutMs = 4000) =>
         waitForMessages<T>(
           ws,
-          (msg) => msg.player_id === playerId && (!filter || filter(msg)),
+          (msg) =>
+            msg.player_id === player.playerId && (!filter || filter(msg)),
+          timeoutMs
+        ),
+      getOtherMessages: (filter, timeoutMs = 4000) =>
+        waitForMessages<T>(
+          ws,
+          (msg) =>
+            msg.player_id !== player.playerId && (!filter || filter(msg)),
           timeoutMs
         ),
     });
   });
 
   return connections;
+}
+
+export function delay(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }

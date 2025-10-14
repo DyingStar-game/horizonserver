@@ -1,7 +1,7 @@
 import { z } from "zod";
-import { coordinate3dSchema, gorcBaseWsSchema } from "./gorcBase.ws.model";
+import { coordinate3dSchema, gorcZoneEnterWsSchema } from "./gorcBase.ws.model";
 
-export const gorcPlayerCh0WsSchema = gorcBaseWsSchema.extend({
+export const gorcPlayerCh0WsSchema = gorcZoneEnterWsSchema.extend({
   zone_data: z.object({
     name: z.string().optional(),
     health: z.number(),
@@ -35,7 +35,7 @@ export type GorcPlayerCh0WsType = z.infer<typeof gorcPlayerCh0WsSchema>;
 //     }
 // }
 
-export const gorcPlayerCh1WsSchema = gorcBaseWsSchema.extend({
+export const gorcPlayerCh1WsSchema = gorcZoneEnterWsSchema.extend({
   zone_data: z.object({
     level: z.number(),
     movement_state: z.string(),
@@ -57,7 +57,7 @@ export type GorcPlayerCh1WsType = z.infer<typeof gorcPlayerCh1WsSchema>;
 //     }
 // }
 
-export const gorcPlayerCh2WsSchema = gorcBaseWsSchema.extend({
+export const gorcPlayerCh2WsSchema = gorcZoneEnterWsSchema.extend({
   zone_data: z.object({
     chat_bubble: z.string().nullable(),
     name: z.string(),

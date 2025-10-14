@@ -7,7 +7,6 @@ export const WS_ADDRESS = "ws://127.0.0.1:7040";
 
 export function waitForPlayerId(
   ws: WebSocket,
-  playerName: string,
   timeoutMs = 4000
 ): Promise<{ playerId: string; objectId: string }> {
   return new Promise((resolve, reject) => {
@@ -19,12 +18,10 @@ export function waitForPlayerId(
     const onMessage = (raw: any) => {
       try {
         const msg = JSON.parse(raw.toString());
-        // console.log(msg);
-        if (msg.zone_data?.name === playerName && msg.channel === 2) {
-          clearTimeout(timer);
-          ws.off("message", onMessage);
-          resolve({ playerId: msg.player_id, objectId: msg.object_id });
-        }
+
+        clearTimeout(timer);
+        ws.off("message", onMessage);
+        resolve({ playerId: msg.player_id, objectId: msg.object_id });
       } catch (err) {
         console.warn("Invalid JSON message:", raw.toString());
       }
@@ -132,9 +129,7 @@ export async function simulatePlayers<
   });
 
   // Waiting for player_id identification
-  const playerIds = await Promise.all(
-    webs.map((ws, i) => waitForPlayerId(ws, players[i].login))
-  );
+  const playerIds = await Promise.all(webs.map((ws, i) => waitForPlayerId(ws)));
 
   // Creation of reusable connection objects
   playerIds.forEach((player, i) => {

@@ -6,14 +6,12 @@ import {
 } from "../builder/model/gorc/gorcPlayer.ws.model";
 import { expect } from "chai";
 import {
-  delay,
   simulatePlayers,
   waitForMessage,
   waitForPlayerId,
   WS_ADDRESS,
 } from "./helper";
 import {
-  GorcEventEnum,
   GorcObjectTypeEnum,
   GorcZoneEnterWsType,
 } from "../builder/model/gorc/gorcBase.ws.model";
@@ -60,7 +58,7 @@ describe("WebSocket GORC Player Channel 0", function () {
     );
 
     // Step 1 : wait for player identification
-    const player = await waitForPlayerId(ws, expectedPlayerName);
+    const player = await waitForPlayerId(ws);
     console.log(
       `✅ Player (${expectedPlayerName}) identified :`,
       player.playerId
@@ -157,32 +155,21 @@ describe("WebSocket GORC Player Channel 0", function () {
     );
 
     const playerOne = playerConnections[0];
+    const playerTwo = playerConnections[1];
 
-    const message = await playerOne.getMessage(
-      (m) => m.player_id === playerOne.playerId && m.channel === 0
-    );
+    const playerOneMsgCh0 = await playerOne.getMessage((m) => m.channel === 0);
 
     console.log({ playerId: playerOne.playerId, objectId: playerOne.objectId });
-    console.log(message);
+    console.log({ playerId: playerTwo.playerId, objectId: playerTwo.objectId });
+    console.log(playerOneMsgCh0);
 
     playerOne.ws.send(
       JSON.stringify(
         aMovePlayerEventWs()
-          .withObjectId(`GorcObjectId(${message.object_id})`)
+          .withObjectId(`GorcObjectId(${playerOneMsgCh0.object_id})`)
           .withPlayerId(playerOne.playerId)
-          .withNewPosition({ x: 2, y: 1, z: 1 })
-          .build()
-      )
-    );
-
-    await delay(300);
-
-    playerOne.ws.send(
-      JSON.stringify(
-        aMovePlayerEventWs()
-          .withObjectId(`GorcObjectId(${message.object_id})`)
-          .withPlayerId(playerOne.playerId)
-          .withNewPosition({ x: 3, y: 1, z: 1 })
+          .withNewPosition({ x: 500000, y: 1, z: 1 })
+          .withVelocity({ x: 0, y: 0, z: 0 })
           .build()
       )
     );

@@ -55,4 +55,12 @@ export class MovePlayerEventWsBuilder extends BuilderBase<
     } as GorcEventCh0WsType["data"];
     return this;
   }
+
+  withVelocity(velocity: Coordinate3dType): this {
+    this.data.data = {
+      ...this.data.data,
+      velocity: velocity,
+    } as GorcEventCh0WsType["data"];
+    return this;
+  }
 }

@@ -11,15 +11,15 @@ describe("FakerGeneratorFactory", () => {
   });
 
   it("build a ws player message login with ddurieux login", () => {
-    console.log(aPlayerLoginWs().build()); // full random
-    console.log(aPlayerLoginWs().build()); // another random
-    console.log(
-      aPlayerLoginWs().withLogin("plop").withPassword("Plip").build()
-    );
+    // console.log(aPlayerLoginWs().build()); // full random
+    // console.log(aPlayerLoginWs().build()); // another random
+    // console.log(
+    //   aPlayerLoginWs().withLogin("plop").withPassword("Plip").build()
+    // );
 
     const playerLoginWs = aPlayerLoginWs().withLogin("ddurieux").build();
 
-    console.log(playerLoginWs);
+    // console.log(playerLoginWs);
 
     expect(playerLoginWs.data.login).to.equal("ddurieux");
   });

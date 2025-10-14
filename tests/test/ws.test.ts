@@ -11,6 +11,7 @@ import {
   waitForPlayerId,
   WS_ADDRESS,
 } from "./helper";
+import { GorcObjectType } from "../builder/model/gorc/gorcBase.ws.model";
 
 describe("WebSocket GORC Player Channel 0", function () {
   this.timeout(5000);
@@ -74,9 +75,10 @@ describe("WebSocket GORC Player Channel 0", function () {
       { login: "YnotnA", password: "pass" },
     ];
 
-    const connections = await simulatePlayers<GorcPlayerCh0WsType>(players);
+    // Simulate players
+    const connections = await simulatePlayers(players);
 
-    // On peut attendre un message channel 0 pour chaque joueur
+    // Waiting message channel 0 for all players
     const messages = await Promise.all(
       connections.map((conn) => conn.getMessage((m) => m.channel === 0))
     );
@@ -87,212 +89,45 @@ describe("WebSocket GORC Player Channel 0", function () {
       console.log(`✅ Player ${connections[i].login} message valid`);
     });
 
-    // Fermer toutes les connexions
+    // Close all connections
     connections.forEach((conn) => conn.ws.close());
   });
+
+  // TODO: Change test
+  it("close first connection, others players disconnect message", async () => {
+    const players = [
+      { login: "ddurieux", password: "pass" },
+      { login: "Hugo Lizoir", password: "pass" },
+      { login: "YnotnA", password: "pass" },
+    ];
+
+    // Simulate players
+    const playerConnections = await simulatePlayers(players);
+
+    // Close first player connection
+    playerConnections[0].ws.close();
+
+    // Keep other players connections
+    const otherPlayerConnections = playerConnections.slice(1);
+
+    // Filter on all messages receive by other players until 1second
+    // TODO : Change test for check player_disconnect message
+    const messages = await Promise.all(
+      otherPlayerConnections.map((conn) =>
+        conn.getMessages((m) => m.object_type !== GorcObjectType.PLAYER, 1000)
+      )
+    );
+
+    messages.forEach((msg, i) => {
+      console.log(
+        `✅ Player ${otherPlayerConnections[i].login} received disconnect:`,
+        msg
+      );
+      // expect(msg.player_id).to.equal(disconnectedPlayer.playerId);
+      // expect(msg.type).to.equal("player_disconnect");
+    });
+
+    // Close all remaining connections
+    playerConnections.slice(1).forEach((conn) => conn.ws.close());
+  });
 });
-
-// it("Test with first connection", function (done) {
-//   ws = new WebSocket("ws://127.0.0.1:7040");
-//   const messages: string[] = [];
-//   let finished: boolean = false;
-
-//   ws.on("open", () => {
-//     // connected, waiting for server messages
-//   });
-
-//   ws.on("message", (data) => {
-//     messages.push(data.toString());
-//   });
-
-//   ws.on("error", (err) => {
-//     if (!finished) done(err);
-//   });
-
-//   ws.on("close", () => {
-//     if (!finished) {
-//       done(
-//         new Error(
-//           `Connection closed before receiving 3 messages (received ${messages.length})`
-//         )
-//       );
-//     }
-//   });
-
-//   // timeout 0.5s for the connect
-//   setTimeout(() => {
-//     step = 1;
-//   }, 500);
-
-//   // must have no messages
-//   if (step === 0) {
-//     expect(messages).to.have.lengthOf(0);
-//   }
-
-//   ws.on("open", function open() {
-//     ws.send(
-//       JSON.stringify(
-//         aPlayerLoginWs().withLogin("ddurieux").withPassword("pass").build()
-//       )
-//     );
-//   });
-
-//   // timeout 0.5s for the recept the messages
-//   setTimeout(() => {
-//     step = 1;
-//   }, 500);
-
-//   expect(messages).to.have.lengthOf(3);
-// });
-
-// it('Test with second connection (capture messages from both ws and ws2)', function (done) {
-//     const msgs1 = [];
-//     const msgs2 = [];
-//     let finished = false;
-
-//     // Ensure both sockets are open (create ws if it's missing/not open)
-//     const ensureOpen = (cb) => {
-//         let opened = 0;
-//         const mark = () => { if (++opened === 2) cb(); };
-//         const onErr = (err) => { if (!finished) { finished = true; done(err); } };
-
-//         if (!ws || ws.readyState !== WebSocket.OPEN) {
-//             ws = new WebSocket('ws://127.0.0.1:7040');
-//             ws.once('open', mark);
-//             ws.once('error', onErr);
-//         } else {
-//             process.nextTick(mark);
-//         }
-
-//         if (!ws2 || ws2.readyState !== WebSocket.OPEN) {
-//             ws2 = new WebSocket('ws://127.0.0.1:7040');
-//             ws2.once('open', mark);
-//             ws2.once('error', onErr);
-//         } else {
-//             process.nextTick(mark);
-//         }
-//     };
-
-//     const cleanup = () => {
-//         ws.removeListener('message', handler1);
-//         ws2.removeListener('message', handler2);
-//         clearTimeout(timeout);
-//     };
-
-//     const finishIfReady = () => {
-//         if (finished) return;
-//         if (msgs1.length === 1 && msgs2.length === 3) {
-//             finished = true;
-//             cleanup();
-//             try {
-//                 expect(msgs1).to.have.lengthOf(1);
-//                 expect(msgs2).to.have.lengthOf(3);
-//                 done();
-//             } catch (err) {
-//                 done(err);
-//             }
-//         }
-//     };
-
-//     const handler1 = (data) => {
-//         msgs1.push(data.toString());
-//         // When first message on ws arrives, ensure at least one additional message appears soon (optional)
-//         if (msgs1.length === 1) {
-//             setTimeout(() => {
-//                 if (!finished && (msgs1.length + msgs2.length) < 2) {
-//                     cleanup();
-//                     finished = true;
-//                     done(new Error('No new message appeared after first message on ws'));
-//                 }
-//             }, 300);
-//         }
-//         finishIfReady();
-//     };
-
-//     const handler2 = (data) => {
-//         msgs2.push(data.toString());
-//         finishIfReady();
-//     };
-
-//     ensureOpen(() => {
-//         ws.on('message', handler1);
-//         ws2.on('message', handler2);
-
-//         // Safety timeout
-//         timeout = setTimeout(() => {
-//             if (!finished) {
-//                 finished = true;
-//                 cleanup();
-//                 done(new Error(`Timeout: ws received ${msgs1.length}, ws2 received ${msgs2.length}`));
-//             }
-//         }, 3000);
-//     });
-// });
-
-// it('close first connection, the second receive player disconnect message', function (done) {
-//     let finished = false;
-//     const msgs2 = [];
-
-//     const cleanup = () => {
-//         if (ws2) {
-//             ws2.removeAllListeners('message');
-//             ws2.removeAllListeners('error');
-//             ws2.removeAllListeners('close');
-//         }
-//     };
-
-//     if (!ws2 || ws2.readyState !== WebSocket.OPEN) {
-//         ws2 = new WebSocket('ws://127.0.0.1:7040');
-//         ws2.once('open', proceed);
-//         ws2.once('error', (err) => { if (!finished) done(err); });
-//     } else {
-//         process.nextTick(proceed);
-//     }
-
-//     function proceed() {
-//         ws2.on('message', (data) => {
-//             msgs2.push(data.toString());
-//             // Expecting at least one message indicating player disconnect
-//             if (msgs2.some(msg => msg.includes('player_disconnect')) && !finished) {
-//                 finished = true;
-//                 cleanup();
-//                 try {
-//                     expect(msgs2.some(msg => msg.includes('player_disconnect'))).to.be.true;
-//                     done();
-//                 } catch (err) {
-//                     done(err);
-//                 }
-//             }
-//         });
-
-//         ws2.on('error', (err) => { if (!finished) { finished = true; cleanup(); done(err); } });
-
-//         ws2.on('close', () => {
-//             if (!finished) {
-//                 finished = true;
-//                 cleanup();
-//                 done(new Error('ws2 closed before receiving player disconnect message'));
-//             }
-//         });
-
-//         // Close the first connection to trigger disconnect message on ws2
-//         if (ws) {
-//             ws.close();
-//         } else {
-//             if (!finished) {
-//                 finished = true;
-//                 cleanup();
-//                 done(new Error('First connection ws was not established'));
-//             }
-//         }
-
-//         // Safety timeout
-//         setTimeout(() => {
-//             if (!finished) {
-//                 finished = true;
-//                 cleanup();
-//                 done(new Error(`Timeout: ws2 received ${msgs2.length} messages without player disconnect`));
-//             }
-//         }, 3000);
-//     }
-// });

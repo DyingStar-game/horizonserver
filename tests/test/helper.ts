@@ -1,6 +1,7 @@
 import { WebSocket } from "ws";
 import { aPlayerLoginWs } from "../builder/builders";
 import { PlayerLogingWsType } from "../builder/model/playerLogin.ws.model";
+import { GorcBaseWsType } from "../builder/model/gorc/gorcBase.ws.model";
 
 export const WS_ADDRESS = "ws://127.0.0.1:7040";
 
@@ -25,37 +26,72 @@ export function waitForPlayerId(
   });
 }
 
-export function waitForMessage<T = any>(
-  ws: WebSocket,
-  filter: (msg: any) => boolean,
-  timeoutMs = 4000
-): Promise<T> {
+export function waitForMessage<
+  T extends { player_id: string } = GorcBaseWsType
+>(ws: WebSocket, filter: (msg: T) => boolean, timeoutMs = 4000): Promise<T> {
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(
-      () => reject(new Error("Timeout waiting for message")),
-      timeoutMs
-    );
+    const timer = setTimeout(() => {
+      ws.off("message", onMessage);
+      reject(new Error("Timeout waiting for message"));
+    }, timeoutMs);
 
-    ws.on("message", (raw) => {
-      const msg = JSON.parse(raw.toString());
-      if (filter(msg)) {
-        clearTimeout(timer);
-        resolve(msg);
+    const onMessage = (raw: any) => {
+      try {
+        const msg: T = JSON.parse(raw.toString());
+        if (filter(msg)) {
+          clearTimeout(timer);
+          ws.off("message", onMessage);
+          resolve(msg);
+        }
+      } catch (err) {
+        console.warn("Invalid JSON message:", raw.toString());
       }
-    });
+    };
+
+    ws.on("message", onMessage);
   });
 }
 
-type PlayerConnectionType<T = any> = {
+export function waitForMessages<
+  T extends { player_id: string } = GorcBaseWsType
+>(ws: WebSocket, filter?: (msg: T) => boolean, timeoutMs = 4000): Promise<T[]> {
+  return new Promise((resolve) => {
+    const allMsg: T[] = [];
+
+    const timer = setTimeout(() => {
+      ws.off("message", onMessage);
+      resolve(allMsg);
+    }, timeoutMs);
+
+    const onMessage = (raw: any) => {
+      try {
+        const msg = JSON.parse(raw.toString());
+        if (!filter || filter(msg)) {
+          allMsg.push(msg);
+        }
+      } catch (err) {
+        console.warn("Invalid JSON message:", raw.toString());
+      }
+    };
+
+    ws.on("message", onMessage);
+  });
+}
+
+type PlayerConnectionType<T = GorcBaseWsType> = {
   ws: WebSocket;
   playerId: string;
   login: string;
-  getMessage: (filter: (msg: any) => boolean, timeoutMs?: number) => Promise<T>;
+  getMessage: (filter: (msg: T) => boolean, timeoutMs?: number) => Promise<T>;
+  getMessages: (
+    filter?: (msg: T) => boolean,
+    timeoutMs?: number
+  ) => Promise<T[]>;
 };
 
-export async function simulatePlayers<T = any>(
-  players: PlayerLogingWsType["data"][]
-): Promise<PlayerConnectionType<T>[]> {
+export async function simulatePlayers<
+  T extends { player_id: string } = GorcBaseWsType
+>(players: PlayerLogingWsType["data"][]): Promise<PlayerConnectionType<T>[]> {
   const connections: PlayerConnectionType<T>[] = [];
 
   // Create and open WebSocket
@@ -82,7 +118,7 @@ export async function simulatePlayers<T = any>(
     );
   });
 
-  // Waiting for player_id identification via channel 2
+  // Waiting for player_id identification
   const playerIds = await Promise.all(
     webs.map((ws, i) => waitForPlayerId(ws, players[i].login))
   );
@@ -98,6 +134,12 @@ export async function simulatePlayers<T = any>(
         waitForMessage<T>(
           ws,
           (msg) => msg.player_id === playerId && filter(msg),
+          timeoutMs
+        ),
+      getMessages: (filter, timeoutMs = 4000) =>
+        waitForMessages<T>(
+          ws,
+          (msg) => msg.player_id === playerId && (!filter || filter(msg)),
           timeoutMs
         ),
     });

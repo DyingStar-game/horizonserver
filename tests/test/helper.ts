@@ -11,18 +11,25 @@ export function waitForPlayerId(
   timeoutMs = 4000
 ): Promise<string> {
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(
-      () => reject(new Error("Timeout waiting for player_id")),
-      timeoutMs
-    );
+    const timer = setTimeout(() => {
+      ws.off("message", onMessage);
+      reject(new Error("Timeout waiting for player_id"));
+    }, timeoutMs);
 
-    ws.on("message", (raw) => {
-      const msg = JSON.parse(raw.toString());
-      if (msg.channel === 2 && msg.zone_data?.name === playerName) {
-        clearTimeout(timer);
-        resolve(msg.player_id);
+    const onMessage = (raw: any) => {
+      try {
+        const msg = JSON.parse(raw.toString());
+        if (msg.zone_data?.name === playerName) {
+          clearTimeout(timer);
+          ws.off("message", onMessage);
+          resolve(msg.player_id);
+        }
+      } catch (err) {
+        console.warn("Invalid JSON message:", raw.toString());
       }
-    });
+    };
+
+    ws.on("message", onMessage);
   });
 }
 

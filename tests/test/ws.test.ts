@@ -22,7 +22,7 @@ describe("WebSocket GORC Player Channel 0", function () {
     ws = new WebSocket(WS_ADDRESS);
 
     ws.on("open", () => {
-      console.log("✅ WebSocket connecté");
+      console.log("✅ WebSocket connected");
       done();
     });
 
@@ -53,7 +53,7 @@ describe("WebSocket GORC Player Channel 0", function () {
       )
     );
 
-    // Step 1 : wait for player identification via channel 2
+    // Step 1 : wait for player identification
     const playerId = await waitForPlayerId(ws, expectedPlayerName);
     console.log(`✅ Player (${expectedPlayerName}) identified :`, playerId);
 

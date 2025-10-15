@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use horizon_event_system::{
-    EventSystem, LogLevel, PluginError, ServerContext, SimplePlugin, EventError
+    EventSystem, LogLevel, PluginError, ServerContext, SimplePlugin, EventError, PlayerId,ClientConnectionRef
 };
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -525,7 +525,7 @@ impl GrpcBridgePlugin {
             let ns = namespace.clone();
             let et = event_type.clone();
 
-            let handler = move |data: Value| -> Result<(), EventError> {
+            let handler = move |data: Value, player_id: PlayerId, connection: ClientConnectionRef| -> Result<(), EventError> {
                 let event_msg = EventMessage {
                     category: "client".to_string(),
                     namespace: Some(ns.clone()),

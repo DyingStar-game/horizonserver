@@ -1,0 +1,22 @@
+{
+"channels": [
+{
+	"zone": 0,
+	"distance": 50.0,
+	"frequency": 30.0,
+	"properties": ["opened","position","rotation","uuid"]
+},
+{
+	"zone": 1,
+	"distance": 200.0,
+	"frequency": 15.0,
+	"properties": ["led_state"]
+},
+{
+	"zone": 3,
+	"distance": 600.0,
+	"frequency": 2.0,
+	"properties": ["qrcode","symbol","parcel_number","weight"]
+}
+]
+}

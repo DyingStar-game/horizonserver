@@ -1,0 +1,10 @@
+{
+"channels": [
+{
+	"zone": 2,
+	"distance": 1000.0,
+	"frequency": 1.0,
+	"properties": ["name","position","rotation","uuid"]
+}
+]
+}

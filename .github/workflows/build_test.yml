@@ -33,7 +33,7 @@ jobs:
       - name: 🧰 Build Horizon
         run: |
           cd Horizon
-          RUSTFLAGS="" cargo build --release --package horizon
+          RUSTFLAGS="" cargo build --bin horizon --release
 
       - name: prepare tests
         run: |

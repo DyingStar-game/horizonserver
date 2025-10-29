@@ -36,6 +36,17 @@ jobs:
         run: |
           cd Horizon
           RUSTFLAGS="" cargo build --bin horizon --release
+      
+      - name: Update config of Horizon
+        run: |
+          sed -i 's/8081/7040/g' Horizon/config.toml
+          sed -i 's/tick_interval_ms = 50/tick_interval_ms = 16/g' Horizon/config.toml
+          sed -i 's/min_x = -1000.0/max_x = -10000000.0/g' Horizon/config.toml
+          sed -i 's/max_x = 1000.0/max_x = 10000000.0/g' Horizon/config.toml
+          sed -i 's/min_y = -1000.0/min_y = -10000000.0/g' Horizon/config.toml
+          sed -i 's/max_y = 1000.0/max_y = 10000000.0/g' Horizon/config.toml
+          sed -i 's/min_z = -100.0/min_z = -10000000.0/g' Horizon/config.toml
+          sed -i 's/max_z = 100.0/max_z = 10000000.0/g' Horizon/config
 
       - name: prepare tests
         run: |
@@ -44,7 +55,6 @@ jobs:
 
       - name: Start Horizon Server for Tests
         run: |
-          cp .docker/production_config.toml Horizon/config.toml
           cd Horizon
           nohup ./target/release/horizon &
           sleep 5

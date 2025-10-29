@@ -20,6 +20,9 @@ jobs:
 
       - name: 🦀 Setup Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - name: rust cache
+        uses: Swatinem/rust-cache@v2
       
       - name: 📦 Install
         run: scripts/install.sh
@@ -39,6 +42,7 @@ jobs:
 
       - name: Start Horizon Server for Tests
         run: |
+          cp .docker/production_config.toml Horizon/config.toml
           nohup scripts/run.sh &
           sleep 5
 

@@ -152,7 +152,7 @@ impl SimplePlugin for DsPlayerAuthenticationPlugin {
     //     // let db_pool = self.database_pool.clone();
     //     // TODO: Register your event handlers here
         let events_system = events.clone();
-        events.on_client("player", "init", move |event: PlayerInit, player_id: PlayerId, _connection: ClientConnectionRef| {
+        events.on_client("player", "init", move |event: PlayerInit, player_id: PlayerId, connection: ClientConnectionRef| {
             println!("plugin auth: Receive player init message {:?}", event);
 
             let events_system = events_system.clone();
@@ -172,6 +172,20 @@ impl SimplePlugin for DsPlayerAuthenticationPlugin {
 
 
                 rt.block_on(async move {
+                    // send to client its uuid
+                    println!("plugin auth: Emitting init_registered for player_id {:?}", player_id);
+
+                    let payload = serde_json::to_vec(&serde_json::json!({
+                        "player_id": player_id,
+                        "message": "init_ack"
+                    })).expect("failed to serialize payload");
+
+                    if let Err(e) = connection.respond(&payload).await
+                    {
+                        println!("plugin auth: FAILED to send init_ack to client: {}", e);
+                        tracing::error!("Failed to send init_ack to client: {}", e);
+                    }
+
                     if let Err(e) = events_system
                         .emit_plugin("gorcplugin", "new_player", &serde_json::json!({
                             "username": event.data.login,

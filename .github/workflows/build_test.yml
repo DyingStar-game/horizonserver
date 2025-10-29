@@ -31,8 +31,6 @@ jobs:
         run: |
           cd Horizon
           RUSTFLAGS="" cargo build --release --package horizon
-          cp -r plugins ../.docker
-          cp target/release/horizon ../.docker
 
       - name: prepare tests
         run: |
@@ -41,7 +39,6 @@ jobs:
 
       - name: Start Horizon Server for Tests
         run: |
-          cd scripts
           nohup scripts/run.sh &
           sleep 5
 

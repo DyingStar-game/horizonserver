@@ -23,6 +23,8 @@ jobs:
 
       - name: rust cache
         uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: "true"
       
       - name: 📦 Install
         run: scripts/install.sh
@@ -43,7 +45,8 @@ jobs:
       - name: Start Horizon Server for Tests
         run: |
           cp .docker/production_config.toml Horizon/config.toml
-          nohup scripts/run.sh &
+          cd Horizon
+          nohup ./target/release/horizon &
           sleep 5
 
       - name: 🧪 Run Tests

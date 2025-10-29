@@ -46,7 +46,7 @@ jobs:
           sed -i 's/min_y = -1000.0/min_y = -10000000.0/g' Horizon/config.toml
           sed -i 's/max_y = 1000.0/max_y = 10000000.0/g' Horizon/config.toml
           sed -i 's/min_z = -100.0/min_z = -10000000.0/g' Horizon/config.toml
-          sed -i 's/max_z = 100.0/max_z = 10000000.0/g' Horizon/config
+          sed -i 's/max_z = 100.0/max_z = 10000000.0/g' Horizon/config.toml
 
       - name: prepare tests
         run: |

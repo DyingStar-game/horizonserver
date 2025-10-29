@@ -9,5 +9,5 @@ if [ ! -d "Horizon" ]; then
     git clone https://github.com/Far-Beyond-Dev/Horizon.git
 fi
 
-cd Horizon
-git checkout $VERSION
+# cd Horizon
+# git checkout $VERSION

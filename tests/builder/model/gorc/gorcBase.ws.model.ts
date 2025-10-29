@@ -7,6 +7,7 @@ export enum GorcObjectTypeEnum {
 export enum GorcTypeEnum {
   EVENT = "gorc_event",
   ZONE_ENTER = "gorc_zone_enter",
+  ZONE_EXIT = "gorc_zone_exit",
 }
 
 export enum GorcEventEnum {
@@ -92,3 +93,20 @@ export type Coordinate3dType = z.infer<typeof coordinate3dSchema>;
 //         "name: ""
 //     }
 // }
+
+export const gorcZoneExitWsSchema = gorcBaseWsSchema.extend({
+  type: z.literal(GorcTypeEnum.ZONE_EXIT),
+  object_type: z.enum(GorcObjectTypeEnum),
+});
+
+export type GorcZoneExitWsType = z.infer<typeof gorcZoneExitWsSchema>;
+
+// {
+//   channel: 0,
+//   object_id: '8757f634-34df-4644-b9f3-3825db703068',
+//   object_type: 'GorcPlayer',
+//   player_id: '650a264c-5d44-48a8-9c39-52818ab98ebb',
+//   timestamp: 1761752904,
+//   type: 'gorc_zone_exit'
+// },
+

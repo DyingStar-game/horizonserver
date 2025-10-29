@@ -7,7 +7,7 @@ export const WS_ADDRESS = "ws://127.0.0.1:7040";
 
 export function waitForPlayerId(
   ws: WebSocket,
-  timeoutMs = 1000
+  timeoutMs = 2000
 ): Promise<{ playerId: string; message: string }> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
@@ -33,7 +33,7 @@ export function waitForPlayerId(
 
 export function waitForMessage<
   T extends { player_id: string } = GorcBaseWsType
->(ws: WebSocket, filter: (msg: T) => boolean, timeoutMs = 1000): Promise<T> {
+>(ws: WebSocket, filter: (msg: T) => boolean, timeoutMs = 2000): Promise<T> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       ws.off("message", onMessage);
@@ -59,7 +59,7 @@ export function waitForMessage<
 
 export function waitForMessages<
   T extends { player_id: string } = GorcBaseWsType
->(ws: WebSocket, filter?: (msg: T) => boolean, timeoutMs = 1000): Promise<T[]> {
+>(ws: WebSocket, filter?: (msg: T) => boolean, timeoutMs = 2000): Promise<T[]> {
   return new Promise((resolve) => {
     const allMsg: T[] = [];
 
@@ -139,20 +139,20 @@ export async function simulatePlayers<
       playerId: player.playerId,
       message: player.message,
       login: players[i].login,
-      getMessage: (filter, timeoutMs = 1000) =>
+      getMessage: (filter, timeoutMs = 2000) =>
         waitForMessage<T>(
           ws,
           (msg) => msg.player_id === player.playerId && filter(msg),
           timeoutMs
         ),
-      getMessages: (filter, timeoutMs = 1000) =>
+      getMessages: (filter, timeoutMs = 2000) =>
         waitForMessages<T>(
           ws,
           (msg) =>
             msg.player_id === player.playerId && (!filter || filter(msg)),
           timeoutMs
         ),
-      getOtherMessages: (filter, timeoutMs = 1000) =>
+      getOtherMessages: (filter, timeoutMs = 2000) =>
         waitForMessages<T>(
           ws,
           (msg) =>

@@ -1,0 +1,51 @@
+name: Build & test
+
+on: 
+  push:
+    branches:
+      - '*'
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 📖 Checkout Code
+        uses: actions/checkout@v4
+
+      - name: 🎛️ Set environment
+        run: |
+          echo "GITHUB_SHA_SHORT=$(echo $GITHUB_SHA | cut -c1-7)" >> $GITHUB_ENV
+
+      - name: 🦀 Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+      
+      - name: 📦 Install
+        run: scripts/install.sh
+
+      - name: 🛠️ Build Plugins
+        run: scripts/build.sh
+      
+      - name: 🧰 Build Horizon
+        run: |
+          cd Horizon
+          RUSTFLAGS="" cargo build --release --package horizon
+          cp -r plugins ../.docker
+          cp target/release/horizon ../.docker
+
+      - name: prepare tests
+        run: |
+          cd tests
+          npm install
+
+      - name: Start Horizon Server for Tests
+        run: |
+          cd scripts
+          nohup scripts/run.sh &
+          sleep 5
+
+      - name: 🧪 Run Tests
+        run: |
+          cd tests
+          npm test

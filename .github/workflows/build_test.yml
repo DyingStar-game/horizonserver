@@ -41,7 +41,7 @@ jobs:
         run: |
           sed -i 's/8081/7040/g' Horizon/config.toml
           sed -i 's/tick_interval_ms = 50/tick_interval_ms = 16/g' Horizon/config.toml
-          sed -i 's/min_x = -1000.0/max_x = -10000000.0/g' Horizon/config.toml
+          sed -i 's/min_x = -1000.0/min_x = -10000000.0/g' Horizon/config.toml
           sed -i 's/max_x = 1000.0/max_x = 10000000.0/g' Horizon/config.toml
           sed -i 's/min_y = -1000.0/min_y = -10000000.0/g' Horizon/config.toml
           sed -i 's/max_y = 1000.0/max_y = 10000000.0/g' Horizon/config.toml

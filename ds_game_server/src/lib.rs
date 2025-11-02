@@ -94,7 +94,7 @@ impl SimplePlugin for DsGameServerPlugin {
 
         /// initialize websocket connection to game server
         events.on_plugin("gameserverplugin", "init_server", move |event: serde_json::Value| {
-            println!("🔧 DsGameServerPlugin: Initializing server with event {:?}", event);
+            info!("🔧 DsGameServerPlugin: Initializing server with event {:?}", event);
 
             let url = url.clone();
             let websocket = Arc::clone(&websocket);
@@ -127,21 +127,18 @@ impl SimplePlugin for DsGameServerPlugin {
                     .build()
                     .expect("failed to build temp runtime");
 
-                println!("WebSocket reader thread started");
+                info!("WebSocket reader thread started");
                 for msg in receiver.incoming_messages() {
                     match msg {
                         Ok(OwnedMessage::Text(s)) => {
-                            println!("[message][from][gamesever]: {}", s);
+                            debug!("[message][from][gamesever]: {}", s);
                             if let Ok(value) = serde_json::from_str::<serde_json::Value>(&s) {
                                 if value["namespace"] == "players" && value["event"] == "position" {
-
                                     // notify EventSystem about the player position
                                     for player_data in value["data"].as_array().unwrap() {
                                         if let Some(uuid_str) = player_data["player_id"].as_str() {
                                             // Get gorc_id from mapping or fallback to direct field
                                             let gorc_id_str = if let Ok(mapping) = get_mapping().lock() {
-                                                println!("🔍 !! Current mapping: {:?}", *mapping);
-                                                println!("🔍 !! Looking for uuid_str: {}", uuid_str);
                                                 mapping.get(uuid_str).cloned()
                                             } else {
                                                 None
@@ -172,18 +169,18 @@ impl SimplePlugin for DsGameServerPlugin {
                                                                     "client_timestamp": chrono::Utc::now().to_rfc3339(),
                                                                 }),
                                                             ).await {
-                                                                println!("Failed to update player position via EventSystem: {}", e);
+                                                                error!("Failed to update player position via EventSystem: {}", e);
                                                             }
                                                         });
                                                     }
                                                 } else {
-                                                    println!("Invalid position coordinates in player data: {:?}", player_data["pos"]);
+                                                    error!("Invalid position coordinates in player data: {:?}", player_data["pos"]);
                                                 }
                                             } else {
-                                                println!("Failed to parse player/object ID from UUID (mapping): {}", uuid_str);
+                                                error!("Failed to parse player/object ID from UUID (mapping): {}", uuid_str);
                                             }
                                         } else {
-                                            println!("Missing player_id in player data: {:?}", player_data);
+                                            error!("Missing player_id in player data: {:?}", player_data);
                                         }
                                     }
 
@@ -245,11 +242,11 @@ impl SimplePlugin for DsGameServerPlugin {
                         }
                         Ok(_) => { /* ignore ping/pong/close frames */ }
                         Err(WebSocketError::NoDataAvailable) => {
-                            println!("\nDisconnected!");
+                            info!("\nDisconnected!");
                             exit(2);
                         }
                         Err(e) => {
-                            println!("WebSocket read error: {:?}", e);
+                            error!("WebSocket read error: {:?}", e);
                             exit(2);
                         }
                     }
@@ -261,7 +258,7 @@ impl SimplePlugin for DsGameServerPlugin {
 
         let websocket = Arc::clone(&self.websocket);
         events.on_plugin("genericprops", "create_object", move |event: serde_json::Value| {
-            println!("🔧 DsGameServerPlugin: Adding prop with event {:?}", event);
+            info!("🔧 DsGameServerPlugin: Adding prop with event {:?}", event);
             
             let message = json!({
                 "namespace": "server",
@@ -283,7 +280,7 @@ impl SimplePlugin for DsGameServerPlugin {
         // specific player
         let websocket = Arc::clone(&self.websocket);
         events.on_plugin("gorcplugin", "new_player", move |event: serde_json::Value| {
-            println!("🔧 DsGameServerPlugin: New player event {:?}", event);
+            info!("🔧 DsGameServerPlugin: New player event {:?}", event);
             
             // Check if this is a player object and store the mapping
             if let Some(object_type) = event["object_type"].as_str() {
@@ -294,7 +291,7 @@ impl SimplePlugin for DsGameServerPlugin {
                     ) {
                         if let Ok(mut mapping) = get_mapping().lock() {
                             mapping.insert(connection_id.to_string(), object_uuid.to_string());
-                            println!("🔧 DsGameServerPlugin: Stored mapping {} -> {}", connection_id, object_uuid);
+                            info!("🔧 DsGameServerPlugin: Stored mapping {} -> {}", connection_id, object_uuid);
                         }
                     }
                 }

@@ -74,8 +74,8 @@ impl GenericProps {
 }
 
 impl GorcObject for GenericProps {
-	fn type_name(&self) -> &'static str {
-        "genericprops"
+	fn type_name(&self) -> &str {
+        self.object_def.name.as_str()
     }
 
     fn position(&self) -> Vec3 {

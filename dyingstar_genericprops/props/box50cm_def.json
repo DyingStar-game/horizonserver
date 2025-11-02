@@ -4,7 +4,7 @@
 	"zone": 0,
 	"distance": 50.0,
 	"frequency": 30.0,
-	"properties": ["opened","position","rotation","uuid"]
+	"properties": ["opened","position","rotation"]
 },
 {
 	"zone": 1,

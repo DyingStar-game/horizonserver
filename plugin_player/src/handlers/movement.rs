@@ -201,7 +201,7 @@ pub fn handle_movement_request_sync(
     
     // Broadcast position update to nearby players (within 25m range)
     // CRITICAL: Update BOTH player AND object positions in GORC tracking before broadcasting
-    println!("🚀 STEP 8: Beginning position update broadcast for player {}", client_player);
+    debug!("🚀 STEP 8: Beginning position update broadcast for player {}", client_player);
     let object_id_str = gorc_event.object_id.clone();
     println!("🚀 STEP 9: Using object ID: {}", object_id_str);
 

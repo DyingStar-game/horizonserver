@@ -85,7 +85,7 @@ async fn broadcast_object_update(
 }
 
 
-pub fn handle_object_update(
+pub fn handle_object_create(
 		definitions: Arc<DashMap<String, ObjectDefinition>>,
 		props: Arc<DashMap<String, GorcObjectId>>,
 		events: Arc<EventSystem>,
@@ -102,9 +102,13 @@ pub fn handle_object_update(
             error!("🚀 Plugin: ❌ Failed to parse GenericPropsRequest: {}", e);
             EventError::HandlerExecution("Invalid update request format".to_string())
         })?;
+		println!("🎮 GenericPropsPlugin: Handling object update {:?}", req_data);
 		handle.spawn(async move {
 			if !props.contains_key(&req_data.object_uuid) {
-				let definition = definitions.get(&req_data.object_type).unwrap();
+				let Some(definition) = definitions.get(&req_data.object_type) else {
+					println!("🎮 GORC: ❌ Object definition not found for type: {}", req_data.object_type);
+					return;
+				};
 				let obj = GenericProps::new(
 					definition.clone(),
 					req_data.object_data,
@@ -112,8 +116,15 @@ pub fn handle_object_update(
 				);
 				let uuid = obj.uuid.clone();
 				let position = obj.position();
-				let gorc_id = gorc_instances.register_object(obj, position.clone()).await;
-				debug!("🚀 GORC: object register {}", gorc_id.to_string());
+                // Convert parse Result -> Option<GorcObjectId>
+                let maybe_obj_id = match GorcObjectId::from_str(&uuid) {
+                    Ok(id) => Some(id),
+                    Err(e) => {
+                        None
+                    }
+                };
+				let gorc_id = gorc_instances.register_object_with_uuid(obj, position.clone(), maybe_obj_id).await;
+				println!("🚀 GORC: object register {}", gorc_id.to_string());
 				props.insert(uuid, gorc_id.clone());
 				if let Some(mut object_instance) = gorc_instances.get_object(gorc_id).await {
 					for channel in &definition.channels {

@@ -60,11 +60,9 @@ impl SimplePlugin for GenericPropsPlugin {
         &self.name
     }
 
-  
     fn version(&self) -> &str {
         "1.0.0"
     }
-
   
     async fn register_handlers(
         &mut self,
@@ -100,7 +98,7 @@ impl SimplePlugin for GenericPropsPlugin {
 
   
     async fn on_init(&mut self, context: Arc<dyn ServerContext>) -> Result<(), PluginError> {
-		if let Ok(directory) = fs::read_dir("./") {
+		if let Ok(directory) = fs::read_dir("../dyingstar_genericprops/props/") {
 			for entry in directory {
 				if let Ok(entry) = entry {
 					if let Some(name) = entry.file_name().to_str() {
@@ -148,30 +146,52 @@ impl GenericPropsPlugin {
         events: Arc<EventSystem>,
         luminal_handle: luminal::Handle
     ) -> Result<(), PluginError> {
-        debug!("🎮 GenericPropsPlugin: Registering GORC  handler");
+        println!("🎮 GenericPropsPlugin: Registering GORC handler");
 		
-		//do creation or update in the same event
-		let update_events = events.clone();
-		let handle2 = luminal_handle.clone();
-		let definitions = Arc::clone(&self.definitions);
-		let props = Arc::clone(&self.props);
-		//events.on_plugin("genericprops", "object", move |event: serde_json::Value| {
-		events.on_client("genericprops", "object", move |event: serde_json::Value, _player_id: horizon_event_system::PlayerId, _connection: horizon_event_system::ClientConnectionRef| {
-			println!("plugin genericprops: Receive object message {:?}", event);
-			if let Err(e) = update::handle_object_update(
-								definitions.clone(),
-								props.clone(),
-								update_events.clone(),
+        // Clone for first handler
+        let update_events1 = events.clone();
+        let handle1 = luminal_handle.clone();
+        let definitions1 = Arc::clone(&self.definitions);
+        let props1 = Arc::clone(&self.props);
+        
+        events.on_client("genericprops", "object", move |event: serde_json::Value, _player_id: horizon_event_system::PlayerId, _connection: horizon_event_system::ClientConnectionRef| {
+            println!("plugin genericprops: Receive object message {:?}", event);
+            if let Err(e) = update::handle_object_create(
+                                definitions1.clone(),
+                                props1.clone(),
+                                update_events1.clone(),
                                 event.get("data").unwrap().clone(),
+                                handle1.clone()
+                            )
+                        {
+                            error!("🎮 Failed to handle object update: {}", e);
+                        }
+        Ok(())
+        }).await
+        .map_err(|e| PluginError::ExecutionError(e.to_string()))?;
+
+        // Clone for second handler
+        let update_events2 = events.clone();
+        let handle2 = luminal_handle.clone();
+        let definitions2 = Arc::clone(&self.definitions);
+        let props2 = Arc::clone(&self.props);
+        
+        events.on_plugin("genericprops", "create_object", move |event: serde_json::Value| {
+            println!("plugin genericprops: Receive object message {:?}", event);
+            if let Err(e) = update::handle_object_create(
+                                definitions2.clone(),
+                                props2.clone(),
+                                update_events2.clone(),
+                                event.clone(),
                                 handle2.clone()
                             )
                         {
                             error!("🎮 Failed to handle object update: {}", e);
                         }
-		 Ok(())
+        Ok(())
         }).await
         .map_err(|e| PluginError::ExecutionError(e.to_string()))?;
-			
+
         debug!("🎮 GenericPropsPlugin: handler registered");
         Ok(())
     }

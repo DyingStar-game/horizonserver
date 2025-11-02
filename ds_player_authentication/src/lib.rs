@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use horizon_event_system::{
-    AuthenticationStatusSetEvent, EventError, Event, AuthenticationStatusGetEvent, AuthenticationStatus, create_simple_plugin, EventSystem, PlayerId, current_timestamp, RawClientMessageEvent, SimplePlugin, PluginError, LogLevel, ClientConnectionRef, ServerContext
+    AuthenticationStatusSetEvent, EventError, Event, AuthenticationStatusGetEvent, AuthenticationStatus, create_simple_plugin, EventSystem, PlayerId, current_timestamp, RawClientMessageEvent, SimplePlugin, PluginError, LogLevel, ClientConnectionRef, ServerContext, Vec3
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -175,9 +175,12 @@ impl SimplePlugin for DsPlayerAuthenticationPlugin {
                     // send to client its uuid
                     println!("plugin auth: Emitting init_registered for player_id {:?}", player_id);
 
+                    // TODO replace by uuid found in user database
+                    let player_db_id = PlayerId::new();
+
                     let payload = serde_json::to_vec(&serde_json::json!({
                         "player_id": player_id,
-                        "message": "init_ack"
+                        "type": "init_ack"
                     })).expect("failed to serialize payload");
 
                     if let Err(e) = connection.respond(&payload).await
@@ -186,12 +189,17 @@ impl SimplePlugin for DsPlayerAuthenticationPlugin {
                         tracing::error!("Failed to send init_ack to client: {}", e);
                     }
 
+                    // send to propsplugin the new player event
                     if let Err(e) = events_system
-                        .emit_plugin("gorcplugin", "new_player", &serde_json::json!({
-                            "username": event.data.login,
-                            "uuid": Uuid::new_v4().to_string(),
-                            "internal_uuid": event.player_id,
-                            "hs_player_id": player_id,
+                        .emit_plugin("propsplugin", "new_player", &serde_json::json!({
+                            "object_type": "player",
+                            "object_uuid": player_db_id,
+                            "object_data": {
+                                "name": event.data.login,
+                                "position": Vec3::new(0.0, 0.0, 0.0),
+                                "rotation": Vec3::new(0.0, 0.0, 0.0),
+                                "connection_id": event.player_id,
+                            }
                         }))
                         .await
                     {

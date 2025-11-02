@@ -13,6 +13,7 @@ build() {
 
 mkdir -p "Horizon/plugins"
 
+build "dyingstar_genericprops"
 build "ds_game_server"
 build "plugin_player"
 build "ds_player_authentication"

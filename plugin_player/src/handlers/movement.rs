@@ -154,56 +154,56 @@ pub fn handle_movement_request_sync(
     events: Arc<EventSystem>,
     luminal_handle: Handle,
 ) -> Result<(), EventError> {
-    println!("🚀 STEP 1: Movement handler called for player {}", client_player);
+    debug!("🚀 STEP 1: Movement handler called for player {}", client_player);
 
     // SECURITY: Validate connection authentication before processing any movement
     // if !connection.is_authenticated() {
-    //     println!("🚀 STEP 2: ❌ Unauthenticated movement request from {}", connection.remote_addr);
+    //     debug!("🚀 STEP 2: ❌ Unauthenticated movement request from {}", connection.remote_addr);
     //     return Err(EventError::HandlerExecution(
     //         "Unauthenticated request".to_string()
     //     ));
     // }
-    println!("🚀 STEP 2: ✅ Connection authenticated");
+    debug!("🚀 STEP 2: ✅ Connection authenticated");
 
     // Parse the movement data from the GORC event payload
-    println!("🚀 STEP 3: Parsing GORC event data, length: {} bytes", gorc_event.data.len());
+    debug!("🚀 STEP 3: Parsing GORC event data, length: {} bytes", gorc_event.data.len());
     let event_data = serde_json::from_slice::<serde_json::Value>(&gorc_event.data)
         .map_err(|e| {
-            println!("🚀 STEP 3: ❌ Failed to parse JSON from GORC event data: {}", e);
+            error!("🚀 STEP 3: ❌ Failed to parse JSON from GORC event data: {}", e);
             EventError::HandlerExecution("Invalid JSON in movement request".to_string())
         })?;
-    println!("🚀 STEP 3: ✅ Parsed raw JSON: {}", event_data);
+    debug!("🚀 STEP 3: ✅ Parsed raw JSON: {}", event_data);
 
     let move_data = serde_json::from_value::<PlayerMoveRequest>(event_data)
         .map_err(|e| {
-            println!("🚀 STEP 4: ❌ Failed to parse PlayerMoveRequest: {}", e);
+            error!("🚀 STEP 4: ❌ Failed to parse PlayerMoveRequest: {}", e);
             EventError::HandlerExecution("Invalid movement request format".to_string())
         })?;
-    println!("🚀 STEP 4: ✅ Parsed PlayerMoveRequest: {:?}", move_data);
+    debug!("🚀 STEP 4: ✅ Parsed PlayerMoveRequest: {:?}", move_data);
 
-    println!("🚀 STEP 5: Processing movement for ship {} to position {:?}",
+    debug!("🚀 STEP 5: Processing movement for ship {} to position {:?}",
         move_data.player_id, move_data.new_position);
 
     // SECURITY: Validate player ownership - players can only move their own ships
     if move_data.player_id != client_player {
-        println!("🚀 STEP 6: ❌ Security violation: Player {} tried to move ship belonging to {}",
+        error!("🚀 STEP 6: ❌ Security violation: Player {} tried to move ship belonging to {}",
             client_player, move_data.player_id);
         return Err(EventError::HandlerExecution(
             "Unauthorized ship movement".to_string()
         ));
     }
-    println!("🚀 STEP 6: ✅ Player ownership validated");
+    debug!("🚀 STEP 6: ✅ Player ownership validated");
 
     // Update the object instance position locally (for immediate response)
     object_instance.object.update_position(move_data.new_position);
-    println!("🚀 STEP 7: ✅ Updated local position for {} to {:?}",
+    debug!("🚀 STEP 7: ✅ Updated local position for {} to {:?}",
         client_player, move_data.new_position);
     
     // Broadcast position update to nearby players (within 25m range)
     // CRITICAL: Update BOTH player AND object positions in GORC tracking before broadcasting
     debug!("🚀 STEP 8: Beginning position update broadcast for player {}", client_player);
     let object_id_str = gorc_event.object_id.clone();
-    println!("🚀 STEP 9: Using object ID: {}", object_id_str);
+    debug!("🚀 STEP 9: Using object ID: {}", object_id_str);
 
     let position_update = serde_json::json!({
         "player_id": client_player,
@@ -212,33 +212,33 @@ pub fn handle_movement_request_sync(
         "movement_state": move_data.movement_state,
         "client_timestamp": chrono::Utc::now()
     });
-    println!("🚀 STEP 10: Created position update payload: {}", position_update);
+    debug!("🚀 STEP 10: Created position update payload: {}", position_update);
     
     luminal_handle.spawn(async move {
-        println!("🚀 STEP 11: Inside async broadcast task");
+        debug!("🚀 STEP 11: Inside async broadcast task");
 
         // CRITICAL FIX: Update BOTH player position AND object position in GORC tracking
         // This ensures the spatial tracking has the correct positions for distance calculations
 
         // Update player position in GORC tracking
         if let Err(e) = events.update_player_position(client_player, move_data.new_position).await {
-            println!("🚀 STEP 11.5: ❌ Failed to update GORC player tracking: {}", e);
+            error!("🚀 STEP 11.5: ❌ Failed to update GORC player tracking: {}", e);
         } else {
-            println!("🚀 STEP 11.5: ✅ Updated GORC player tracking for player {} at position {:?}",
+            debug!("🚀 STEP 11.5: ✅ Updated GORC player tracking for player {} at position {:?}",
                 client_player, move_data.new_position);
         }
 
         if let Ok(gorc_id) = GorcObjectId::from_str(&object_id_str) {
-            println!("🚀 STEP 12: Parsed GORC ID successfully: {:?}", gorc_id);
+            debug!("🚀 STEP 12: Parsed GORC ID successfully: {:?}", gorc_id);
 
             if let Err(e) = events.update_object_position(gorc_id, move_data.new_position).await {
-                println!("🚀 STEP 12.5: ❌ Failed to update GORC object tracking: {}", e);
+                error!("🚀 STEP 12.5: ❌ Failed to update GORC object tracking: {}", e);
             } else {
-                println!("🚀 STEP 12.5: ✅ Updated GORC object tracking for {:?} at {:?}",
+                debug!("🚀 STEP 12.5: ✅ Updated GORC object tracking for {:?} at {:?}",
                     gorc_id, move_data.new_position);
             }
 
-            println!("🚀 STEP 13: About to call emit_gorc_instance on channel 0");
+            debug!("🚀 STEP 13: About to call emit_gorc_instance on channel 0");
 
             match events.emit_gorc_instance(
                 gorc_id,
@@ -248,19 +248,19 @@ pub fn handle_movement_request_sync(
                 horizon_event_system::Dest::Client
             ).await {
                 Ok(_) => {
-                    println!("🚀 STEP 14: ✅ emit_gorc_instance completed successfully for player {}", client_player);
-                    println!("🚀 GORC: ✅ Broadcasted position update for ship {} to clients within 25m", client_player);
+                    debug!("🚀 STEP 14: ✅ emit_gorc_instance completed successfully for player {}", client_player);
+                    debug!("🚀 GORC: ✅ Broadcasted position update for ship {} to clients within 25m", client_player);
                 },
                 Err(e) => {
-                    println!("🚀 STEP 14: ❌ emit_gorc_instance failed: {}", e);
-                    println!("🚀 GORC: ❌ Failed to broadcast position update: {}", e);
+                    error!("🚀 STEP 14: ❌ emit_gorc_instance failed: {}", e);
+                    error!("🚀 GORC: ❌ Failed to broadcast position update: {}", e);
                 }
             }
         } else {
-            println!("🚀 STEP 12: ❌ Failed to parse GORC object ID: {}", object_id_str);
-            println!("🚀 GORC: ❌ Invalid GORC object ID format: {}", object_id_str);
+            error!("🚀 STEP 12: ❌ Failed to parse GORC object ID: {}", object_id_str);
+            error!("🚀 GORC: ❌ Invalid GORC object ID format: {}", object_id_str);
         }
-        println!("🚀 STEP 15: Exiting async broadcast task");
+        debug!("🚀 STEP 15: Exiting async broadcast task");
     });
     
     Ok(())

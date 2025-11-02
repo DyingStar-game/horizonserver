@@ -415,25 +415,21 @@ impl SimplePlugin for DsGameServerPlugin {
         &mut self,
         context: Arc<dyn ServerContext>,
     ) -> Result<(), PluginError> {
-        context.log(LogLevel::Info, "🔧 DsGameServerPlugin: Starting up!");
-
-        // --- plugin-specific file logger ---
-        // ensure logs directory exists (optional)
-        let log_dir = "logs";
-        let _ = std::fs::create_dir_all(log_dir);
-        // never rotate, single file in logs/
-        let file_appender = rolling::never(log_dir, "ds_game_server.log");
-        let (non_blocking, guard) = non_blocking(file_appender);
-        // keep guard alive for program lifetime so logs flush on exit
-        std::mem::forget(Box::new(guard));
-        // create a layer that writes into the file (non-ANSI)
-        let file_layer = tracing_subscriber::fmt::layer()
-            .with_ansi(false)
-            .with_writer(non_blocking);
-        // Try to add the file layer to the global subscriber. If the global subscriber
-        // is already initialized elsewhere this will return Err — ignore in that case.
-        let _ = tracing_subscriber::registry().with(file_layer).try_init();
-        // --- end file logger ---
+        // Get the log level from ServerContext
+        let log_level = context.log_level();
+        
+        // Set up tracing subscriber with the configured level
+        let filter_level = match log_level {
+            LogLevel::Error => tracing::Level::ERROR,
+            LogLevel::Warn => tracing::Level::WARN,
+            LogLevel::Info => tracing::Level::INFO,
+            LogLevel::Debug => tracing::Level::DEBUG,
+            LogLevel::Trace => tracing::Level::TRACE,
+        };
+        tracing_subscriber::fmt()
+            .with_max_level(filter_level)
+            .try_init()
+            .ok(); // Ignore errors if already initialized
 
         info!("🔧 DsGameServerPlugin: ✅ Initialization complete!");
         Ok(())

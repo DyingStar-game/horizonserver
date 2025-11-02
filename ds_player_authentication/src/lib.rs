@@ -423,13 +423,22 @@ impl SimplePlugin for DsPlayerAuthenticationPlugin {
     }
 
     async fn on_init(&mut self, context: Arc<dyn ServerContext>) -> Result<(), PluginError> {
-        context.log(
-            LogLevel::Info,
-            "🔧 DsPlayerAuthenticationPlugin: Starting up!",
-        );
-
-        // TODO: Add your initialization logic here
+        // Get the log level from ServerContext
+        let log_level = context.log_level();
         
+        // Set up tracing subscriber with the configured level
+        let filter_level = match log_level {
+            LogLevel::Error => tracing::Level::ERROR,
+            LogLevel::Warn => tracing::Level::WARN,
+            LogLevel::Info => tracing::Level::INFO,
+            LogLevel::Debug => tracing::Level::DEBUG,
+            LogLevel::Trace => tracing::Level::TRACE,
+        };
+        tracing_subscriber::fmt()
+            .with_max_level(filter_level)
+            .try_init()
+            .ok(); // Ignore errors if already initialized
+
         info!("🔧 DsPlayerAuthenticationPlugin: ✅ Initialization complete!");
         Ok(())
     }

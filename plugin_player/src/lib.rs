@@ -69,7 +69,7 @@ use horizon_event_system::{
     SimplePlugin,
 };
 use std::sync::Arc;
-use tracing::{ debug, error };
+use tracing::{ info, debug, error };
 use serde::{Deserialize, Serialize};
 
 // Public modules for external access
@@ -250,10 +250,23 @@ impl SimplePlugin for PlayerPlugin {
     ///
     /// `Result<(), PluginError>` - Success or initialization error
     async fn on_init(&mut self, context: Arc<dyn ServerContext>) -> Result<(), PluginError> {
-        context.log(
-            LogLevel::Info,
-            "🎮 PlayerPlugin: GORC player management system activated and ready!"
-        );
+        // Get the log level from ServerContext
+        let log_level = context.log_level();
+        
+        // Set up tracing subscriber with the configured level
+        let filter_level = match log_level {
+            LogLevel::Error => tracing::Level::ERROR,
+            LogLevel::Warn => tracing::Level::WARN,
+            LogLevel::Info => tracing::Level::INFO,
+            LogLevel::Debug => tracing::Level::DEBUG,
+            LogLevel::Trace => tracing::Level::TRACE,
+        };
+        tracing_subscriber::fmt()
+            .with_max_level(filter_level)
+            .try_init()
+            .ok(); // Ignore errors if already initialized
+
+        info!("🎮 PlayerPlugin: GORC player management system activated and ready!");
         Ok(())
     }
 

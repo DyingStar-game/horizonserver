@@ -433,7 +433,6 @@ impl PlayerPlugin {
         luminal_handle: luminal::Handle
     ) -> Result<(), PluginError> {
         debug!("🎮 PlayerPlugin: Registering GORC channel 0 (movement) handler");
-        println!("🎮 PlayerPlugin: Registering GORC channel 0 (movement) handler");
 
         let events_for_move = Arc::clone(&events);
         let luminal_handle_move = luminal_handle.clone();
@@ -444,7 +443,7 @@ impl PlayerPlugin {
                 0, // Channel 0: Critical movement data
                 "move",
                 move |gorc_event, client_player, connection, object_instance| {
-                    println!("🎮 PlayerPlugin: received GORC channel 0 (movement) event!");                    
+                    debug!("🎮 PlayerPlugin: received GORC channel 0 (movement) event!");                    
                     // Use the dedicated movement handler
                     movement::handle_movement_request_sync(
                         gorc_event,

@@ -51,6 +51,7 @@ pub struct NewPlayerDataObjectData {
     pub position: Vec3,
     pub rotation: Vec3,
     pub connection_id: PlayerId,
+    pub parent_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -115,6 +116,7 @@ pub async fn handle_player_connected(
         event.object_uuid,
         event.object_data.name,
         event.object_data.position,
+        event.object_data.parent_id,
     );
     
     // Spawn async task to handle GORC registration without blocking the event handler

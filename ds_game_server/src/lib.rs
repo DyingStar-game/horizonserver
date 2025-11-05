@@ -131,7 +131,7 @@ impl SimplePlugin for DsGameServerPlugin {
                 for msg in receiver.incoming_messages() {
                     match msg {
                         Ok(OwnedMessage::Text(s)) => {
-                            debug!("[message][from][gamesever]: {}", s);
+                            println!("[message][from][gamesever]: {}", s);
                             if let Ok(value) = serde_json::from_str::<serde_json::Value>(&s) {
                                 if value["namespace"] == "players" && value["event"] == "position" {
                                     // notify EventSystem about the player position

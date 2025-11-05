@@ -208,11 +208,15 @@ impl SimplePlugin for DyingstarPropsPlugin {
                 
                 // store in variable z the number of players and multiply it by 2.0
                 // The goal is to not spawn in same place (temporary code)
-                let z = players.read().await.len() as f64 * 2.0;
+                let player_count = players.read().await.len() as f64;
+                let row = (player_count / 20.0).floor();
+                let col = player_count % 20.0;
+                let z = col * 2.0;
+                let y = row * 2.0;
 
                 let player = props::player::Player::new(
                     event.object_data.name.clone(),
-                    Vec3::new(7890000.0, 0.0, 0.0 + z),
+                    Vec3::new(7885000.0, 0.0 + y, 0.0 + z),
                     Vec3::new(0.0, 0.0, 0.0),
                     event.object_uuid.clone(),
                 );
@@ -227,6 +231,7 @@ impl SimplePlugin for DyingstarPropsPlugin {
                             "position": player.position,
                             "rotation": player.rotation,
                             "connection_id": event.object_data.connection_id,
+                            "parent_id": "3388a817-f3ef-421d-b10f-4325e105628e", // TODO temp planet parent_id
                         }
                     }))
                     .await

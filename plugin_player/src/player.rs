@@ -90,6 +90,7 @@ pub struct PlayerCriticalData {
     pub velocity: Vec3,
     /// Current health points (0.0 to 100.0)
     pub health: f32,
+    pub parent_id: String,
 }
 
 impl GorcZoneData for PlayerCriticalData {
@@ -296,7 +297,7 @@ impl GorcPlayer {
     /// assert_eq!(player.critical_data.health, 100.0);
     /// assert_eq!(player.detailed_data.level, 1);
     /// ```
-    pub fn new(player_id: PlayerId, name: String, position: Vec3) -> Self {
+    pub fn new(player_id: PlayerId, name: String, position: Vec3, parent_id: String) -> Self {
         Self {
             player_id,
             last_update: Utc::now(),
@@ -304,6 +305,7 @@ impl GorcPlayer {
                 position,
                 velocity: Vec3::new(0.0, 0.0, 0.0),
                 health: 100.0,
+                parent_id,
             },
             detailed_data: PlayerDetailedData {
                 movement_state: "idle".to_string(),

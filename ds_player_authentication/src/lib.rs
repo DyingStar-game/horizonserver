@@ -179,7 +179,7 @@ impl SimplePlugin for DsPlayerAuthenticationPlugin {
                     let player_db_id = PlayerId::new();
 
                     let payload = serde_json::to_vec(&serde_json::json!({
-                        "player_id": player_id,
+                        "player_id": player_db_id,
                         "type": "init_ack"
                     })).expect("failed to serialize payload");
 

@@ -156,14 +156,14 @@ impl SimplePlugin for DyingstarPropsPlugin {
         "1.0.0"
     }
 
-    async fn register_handlers(&mut self, events: Arc<EventSystem>, _context: Arc<dyn ServerContext>) -> Result<(), PluginError> {
+    async fn register_handlers(&mut self, events: Arc<EventSystem>, context: Arc<dyn ServerContext>) -> Result<(), PluginError> {
         info!("🔧 DyingstarPropsPlugin: Registering event handlers...");
 
         // Enter the plugin runtime only for the synchronous call that needs a reactor.
         // Drop the EnterGuard before any .await so the register_handlers future remains Send.
         let (gevents, mut gorc_system) = {
             let _enter = self.runtime.handle().enter();
-            create_complete_horizon_system(_context.clone())
+            create_complete_horizon_system(context.clone())
         }.map_err(|e| PluginError::ExecutionError(format!("failed to create complete horizon system: {}", e)))?;
  
         // clone the plugin runtime so sync handlers can spawn tasks onto it without requiring
@@ -216,7 +216,7 @@ impl SimplePlugin for DyingstarPropsPlugin {
 
                 let player = props::player::Player::new(
                     event.object_data.name.clone(),
-                    Vec3::new(7885000.0, 0.0 + y, 0.0 + z),
+                    Vec3::new(7790150.0, 0.0 + y, 0.0 + z),
                     Vec3::new(0.0, 0.0, 0.0),
                     event.object_uuid.clone(),
                 );
@@ -249,69 +249,117 @@ impl SimplePlugin for DyingstarPropsPlugin {
         // // create fresh clones — each handler must capture its own Arc so we don't move the same value into multiple closures
         // let boxes50cm_for_spawn = self.boxes50cm.clone();
         // let boxes50cm_for_updatepos = self.boxes50cm.clone();
-        // let events_for_spawn = events.clone();
+        let events_for_spawn = events.clone();
         // // spawn requests will use tokio::spawn
 
-        // events.on_client("props", "spawn_request", move |event: serde_json::Value, _player_id: PlayerId, _connection: ClientConnectionRef| {
-        //     // prepare clones/local copies used by the async task so they are moved, not the outer variables
-        //     let events = events_for_spawn.clone();
-        //     // we will spawn with tokio::spawn below
-
-        //     // clone the event and the boxes Arc for the spawned async task
-        //     let event_task = event.clone();
-        //     let boxes_for_task = boxes50cm_for_spawn.clone();
-
-        //     let runtime = runtime_for_spawn.clone();
-        //     let mut gorc_system = gorc_for_spawn.clone();
-        //     runtime.spawn(async move {
-        //         // check if event["type"] == "box50cm" or "box4m" or "ship" with match
-        //         match event_task["data"]["type"].as_str().unwrap_or("") {
-        //             "box50cm" => {
-        //                 // println!("SPAWN BOX50CM YEAH");
-        //                 // spawn box50cm
-        //                 // create Box50cm and store it
-        //                 let mut box50cm = Box50cm::new(
-        //                     Vec3::new(0.0, 0.0, 0.0),
-        //                     Vec3::new(0.0, 0.0, 0.0),
-        //                     "".to_string(),
-        //                 );
-        //                 let box50cm_id = uuid::Uuid::new_v4().to_string();
+        // we receive spawn_request from godot client (press key for example)
+        // we will spawn a genericobject (box50cm, box4m, ship, etc)
+        events.on_client("props", "spawn_request", move |event: serde_json::Value, _player_id: PlayerId, _connection: ClientConnectionRef| {
+            // prepare clones/local copies used by the async task so they are moved, not the outer variables
+            let events = events_for_spawn.clone();
 
 
-        //                 let gorc_id = gorc_system.register_object(box50cm.clone(), box50cm.position.clone()).await;
-        //                 box50cm.gorc_id = Some(gorc_id);
+            // prepare clones for the async task
+            let events_task = events.clone();
+            let event_task = event.clone();
+            let runtime = runtime_for_spawn.clone();
+            
+            runtime.spawn(async move {
+                // 1/ generate an uuid
+                let uuid = uuid::Uuid::new_v4().to_string();
 
-        //                 // store box in boxes50cm (use the cloned Arc inside async task)
-        //                 {
-        //                     let mut boxes = boxes_for_task.write().await;
-        //                     boxes.insert(box50cm_id.clone(), box50cm.clone());
-        //                 }
+                // 2/ send to plugin genericobject for creation in gorc
+                // TODO: perhaps change the "object_data" with the data deceived to be dynamic, to test
+                if let Err(e) = events_task.emit_plugin("genericprops", "create_object", &serde_json::json!({
+                    "object_type": event_task["data"]["entity"],
+                    "object_uuid": uuid,
+                    "object_data": {
+                        "position": event_task["data"]["position"],
+                        "rotation": {"x":0.0, "y": 0.0, "z":0.0},
+                        "scenename": event_task["data"]["scenename"],
+                        "parent_id": event_task["data"]["parent_id"],
+                    } 
+                })).await {
+                    tracing::error!("Failed to emit plugin event to genericprops: {}", e);
+                }
 
-        //                 let payload = serde_json::json!({
-        //                     "box50cm": box50cm.clone(),
-        //                     "player_uuid": event_task["data"]["player_uuid"].as_str().unwrap_or(""),
-        //                 });
+                // 3/ send to game_server plugin to spawn on godot server for the collision / physics calculations
+                if let Err(e) = events_task.emit_plugin("gameserverplugin", "spawn_object", &serde_json::json!({
+                    "object_type": event_task["data"]["entity"],
+                    "object_uuid": uuid,
+                    "object_data": {
+                        "position": event_task["data"]["position"],
+                        "rotation": {"x":0.0, "y": 0.0, "z":0.0},
+                        "scenename": event_task["data"]["scenename"],
+                        "parent_id": event_task["data"]["parent_id"],
+                    } 
+                })).await {
+                    tracing::error!("Failed to emit plugin event to gameserverplugin: {}", e);
+                }
+            });
 
-        //                 if let Err(e) = events.emit_plugin("gameserverplugin", "add_prop", &payload).await {
-        //                     tracing::error!("Failed to emit plugin event to propsplugin, add_prop: {}", e);
-        //                 }
-        //             },
-        //             "box4m" => {
-        //                 // spawn box4m
-        //             },
-        //             "ship" => {
-        //                 // spawn ship
-        //             },
-        //             _ => {
-        //                 error!("Unknown prop type: {}", event_task["type"]);
-        //             }
-        //         }
-        //     });
 
-        //     // keep original `event` available for sync logging (we cloned for the task)
-        //     println!("PROP (sync) Receive spawn_request: {:?}", event);
-        //     Ok(())
-        // }).await.unwrap();
+
+
+
+
+
+
+            // // clone the event and the boxes Arc for the spawned async task
+            // let event_task = event.clone();
+            // let boxes_for_task = boxes50cm_for_spawn.clone();
+
+            // let runtime = runtime_for_spawn.clone();
+            // let mut gorc_system = gorc_for_spawn.clone();
+            // runtime.spawn(async move {
+            //     // check if event["type"] == "box50cm" or "box4m" or "ship" with match
+            //     match event_task["data"]["type"].as_str().unwrap_or("") {
+            //         "box50cm" => {
+            //             // println!("SPAWN BOX50CM YEAH");
+            //             // spawn box50cm
+            //             // create Box50cm and store it
+            //             let mut box50cm = Box50cm::new(
+            //                 Vec3::new(0.0, 0.0, 0.0),
+            //                 Vec3::new(0.0, 0.0, 0.0),
+            //                 "".to_string(),
+            //             );
+            //             let box50cm_id = uuid::Uuid::new_v4().to_string();
+
+
+            //             let gorc_id = gorc_system.register_object(box50cm.clone(), box50cm.position.clone()).await;
+            //             box50cm.gorc_id = Some(gorc_id);
+
+            //             // store box in boxes50cm (use the cloned Arc inside async task)
+            //             {
+            //                 let mut boxes = boxes_for_task.write().await;
+            //                 boxes.insert(box50cm_id.clone(), box50cm.clone());
+            //             }
+
+            //             let payload = serde_json::json!({
+            //                 "box50cm": box50cm.clone(),
+            //                 "player_uuid": event_task["data"]["player_uuid"].as_str().unwrap_or(""),
+            //             });
+
+            //             if let Err(e) = events.emit_plugin("gameserverplugin", "add_prop", &payload).await {
+            //                 tracing::error!("Failed to emit plugin event to propsplugin, add_prop: {}", e);
+            //             }
+            //         },
+            //         "box4m" => {
+            //             // spawn box4m
+            //         },
+            //         "ship" => {
+            //             // spawn ship
+            //         },
+            //         _ => {
+            //             error!("Unknown prop type: {}", event_task["type"]);
+            //         }
+            //     }
+            // });
+
+            // keep original `event` available for sync logging (we cloned for the task)
+            println!("PROP (sync) Receive spawn_request: {:?}", event);
+            Ok(())
+        }).await.unwrap();
 
 
         let events_clone2 = events.clone();
@@ -591,7 +639,33 @@ impl SimplePlugin for DyingstarPropsPlugin {
                     "position": {"x": 0.0, "y": 10000000.0, "z": 10000000.0},
                     "rotation": {"x":0.0, "y": 0.0, "z":0.0},
                 } 
+            })).await.map_err(|e| PluginError::ExecutionError(format!("failed to emit plugin event: {}", e)))?;
+
+            // to gameserver
+            println!("Emitting planet object to gameserver...");
+            context.events().emit_plugin("gameserverplugin", "spawn_object", &serde_json::json!({
+                "object_type": "planet",
+                "object_uuid": "3388a817-f3ef-421d-b10f-4325e105628e",
+                "object_data": {
+                    "name": "Sandbox",
+                    "scenename": "tarsis_IV",
+                    "position": {"x": 10000000.0, "y": 0.0, "z": 0.0},
+                    "rotation": {"x":0.0, "y": 0.0, "z":0.0},
+                } 
+            })).await.map_err(|e| PluginError::ExecutionError(format!("failed to emit plugin event: {}", e)))?;
+
+            println!("Emitting second planet object to gameserver...");
+            context.events().emit_plugin("gameserverplugin", "spawn_object", &serde_json::json!({
+                "object_type": "planet",
+                "object_uuid": "6f3b006e-a6e3-493b-ba3b-57a180a09cc5",
+                "object_data": {
+                    "name": "tarsis II",
+                    "scenename": "tarsis_II",
+                    "position": {"x": 0.0, "y": 10000000.0, "z": 10000000.0},
+                    "rotation": {"x":0.0, "y": 0.0, "z":0.0},
+                } 
             })).await.map_err(|e| PluginError::ExecutionError(format!("failed to emit plugin event: {}", e)))
+
         });
         
         info!("🔧 DyingstarPropsPlugin: ✅ Initialization complete!");

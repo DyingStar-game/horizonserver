@@ -100,9 +100,9 @@ pub fn handle_object_create(
 		let req_data = serde_json::from_value::<GenericPropsRequest>(event)
         .map_err(|e| {
             error!("🚀 Plugin: ❌ Failed to parse GenericPropsRequest: {}", e);
-            EventError::HandlerExecution("Invalid update request format".to_string())
+            EventError::HandlerExecution("Invalid create request format".to_string())
         })?;
-		println!("🎮 GenericPropsPlugin: Handling object update {:?}", req_data);
+		println!("🎮 GenericPropsPlugin: Handling object create {:?}", req_data);
 		handle.spawn(async move {
 			if !props.contains_key(&req_data.object_uuid) {
 				let Some(definition) = definitions.get(&req_data.object_type) else {
@@ -111,7 +111,7 @@ pub fn handle_object_create(
 				};
 				let obj = GenericProps::new(
 					definition.clone(),
-					req_data.object_data,
+					req_data.object_data.clone(),
 					req_data.object_uuid // if empty, it will generate a new uuid
 				);
 				let uuid = obj.uuid.clone();
@@ -130,25 +130,91 @@ pub fn handle_object_create(
 					for channel in &definition.channels {
 						object_instance.mark_needs_update(channel.zone);
 					}
-					//object_instance.update_position(position)
+					// object_instance.update_position(position)
+					// Emit the object creation event to notify clients
+					if let Err(e) = events.emit_gorc_instance(
+						gorc_id,
+						0, // Default channel for object creation
+						"gorc_create",
+						&serde_json::json!({
+							"object_id": gorc_id.to_string(),
+							"object_type": req_data.object_type,
+							"object_data": req_data.object_data,
+							"position": position
+						}),
+						horizon_event_system::Dest::Client
+					).await {
+						error!("🚀 GORC: ❌ Failed to emit object creation event: {}", e);
+					} else {
+						debug!("🚀 GORC: ✅ Object creation event emitted successfully");
+					}
+					gorc_instances.update_object(gorc_id, object_instance).await;
 				}
 			}
-			//update
-			else {
-				let gorcid = props.get(&req_data.object_uuid).unwrap();
-				if let Some(mut object_instance) = gorc_instances.get_object(*gorcid).await {
-					let zone_set = object_instance.get_object_mut::<GenericProps>().expect("TODO").update(req_data.object_data);
+		});
+		Ok(())
+	}
+
+pub fn handle_object_update(
+		definitions: Arc<DashMap<String, ObjectDefinition>>,
+		props: Arc<DashMap<String, GorcObjectId>>,
+		events: Arc<EventSystem>,
+		event: serde_json::Value,
+		handle: luminal::Handle
+	) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+		// Parse request first
+		println!("🎮 GenericPropsPlugin: Handling object update event {:?}", event);
+		let req_data = serde_json::from_value::<GenericPropsRequest>(event)
+		.map_err(|e| {
+			error!("🚀 Plugin: ❌ Failed to parse GenericPropsRequest: {}", e);
+			EventError::HandlerExecution("Invalid update request format".to_string())
+		})?;
+		println!("🎮 GenericPropsPlugin: Handling object update req_data {:?}", req_data);
+
+		// Ensure we have access to the gorc instances manager
+		let Some(gorc_instances) = events.get_gorc_instances() else {
+			error!("🎮 GORC: ❌ No GORC instances manager available");
+			return Ok(());
+		};
+
+		// Spawn an async task to perform awaitable operations so this function can remain synchronous
+		let props_clone = Arc::clone(&props);
+		let events_clone = Arc::clone(&events);
+		let gorc_instances = gorc_instances; // move into async
+		handle.spawn(async move {
+			// Look up the gorc id for this object UUID
+			if let Some(gorc_ref) = props_clone.get(&req_data.object_uuid) {
+				let gorc_id = *gorc_ref; // GorcObjectId appears to be Copy in other code
+				if let Some(mut object_instance) = gorc_instances.get_object(gorc_id).await {
+					// Update the GenericProps on the object instance. Clone object_data to avoid reuse/move issues.
+					let zone_set = object_instance.get_object_mut::<GenericProps>().expect("TODO").update(req_data.object_data.clone());
 					for zone in zone_set {
 						object_instance.mark_needs_update(zone);
 					}
-					gorc_instances.update_object(*gorcid, object_instance).await;
-
+					gorc_instances.update_object(gorc_id, object_instance).await;
+				} else {
+					error!("🎮 GORC: ❌ Invalid props uuid in request: {}", req_data.object_uuid);
 				}
-				else {
-					EventError::HandlerExecution("Invalid props uuid in request".to_string());
+				// Emit the object update event to notify clients
+				if let Err(e) = events_clone.emit_gorc_instance(
+					gorc_id,
+					0, // Default channel for object update
+					"gorc_update",
+					&serde_json::json!({
+						"object_id": gorc_id.to_string(),
+						"object_type": req_data.object_type,
+						"object_data": req_data.object_data
+					}),
+					horizon_event_system::Dest::Client
+				).await {
+					error!("🚀 GORC: ❌ Failed to emit object update event: {}", e);
+				} else {
+					debug!("🚀 GORC: ✅ Object update event emitted successfully");
 				}
-				//update as ref + mark_needs_update could be better than this kind of clone+replace update method
+			} else {
+				error!("🎮 GORC: ❌ Unknown props uuid in request: {}", req_data.object_uuid);
 			}
 		});
+
 		Ok(())
 	}

@@ -167,13 +167,13 @@ impl GenericPropsPlugin {
         let definitions1 = Arc::clone(&self.definitions);
         let props1 = Arc::clone(&self.props);
         
-        events.on_client("genericprops", "object", move |event: serde_json::Value, _player_id: horizon_event_system::PlayerId, _connection: horizon_event_system::ClientConnectionRef| {
-            println!("plugin genericprops: Receive object message {:?}", event);
-            if let Err(e) = update::handle_object_create(
+        events.on_plugin("genericprops", "update_object", move |event: serde_json::Value| {
+            println!("plugin genericprops (update): Receive object message {:?}", event);
+            if let Err(e) = update::handle_object_update(
                                 definitions1.clone(),
                                 props1.clone(),
                                 update_events1.clone(),
-                                event.get("data").unwrap().clone(),
+                                event.clone(),
                                 handle1.clone()
                             )
                         {
@@ -190,7 +190,7 @@ impl GenericPropsPlugin {
         let props2 = Arc::clone(&self.props);
         
         events.on_plugin("genericprops", "create_object", move |event: serde_json::Value| {
-            println!("plugin genericprops: Receive object message {:?}", event);
+            println!("plugin genericprops (create): Receive object message {:?}", event);
             if let Err(e) = update::handle_object_create(
                                 definitions2.clone(),
                                 props2.clone(),

@@ -219,7 +219,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if client_id % 10 == 9 {  // Every 10 connections
             sleep(Duration::from_millis(50)).await;
         }
-        sleep(Duration::from_millis(100)).await;
+        sleep(Duration::from_millis(300)).await;
     }
     
     println!("All {} client tasks started, waiting for completion...", args.clients);

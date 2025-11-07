@@ -131,7 +131,7 @@ impl SimplePlugin for DsGameServerPlugin {
                 for msg in receiver.incoming_messages() {
                     match msg {
                         Ok(OwnedMessage::Text(s)) => {
-                            println!("[message][from][gamesever]: {}", s);
+                            debug!("[message][from][gamesever]: {}", s);
                             if let Ok(value) = serde_json::from_str::<serde_json::Value>(&s) {
                                 if value["namespace"] == "players" && value["event"] == "position" {
                                     // notify EventSystem about the player position
@@ -211,14 +211,20 @@ impl SimplePlugin for DsGameServerPlugin {
                                     //         }
                                     //     }
                                 } else if value["namespace"] == "props" && value["event"] == "position" {
-                                    // println!("Props position update received: {:?}", value);
-                                    let payload = serde_json::json!({ "props": value["data"] });
-                                    let events_clone = events2.clone();
-                                    let _ = rt.block_on(async move {
-                                        if let Err(e) = events_clone.emit_plugin("propsplugin", "props_position_update", &payload).await {
-                                            tracing::error!("Failed to emit plugin event to propsplugin: {}", e);
-                                        }
-                                    });
+                                    println!("Props position update received: {:?}", value);
+                                    // Iterate over props data if it's an array
+                                    for prop_data in value["data"].as_array().unwrap() {
+                                        let events_clone = events2.clone();
+                                        let _ = rt.block_on(async move {
+                                            if let Err(e) = events_clone.emit_plugin("genericprops", "update_object", &serde_json::json!({
+                                                    "object_type": prop_data["type"],
+                                                    "object_uuid": prop_data["uuid"],
+                                                    "object_data": prop_data,
+                                                })).await {
+                                                tracing::error!("Failed to emit plugin event to propsplugin: {}", e);
+                                            }
+                                        });
+                                    }
                                 }
                             } else {
                                 debug!("Failed to parse incoming JSON: {}", s);
@@ -257,7 +263,7 @@ impl SimplePlugin for DsGameServerPlugin {
         }).await.unwrap();
 
         let websocket = Arc::clone(&self.websocket);
-        events.on_plugin("genericprops", "create_object", move |event: serde_json::Value| {
+        events.on_plugin("gameserverplugin", "spawn_object", move |event: serde_json::Value| {
             info!("🔧 DsGameServerPlugin: Adding prop with event {:?}", event);
             
             let message = json!({
@@ -315,47 +321,48 @@ impl SimplePlugin for DsGameServerPlugin {
         }).await.unwrap();
 
 
-        // let websocket = Arc::clone(&self.websocket);
-        // events.on_client(
-        //     "movement",
-        //     "update_position",
-        //     move |wrapper: ClientEventWrapper<serde_json::Value>, _player_id: PlayerId, _connection: ClientConnectionRef| {
-        //         info!("📝 LoggerPlugin: 🦘 Client movement from player {}", wrapper.player_id);
-        //         // println!("player movement {:?}", wrapper);
-        //         // println!("📝 LoggerPlugin: 🦘 Client movement");
+        let websocket = Arc::clone(&self.websocket);
+        events.on_client(
+            "movement",
+            "update_velocity",
+            move |wrapper: ClientEventWrapper<serde_json::Value>, _player_id: PlayerId, _connection: ClientConnectionRef| {
+                info!("📝 LoggerPlugin: 🦘 Client movement from player {}", wrapper.player_id);
+                // println!("player movement {:?}", wrapper);
+                // println!("📝 LoggerPlugin: 🦘 Client movement");
 
-        //         let websocket = Arc::clone(&websocket);
+                let websocket = Arc::clone(&websocket);
 
-        //         std::thread::spawn(move || {
-        //             // Parse the movement data
-        //             let message = json!({
-        //                 "namespace": "player",
-        //                 "event": "move",
-        //                 "player_id": wrapper.player_id.to_string(),
-        //                 "data": wrapper.data.clone(),
-        //             });
-        //             debug!("[message][to][gamesever]: {:?}", message);
-        //             match websocket.lock() {
-        //                 Ok(mut guard) => {
-        //                     if let Some(w) = guard.as_mut() {
-        //                         if let Err(e) = w.send_message(&OwnedMessage::Text(message.to_string())) {
-        //                             error!("Failed to send websocket message: {}", e);
-        //                         }
-        //                     } else {
-        //                         error!("No websocket writer available to send movement");
-        //                     }
-        //                 }
-        //                 Err(e) => {
-        //                     error!("Failed to lock websocket mutex: {}", e);
-        //                 }
-        //             }
-        //         });
+                std::thread::spawn(move || {
+
+                    // Parse the movement data
+                    let message = json!({
+                        "namespace": "player",
+                        "event": "move",
+                        "player_id": wrapper.player_id.to_string(),
+                        "data": wrapper.data.clone(),
+                    });
+                    debug!("[message][to][gamesever]: {:?}", message);
+                    match websocket.lock() {
+                        Ok(mut guard) => {
+                            if let Some(w) = guard.as_mut() {
+                                if let Err(e) = w.send_message(&OwnedMessage::Text(message.to_string())) {
+                                    error!("Failed to send websocket message: {}", e);
+                                }
+                            } else {
+                                error!("No websocket writer available to send movement");
+                            }
+                        }
+                        Err(e) => {
+                            error!("Failed to lock websocket mutex: {}", e);
+                        }
+                    }
+                });
  
-        //         Ok(())
-        //     },
-        // )
-        // .await
-        // .map_err(|e| PluginError::ExecutionError(e.to_string()))?;
+                Ok(())
+            },
+        )
+        .await
+        .map_err(|e| PluginError::ExecutionError(e.to_string()))?;
 
 
         // let websocket2 = Arc::clone(&self.websocket);

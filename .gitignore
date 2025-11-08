@@ -9,4 +9,4 @@ RecipeSmith/
 
 /.cargo
 Cargo.lock
-
+/tests/node_modules

@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use horizon_event_system::{
-    AuthenticationStatusSetEvent, EventError, Event, AuthenticationStatusGetEvent, AuthenticationStatus, create_simple_plugin, EventSystem, PlayerId, current_timestamp, RawClientMessageEvent, SimplePlugin, PluginError, LogLevel, ClientConnectionRef, ServerContext
+    AuthenticationStatusSetEvent, EventError, Event, AuthenticationStatusGetEvent, AuthenticationStatus, create_simple_plugin, EventSystem, PlayerId, current_timestamp, RawClientMessageEvent, SimplePlugin, PluginError, LogLevel, ClientConnectionRef, ServerContext, Vec3
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -152,7 +152,7 @@ impl SimplePlugin for DsPlayerAuthenticationPlugin {
     //     // let db_pool = self.database_pool.clone();
     //     // TODO: Register your event handlers here
         let events_system = events.clone();
-        events.on_client("player", "init", move |event: PlayerInit| {
+        events.on_client("player", "init", move |event: PlayerInit, player_id: PlayerId, connection: ClientConnectionRef| {
             println!("plugin auth: Receive player init message {:?}", event);
 
             let events_system = events_system.clone();
@@ -166,12 +166,40 @@ impl SimplePlugin for DsPlayerAuthenticationPlugin {
                     .build()
                     .expect("failed to build temp runtime");
 
+                if event.data.login == "I am an idiot !" {
+                    return;
+                }
+
+
                 rt.block_on(async move {
+                    // send to client its uuid
+                    println!("plugin auth: Emitting init_registered for player_id {:?}", player_id);
+
+                    // TODO replace by uuid found in user database
+                    let player_db_id = PlayerId::new();
+
+                    let payload = serde_json::to_vec(&serde_json::json!({
+                        "player_id": player_db_id,
+                        "type": "init_ack"
+                    })).expect("failed to serialize payload");
+
+                    if let Err(e) = connection.respond(&payload).await
+                    {
+                        println!("plugin auth: FAILED to send init_ack to client: {}", e);
+                        tracing::error!("Failed to send init_ack to client: {}", e);
+                    }
+
+                    // send to propsplugin the new player event
                     if let Err(e) = events_system
                         .emit_plugin("propsplugin", "new_player", &serde_json::json!({
-                            "username": event.data.login,
-                            "uuid": Uuid::new_v4().to_string(),
-                            "internal_uuid": event.player_id.to_string()
+                            "object_type": "player",
+                            "object_uuid": player_db_id,
+                            "object_data": {
+                                "name": event.data.login,
+                                "position": Vec3::new(0.0, 0.0, 0.0),
+                                "rotation": Vec3::new(0.0, 0.0, 0.0),
+                                "connection_id": event.player_id,
+                            }
                         }))
                         .await
                     {
@@ -395,13 +423,22 @@ impl SimplePlugin for DsPlayerAuthenticationPlugin {
     }
 
     async fn on_init(&mut self, context: Arc<dyn ServerContext>) -> Result<(), PluginError> {
-        context.log(
-            LogLevel::Info,
-            "🔧 DsPlayerAuthenticationPlugin: Starting up!",
-        );
-
-        // TODO: Add your initialization logic here
+        // Get the log level from ServerContext
+        let log_level = context.log_level();
         
+        // Set up tracing subscriber with the configured level
+        let filter_level = match log_level {
+            LogLevel::Error => tracing::Level::ERROR,
+            LogLevel::Warn => tracing::Level::WARN,
+            LogLevel::Info => tracing::Level::INFO,
+            LogLevel::Debug => tracing::Level::DEBUG,
+            LogLevel::Trace => tracing::Level::TRACE,
+        };
+        tracing_subscriber::fmt()
+            .with_max_level(filter_level)
+            .try_init()
+            .ok(); // Ignore errors if already initialized
+
         info!("🔧 DsPlayerAuthenticationPlugin: ✅ Initialization complete!");
         Ok(())
     }

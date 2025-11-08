@@ -7,6 +7,9 @@ authors = ["Your Name <your.email@example.com>"]
 license = "MIT"
 repository = "https://github.com/Far-Beyond-Dev/your-plugin"
 
+[package.metadata]
+documentation_url = "https://github.com/DyingStar-game/horizonserver/"
+
 [lib]
 crate-type = ["cdylib"]
 
@@ -20,6 +23,7 @@ async-trait = "0.1"
 tracing = { version = "0.1", features = ["log"] }
 reqwest = "0.12.23"
 futures = { version = "0.3" }
+tracing-subscriber = "0.3"
 
 # Optional: Additional commonly used dependencies
 uuid = { version = "1.0", features = ["v4"] }

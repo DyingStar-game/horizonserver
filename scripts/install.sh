@@ -2,12 +2,14 @@
 
 set -e
 
-VERSION=v0.39.0
+BRANCH=main
 
 if [ ! -d "Horizon" ]; then
-    echo "📦 Fetching Horizon repository with version: $VERSION"
+    echo "📦 Fetching Horizon repository with version: $BRANCH"
     git clone https://github.com/Far-Beyond-Dev/Horizon.git
 fi
 
-# cd Horizon
-# git checkout $VERSION
+cd Horizon
+git fetch
+git checkout $BRANCH
+git pull

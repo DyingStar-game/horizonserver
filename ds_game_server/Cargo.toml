@@ -32,6 +32,8 @@ url = "2.5.7"
 futures-util = { version = "0.3.28", default-features = false, features = ["sink", "std"] }
 futures = "0.3"
 websocket = "0.27"
+dotenvy = "0.15"
+once_cell = "1.19"
 
 [dev-dependencies]
 tokio-test = "0.4"

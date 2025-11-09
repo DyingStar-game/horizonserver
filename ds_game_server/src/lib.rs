@@ -1,4 +1,6 @@
 use async_trait::async_trait;
+use std::env;
+use once_cell::sync::Lazy;
 use horizon_event_system::{
     create_simple_plugin, EventError, EventSystem, PlayerId, LogLevel, PluginError, ServerContext, SimplePlugin, ClientEventWrapper, PlayerDisconnectedEvent, ClientConnectionRef, GorcObjectId, Dest, GorcEvent, Vec3, current_timestamp
 };
@@ -11,7 +13,7 @@ use tracing_subscriber::fmt::MakeWriter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use std::path::Path;
-
+use dotenvy::dotenv;
 use websocket::ClientBuilder;
 // use websocket::client::sync::Client;
 use websocket::r#async::client::{Client, ClientNew, Framed};
@@ -39,6 +41,11 @@ fn get_mapping() -> &'static Mutex<HashMap<String, String>> {
     }
 }
 
+static SOCKET_URL: Lazy<String> = Lazy::new(|| {
+    dotenv().ok(); // Loads variables from `.env` file
+    env::var("SOCKET_URL").unwrap_or_else(|_| "ws://127.0.0.1:8980".to_string())
+});
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlayerInit {
     pub data: PlayerInitData,
@@ -50,7 +57,6 @@ pub struct PlayerInitData {
     pub name: String,
     pub spawnpoint: i32,
 }
-
 
 // DsGameServer Plugin
 pub struct DsGameServerPlugin {
@@ -65,7 +71,7 @@ impl DsGameServerPlugin {
 
         Self {
             name: "ds_game_server".to_string(),
-            socket_url: "ws://127.0.0.1:8980".to_string(),
+            socket_url: SOCKET_URL.clone(),
             websocket: Arc::new(Mutex::new(None)),
         }
     }
@@ -95,6 +101,7 @@ impl SimplePlugin for DsGameServerPlugin {
         /// initialize websocket connection to game server
         events.on_plugin("gameserverplugin", "init_server", move |event: serde_json::Value| {
             info!("🔧 DsGameServerPlugin: Initializing server with event {:?}", event);
+            info!("Connecting to server: {:?}", SOCKET_URL.clone());
 
             let url = url.clone();
             let websocket = Arc::clone(&websocket);

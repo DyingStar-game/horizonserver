@@ -5,7 +5,7 @@ set -e
 BRANCH=main
 
 if [ ! -d "Horizon" ]; then
-    echo "📦 Fetching Horizon repository with version: $BRANCH"
+    echo "📦 Fetching Horizon repository with branch: $BRANCH"
     git clone https://github.com/Far-Beyond-Dev/Horizon.git
 fi
 

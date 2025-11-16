@@ -622,7 +622,7 @@ impl SimplePlugin for DyingstarPropsPlugin {
                 "object_uuid": "3388a817-f3ef-421d-b10f-4325e105628e",
                 "object_data": {
                     "name": "Sandbox",
-                    "scenename": "tarsis_IV",
+                    "scenename": "scenes/planet/tarsis_IV.tscn",
                     "position": {"x": 10000000.0, "y": 0.0, "z": 0.0},
                     // "position": {"x":-34289753828.218235, "y": 572788198.6034999, "z":36200805980.425224},
                     "rotation": {"x":0.0, "y": 0.0, "z":0.0},
@@ -635,7 +635,7 @@ impl SimplePlugin for DyingstarPropsPlugin {
                 "object_uuid": "6f3b006e-a6e3-493b-ba3b-57a180a09cc5",
                 "object_data": {
                     "name": "tarsis II",
-                    "scenename": "tarsis_II",
+                    "scenename": "scenes/planet/tarsis_II.tscn",
                     "position": {"x": 0.0, "y": 10000000.0, "z": 10000000.0},
                     "rotation": {"x":0.0, "y": 0.0, "z":0.0},
                 } 
@@ -648,7 +648,7 @@ impl SimplePlugin for DyingstarPropsPlugin {
                 "object_uuid": "3388a817-f3ef-421d-b10f-4325e105628e",
                 "object_data": {
                     "name": "Sandbox",
-                    "scenename": "tarsis_IV",
+                    "scenename": "scenes/planet/tarsis_IV.tscn",
                     "position": {"x": 10000000.0, "y": 0.0, "z": 0.0},
                     "rotation": {"x":0.0, "y": 0.0, "z":0.0},
                 } 
@@ -660,7 +660,7 @@ impl SimplePlugin for DyingstarPropsPlugin {
                 "object_uuid": "6f3b006e-a6e3-493b-ba3b-57a180a09cc5",
                 "object_data": {
                     "name": "tarsis II",
-                    "scenename": "tarsis_II",
+                    "scenename": "scenes/planet/tarsis_II.tscn",
                     "position": {"x": 0.0, "y": 10000000.0, "z": 10000000.0},
                     "rotation": {"x":0.0, "y": 0.0, "z":0.0},
                 } 

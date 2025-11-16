@@ -71,6 +71,9 @@ impl GenericProps {
 			_ => return out,
 		}
 	}
+	pub fn get_data_for_layer(&self, layer: &ReplicationLayer) -> Option<serde_json::Value> {
+		self.data.get(&layer.channel).cloned()
+	}
 }
 
 impl GorcObject for GenericProps {
@@ -105,7 +108,7 @@ impl GorcObject for GenericProps {
 		}
 		Ok(serde_json::to_vec(&self.data[&layer.channel])?)
 	}
-	
+
 	fn get_layers(&self) -> Vec<ReplicationLayer> {
 		//TODO make a channels type with a into<Vec>() impl
 		let mut layers = Vec::new();

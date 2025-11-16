@@ -15,8 +15,8 @@ use crate::genericprops::GenericProps;
 
 pub fn handle_client_update_request(
     gorc_event: GorcEvent,
-    client_player: PlayerId,
-    connection: ClientConnectionRef,
+    _client_player: PlayerId,
+    _connection: ClientConnectionRef,
     object_instance: &mut ObjectInstance,
     events: Arc<EventSystem>,
 	luminal_handle: Handle,
@@ -119,7 +119,7 @@ pub fn handle_object_create(
                 // Convert parse Result -> Option<GorcObjectId>
                 let maybe_obj_id = match GorcObjectId::from_str(&uuid) {
                     Ok(id) => Some(id),
-                    Err(e) => {
+                    Err(_e) => {
                         None
                     }
                 };
@@ -132,23 +132,29 @@ pub fn handle_object_create(
 					}
 					// object_instance.update_position(position)
 					// Emit the object creation event to notify clients
-					if let Err(e) = events.emit_gorc_instance(
-						gorc_id,
-						0, // Default channel for object creation
-						"gorc_create",
-						&serde_json::json!({
-							"object_id": gorc_id.to_string(),
-							"object_type": req_data.object_type,
-							"object_data": req_data.object_data,
-							"position": position
-						}),
-						horizon_event_system::Dest::Client
-					).await {
-						error!("🚀 GORC: ❌ Failed to emit object creation event: {}", e);
-					} else {
-						debug!("🚀 GORC: ✅ Object creation event emitted successfully");
+					if req_data.object_type == "planet" {
+						if let Err(e) = events.emit_gorc_instance(
+							gorc_id,
+							0, // Default channel for object creation
+							"gorc_create",
+							&serde_json::json!({
+								"object_id": gorc_id.to_string(),
+								"object_type": req_data.object_type,
+								"object_data": req_data.object_data,
+								"position": position
+							}),
+							horizon_event_system::Dest::Client
+						).await {
+							error!("🚀 GORC: ❌ Failed to emit object creation event: {}", e);
+						} else {
+							debug!("🚀 GORC: ✅ Object creation event emitted successfully");
+						}
 					}
 					gorc_instances.update_object(gorc_id, object_instance).await;
+					if req_data.object_type != "planet" {
+						// notifiy to send gorc_zone_enter
+						let _ = events.notify_players_for_new_gorc_object(gorc_id).await;
+					}
 				}
 			}
 		});
@@ -156,7 +162,7 @@ pub fn handle_object_create(
 	}
 
 pub fn handle_object_update(
-		definitions: Arc<DashMap<String, ObjectDefinition>>,
+		_definitions: Arc<DashMap<String, ObjectDefinition>>,
 		props: Arc<DashMap<String, GorcObjectId>>,
 		events: Arc<EventSystem>,
 		event: serde_json::Value,
@@ -179,7 +185,6 @@ pub fn handle_object_update(
 
 		// Spawn an async task to perform awaitable operations so this function can remain synchronous
 		let props_clone = Arc::clone(&props);
-		let events_clone = Arc::clone(&events);
 		let gorc_instances = gorc_instances; // move into async
 		handle.spawn(async move {
 			// Look up the gorc id for this object UUID
@@ -187,29 +192,30 @@ pub fn handle_object_update(
 				let gorc_id = *gorc_ref; // GorcObjectId appears to be Copy in other code
 				if let Some(mut object_instance) = gorc_instances.get_object(gorc_id).await {
 					// Update the GenericProps on the object instance. Clone object_data to avoid reuse/move issues.
-					let zone_set = object_instance.get_object_mut::<GenericProps>().expect("TODO").update(req_data.object_data.clone());
+					let zone_set = object_instance.get_object_mut::<GenericProps>().expect("Object must exists").update(req_data.object_data.clone());
 					for zone in zone_set {
 						object_instance.mark_needs_update(zone);
+
+						for replicationlayer in object_instance.get_object::<GenericProps>().expect("Object must exists").get_layers().iter() {
+							if replicationlayer.channel == zone {
+								if let Err(e) = events.emit_gorc_instance(
+									gorc_id,
+									zone,
+									"update_property",
+									&object_instance.get_object_mut::<GenericProps>().expect("Object must exists").get_data_for_layer(&replicationlayer).unwrap_or(serde_json::Value::Null),
+									horizon_event_system::Dest::Client
+								).await {
+									error!("🚀 GORC: ❌ Failed to broadcast channel update: {}", e);
+								} else {
+									debug!("🚀 GORC: ✅ Broadcasted channel update for ship");
+								}
+							}
+						}
+
 					}
 					gorc_instances.update_object(gorc_id, object_instance).await;
 				} else {
 					error!("🎮 GORC: ❌ Invalid props uuid in request: {}", req_data.object_uuid);
-				}
-				// Emit the object update event to notify clients
-				if let Err(e) = events_clone.emit_gorc_instance(
-					gorc_id,
-					0, // Default channel for object update
-					"gorc_update",
-					&serde_json::json!({
-						"object_id": gorc_id.to_string(),
-						"object_type": req_data.object_type,
-						"object_data": req_data.object_data
-					}),
-					horizon_event_system::Dest::Client
-				).await {
-					error!("🚀 GORC: ❌ Failed to emit object update event: {}", e);
-				} else {
-					debug!("🚀 GORC: ✅ Object update event emitted successfully");
 				}
 			} else {
 				error!("🎮 GORC: ❌ Unknown props uuid in request: {}", req_data.object_uuid);

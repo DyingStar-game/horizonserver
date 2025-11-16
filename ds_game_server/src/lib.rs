@@ -98,7 +98,7 @@ impl SimplePlugin for DsGameServerPlugin {
         let websocket = Arc::clone(&self.websocket);
         let events1 = events.clone();
 
-        /// initialize websocket connection to game server
+        // initialize websocket connection to game server
         events.on_plugin("gameserverplugin", "init_server", move |event: serde_json::Value| {
             info!("🔧 DsGameServerPlugin: Initializing server with event {:?}", event);
             info!("Connecting to server: {:?}", SOCKET_URL.clone());
@@ -231,6 +231,47 @@ impl SimplePlugin for DsGameServerPlugin {
                                                 tracing::error!("Failed to emit plugin event to propsplugin: {}", e);
                                             }
                                         });
+                                    }
+                                } else if value["namespace"] == "props" && value["event"] == "create_object" {
+                                    println!("Props creation object received: {:?}", value);
+                                    // Iterate over props data if it's an array
+                                    for prop_data in value["data"].as_array().unwrap() {
+                                        let events_clone = events2.clone();
+                                        let _ = rt.block_on(async move {
+                                            if let Err(e) = events_clone.emit_plugin("genericprops", "create_object", &serde_json::json!({
+                                                    "object_type": prop_data["type"],
+                                                    "object_uuid": prop_data["uuid"],
+                                                    "object_data": prop_data,
+                                                })).await {
+                                                tracing::error!("Failed to emit plugin event to propsplugin: {}", e);
+                                            }
+                                        });
+
+                                        // send create object to server because server must not create item itself
+                                        let message = json!({
+                                            "namespace": "server",
+                                            "event": "add_prop",
+                                            "data": {
+                                                "object_type":prop_data["type"],
+                                                "object_uuid":prop_data["uuid"],
+                                                "object_data":prop_data,
+                                            }
+                                        });
+                                        match websocket.lock() {
+                                            Ok(mut ws_guard) => {
+                                                debug!("[message][to][gamesever]: {:?}", message);
+                                                if let Some(w) = ws_guard.as_mut() {
+                                                    if let Err(e) = w.send_message(&OwnedMessage::Text(message.to_string())) {
+                                                        error!("Failed to send websocket message: {}", e);
+                                                    }
+                                                } else {
+                                                    error!("No websocket writer available");
+                                                }
+                                            }
+                                            Err(e) => {
+                                                error!("Failed to lock websocket mutex: {}", e);
+                                            }
+                                        }
                                     }
                                 }
                             } else {

@@ -35,8 +35,7 @@
 			"frequency": 3.0,
 			"properties": [
 				"scenename",
-				"parent_id",
-				"scenename"
+				"parent_id"
 			]
 		}
 	]

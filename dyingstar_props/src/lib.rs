@@ -211,12 +211,12 @@ impl SimplePlugin for DyingstarPropsPlugin {
                 let player_count = players.read().await.len() as f64;
                 let row = (player_count / 20.0).floor();
                 let col = player_count % 20.0;
-                let z = col * 2.0;
-                let y = row * 2.0;
+                let z = col * 4.0;
+                let y = row * 4.0;
 
                 let player = props::player::Player::new(
                     event.object_data.name.clone(),
-                    Vec3::new(7790150.0, 0.0 + y, 0.0 + z),
+                    Vec3::new(2200000.0, 0.0 + y, 0.0 + z),
                     Vec3::new(0.0, 0.0, 0.0),
                     event.object_uuid.clone(),
                 );
@@ -231,7 +231,9 @@ impl SimplePlugin for DyingstarPropsPlugin {
                             "position": player.position,
                             "rotation": player.rotation,
                             "connection_id": event.object_data.connection_id,
-                            "parent_id": "3388a817-f3ef-421d-b10f-4325e105628e", // TODO temp planet parent_id
+                            // "parent_id": "3a695373-a9b7-45b1-b5b2-6649dd5e12dc", // TODO temp planet parent_id
+                            "parent_id": "65345350-5a40-4f44-a3c1-0ca5641cb97a",
+
                         }
                     }))
                     .await

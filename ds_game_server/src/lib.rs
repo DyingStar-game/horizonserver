@@ -163,8 +163,7 @@ impl SimplePlugin for DsGameServerPlugin {
                                                     ) {
                                                         let events_clone = events2.clone();
                                                         let _ = rt.block_on(async move {
-                                                            if let Err(e) = events_clone.emit_gorc_client(
-                                                                player_id,
+                                                            if let Err(e) = events_clone.emit_gorc_instance(
                                                                 gorc_id,
                                                                 0,
                                                                 "move",
@@ -175,6 +174,7 @@ impl SimplePlugin for DsGameServerPlugin {
                                                                     "movement_state": 1,
                                                                     "client_timestamp": chrono::Utc::now().to_rfc3339(),
                                                                 }),
+                                                                Dest::Both
                                                             ).await {
                                                                 error!("Failed to update player position via EventSystem: {}", e);
                                                             }

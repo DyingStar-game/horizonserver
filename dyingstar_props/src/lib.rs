@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use chrono::Utc;
 use horizon_event_system::{
     create_complete_horizon_system, CompressionType, create_simple_plugin, defObject, EventSystem, PlayerId, LogLevel, PluginError, ReplicationLayer, ReplicationPriority, ServerContext, SimplePlugin, Vec3, PlayerDisconnectedEvent, ClientConnectionRef, GorcObject, GorcEvent, Dest
 };
@@ -11,6 +12,7 @@ pub mod props;
 use crate::props::testplanet::Testplanet;
 use crate::props::player::Player;
 use crate::props::box50cm::Box50cm;
+use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlayerSession {
@@ -612,62 +614,118 @@ impl SimplePlugin for DyingstarPropsPlugin {
             tokio::time::sleep(std::time::Duration::from_secs(4)).await;
 
             println!("Send init to gameserver plugin to connect to GORC server...");
-            context.events().emit_plugin("gameserverplugin", "init_server", &serde_json::json!({})).await
-            .map_err(|e| PluginError::ExecutionError(format!("failed to emit plugin event: {}", e)))?;
+            if let Err(e) = context.events().emit_plugin("gameserverplugin", "init_server", &serde_json::json!({})).await {
+                error!("Failed to emit plugin event: {}", e);
+                return;
+            }
 
             // wait 2 seconds, time to connect to the first game server
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
-            println!("Emitting planet object to genericprops...");
-            context.events().emit_plugin("genericprops", "create_object", &serde_json::json!({
-                "object_type": "planet",
-                "object_uuid": "3388a817-f3ef-421d-b10f-4325e105628e",
-                "object_data": {
-                    "name": "Sandbox",
-                    "scenename": "scenes/planet/tarsis_IV.tscn",
-                    "position": {"x": 10000000.0, "y": 0.0, "z": 0.0},
-                    // "position": {"x":-34289753828.218235, "y": 572788198.6034999, "z":36200805980.425224},
-                    "rotation": {"x":0.0, "y": 0.0, "z":0.0},
-                } 
-            })).await.map_err(|e| PluginError::ExecutionError(format!("failed to emit plugin event: {}", e)))?;
+            // println!("Emitting planet object to genericprops...");
+            // context.events().emit_plugin("genericprops", "create_object", &serde_json::json!({
+            //     "object_type": "planet",
+            //     "object_uuid": "3388a817-f3ef-421d-b10f-4325e105628e",
+            //     "object_data": {
+            //         "name": "Sandbox",
+            //         "scenename": "scenes/planet/tarsis_IV.tscn",
+            //         "position": {"x": 10000000.0, "y": 0.0, "z": 0.0},
+            //         // "position": {"x":-34289753828.218235, "y": 572788198.6034999, "z":36200805980.425224},
+            //         "rotation": {"x":0.0, "y": 0.0, "z":0.0},
+            //     } 
+            // })).await.map_err(|e| PluginError::ExecutionError(format!("failed to emit plugin event: {}", e)))?;
 
-            println!("Emitting second planet object to genericprops...");
-            context.events().emit_plugin("genericprops", "create_object", &serde_json::json!({
-                "object_type": "planet",
-                "object_uuid": "6f3b006e-a6e3-493b-ba3b-57a180a09cc5",
-                "object_data": {
-                    "name": "tarsis II",
-                    "scenename": "scenes/planet/tarsis_II.tscn",
-                    "position": {"x": 0.0, "y": 10000000.0, "z": 10000000.0},
-                    "rotation": {"x":0.0, "y": 0.0, "z":0.0},
-                } 
-            })).await.map_err(|e| PluginError::ExecutionError(format!("failed to emit plugin event: {}", e)))?;
+            // println!("Emitting second planet object to genericprops...");
+            // context.events().emit_plugin("genericprops", "create_object", &serde_json::json!({
+            //     "object_type": "planet",
+            //     "object_uuid": "6f3b006e-a6e3-493b-ba3b-57a180a09cc5",
+            //     "object_data": {
+            //         "name": "tarsis II",
+            //         "scenename": "scenes/planet/tarsis_II.tscn",
+            //         "position": {"x": 0.0, "y": 10000000.0, "z": 10000000.0},
+            //         "rotation": {"x":0.0, "y": 0.0, "z":0.0},
+            //     } 
+            // })).await.map_err(|e| PluginError::ExecutionError(format!("failed to emit plugin event: {}", e)))?;
 
-            // to gameserver
-            println!("Emitting planet object to gameserver...");
-            context.events().emit_plugin("gameserverplugin", "spawn_object", &serde_json::json!({
-                "object_type": "planet",
-                "object_uuid": "3388a817-f3ef-421d-b10f-4325e105628e",
-                "object_data": {
-                    "name": "Sandbox",
-                    "scenename": "scenes/planet/tarsis_IV.tscn",
-                    "position": {"x": 10000000.0, "y": 0.0, "z": 0.0},
-                    "rotation": {"x":0.0, "y": 0.0, "z":0.0},
-                } 
-            })).await.map_err(|e| PluginError::ExecutionError(format!("failed to emit plugin event: {}", e)))?;
+            // // to gameserver
+            // println!("Emitting planet object to gameserver...");
+            // context.events().emit_plugin("gameserverplugin", "spawn_object", &serde_json::json!({
+            //     "object_type": "planet",
+            //     "object_uuid": "3388a817-f3ef-421d-b10f-4325e105628e",
+            //     "object_data": {
+            //         "name": "Sandbox",
+            //         "scenename": "scenes/planet/tarsis_IV.tscn",
+            //         "position": {"x": 10000000.0, "y": 0.0, "z": 0.0},
+            //         "rotation": {"x":0.0, "y": 0.0, "z":0.0},
+            //     } 
+            // })).await.map_err(|e| PluginError::ExecutionError(format!("failed to emit plugin event: {}", e)))?;
 
-            println!("Emitting second planet object to gameserver...");
-            context.events().emit_plugin("gameserverplugin", "spawn_object", &serde_json::json!({
-                "object_type": "planet",
-                "object_uuid": "6f3b006e-a6e3-493b-ba3b-57a180a09cc5",
+            // println!("Emitting second planet object to gameserver...");
+            // context.events().emit_plugin("gameserverplugin", "spawn_object", &serde_json::json!({
+            //     "object_type": "planet",
+            //     "object_uuid": "6f3b006e-a6e3-493b-ba3b-57a180a09cc5",
+            //     "object_data": {
+            //         "name": "tarsis II",
+            //         "scenename": "scenes/planet/tarsis_II.tscn",
+            //         "position": {"x": 0.0, "y": 10000000.0, "z": 10000000.0},
+            //         "rotation": {"x":0.0, "y": 0.0, "z":0.0},
+            //     } 
+            // })).await.map_err(|e| PluginError::ExecutionError(format!("failed to emit plugin event: {}", e)))
+            let result: Result<(), PluginError> = async {
+                let serverinfo_uuid = Uuid::new_v4().to_string();
+                context.events().emit_plugin("genericprops", "create_object", &serde_json::json!({
+                "object_type": "serverinfo",
+                "object_uuid": serverinfo_uuid,
                 "object_data": {
-                    "name": "tarsis II",
-                    "scenename": "scenes/planet/tarsis_II.tscn",
-                    "position": {"x": 0.0, "y": 10000000.0, "z": 10000000.0},
-                    "rotation": {"x":0.0, "y": 0.0, "z":0.0},
-                } 
-            })).await.map_err(|e| PluginError::ExecutionError(format!("failed to emit plugin event: {}", e)))
+                    "name": "serverinfo",
+                    "scenename": "",
+                    "fps": 60,
+                    "objects_number": 0,
+                    "players_number": 0
+                }
+                })).await.map_err(|e| PluginError::ExecutionError(format!("failed to emit plugin event: {}", e)))?;
 
+                context.events().emit_plugin("gameserverplugin", "spawn_object", &serde_json::json!({
+                "object_type": "serverinfo",
+                "object_uuid": serverinfo_uuid,
+                "object_data": {
+                    "name": "serverinfo",
+                    "scenename": "",
+                    "fps": 60,
+                    "objects_number": 0,
+                    "players_number": 0
+                }
+                })).await.map_err(|e| PluginError::ExecutionError(format!("failed to emit plugin event: {}", e)))?;
+
+
+                info!("Waiting 4 seconds before emitting planet object...");
+                tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+
+                info!("Send init to gameserver plugin to connect to GORC server...");
+                context.events().emit_plugin("gameserverplugin", "init_server", &serde_json::json!({})).await
+                .map_err(|e| PluginError::ExecutionError(format!("failed to emit plugin event: {}", e)))?;
+
+                // wait 2 seconds, time to connect to the first game server
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+                context.events().emit_plugin(
+                    "externalservices",
+                    "resourcesdynamic",
+                    &serde_json::json!({
+                        "event_type": "init",
+                        "data": {
+                            "system_internal_name": "tarsis",
+                            "duration_s": 1,
+                            "frequency": 2,
+                            "from_timestamp": Utc::now().timestamp(),
+                        }
+                    }),
+                ).await.map_err(|e| PluginError::ExecutionError(format!("failed to emit plugin event: {}", e)))?;
+                Ok(())
+            }.await;
+            if let Err(e) = result {
+                error!("Error in initialization async task: {}", e);
+            }
         });
         
         info!("🔧 DyingstarPropsPlugin: ✅ Initialization complete!");

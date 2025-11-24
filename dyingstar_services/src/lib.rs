@@ -59,17 +59,17 @@ impl SimplePlugin for DyingstarServicesPlugin {
         {
             let url = url.clone();
             let websocket = Arc::clone(&websocket);
-            info!("🔧 DyingstarServicesPlugin: Handling 'resourcesdynamic' event: {:?}", event);
+            debug!("🔧 DyingstarServicesPlugin: Handling 'resourcesdynamic' event: {:?}", event);
             let message = serde_json::to_string(&event).unwrap_or_else(|e| {
                 error!("🔧 DyingstarServicesPlugin: ❌ Failed to serialize event to JSON string: {}", e);
                 "{}".to_string()
             });
-            info!("🔧 DyingstarServicesPlugin: Sending message to external service: {}", message);
+            debug!("🔧 DyingstarServicesPlugin: Sending message to external service: {}", message);
             match websocket.lock() {
                 Ok(mut ws_guard) => {
                     if let Some(sender) = ws_guard.as_mut() {
                         match sender.send_message(&OwnedMessage::Text(message.clone())) {
-                            Ok(_) => info!("🔧 DyingstarServicesPlugin: ✅ Sent message to external service"),
+                            Ok(_) => debug!("🔧 DyingstarServicesPlugin: ✅ Sent message to external service"),
                             Err(e) => error!("🔧 DyingstarServicesPlugin: ❌ Failed to send message: {}", e),
                         }
                     } else {
@@ -148,14 +148,14 @@ impl SimplePlugin for DyingstarServicesPlugin {
             for msg in receiver.incoming_messages() {
                 match msg {
                     Ok(OwnedMessage::Text(s)) => {
-                        info!("[message][from][services]: {}", s);
+                        debug!("[message][from][services]: {}", s);
                         
                         // Parse the JSON message
                         match serde_json::from_str::<serde_json::Value>(&s) {
                             Ok(json) => {
                                 // Extract the data array
                                 if let Some(data_array) = json.get("data").and_then(|d| d.as_array()) {
-                                    info!("Received {} objects from external service", data_array.len());
+                                    debug!("Received {} objects from external service", data_array.len());
 
                                     // Spawn async task to emit events
                                     let context_clone = context.clone();

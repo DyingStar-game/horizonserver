@@ -218,7 +218,7 @@ impl SimplePlugin for DsGameServerPlugin {
                                     //         }
                                     //     }
                                 } else if value["namespace"] == "props" && value["event"] == "position" {
-                                    println!("Props position update received: {:?}", value);
+                                    // println!("Props position update received: {:?}", value);
                                     // Iterate over props data if it's an array
                                     for prop_data in value["data"].as_array().unwrap() {
                                         let events_clone = events2.clone();

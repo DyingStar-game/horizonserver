@@ -102,11 +102,11 @@ pub fn handle_object_create(
             error!("🚀 Plugin: ❌ Failed to parse GenericPropsRequest: {}", e);
             EventError::HandlerExecution("Invalid create request format".to_string())
         })?;
-		println!("🎮 GenericPropsPlugin: Handling object create {:?}", req_data);
+		debug!("🎮 GenericPropsPlugin: Handling object create {:?}", req_data);
 		handle.spawn(async move {
 			if !props.contains_key(&req_data.object_uuid) {
 				let Some(definition) = definitions.get(&req_data.object_type) else {
-					println!("🎮 GORC: ❌ Object definition not found for type: {}", req_data.object_type);
+					error!("🎮 GORC: ❌ Object definition not found for type: {}", req_data.object_type);
 					return;
 				};
 				let obj = GenericProps::new(
@@ -124,7 +124,7 @@ pub fn handle_object_create(
                     }
                 };
 				let gorc_id = gorc_instances.register_object_with_uuid(obj, position.clone(), maybe_obj_id).await;
-				println!("🚀 GORC: object register {}", gorc_id.to_string());
+				debug!("🚀 GORC: object register {}", gorc_id.to_string());
 				props.insert(uuid, gorc_id.clone());
 				if let Some(mut object_instance) = gorc_instances.get_object(gorc_id).await {
 					for channel in &definition.channels {
@@ -169,13 +169,13 @@ pub fn handle_object_update(
 		handle: luminal::Handle
 	) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 		// Parse request first
-		println!("🎮 GenericPropsPlugin: Handling object update event {:?}", event);
+		debug!("🎮 GenericPropsPlugin: Handling object update event {:?}", event);
 		let req_data = serde_json::from_value::<GenericPropsRequest>(event)
 		.map_err(|e| {
 			error!("🚀 Plugin: ❌ Failed to parse GenericPropsRequest: {}", e);
 			EventError::HandlerExecution("Invalid update request format".to_string())
 		})?;
-		println!("🎮 GenericPropsPlugin: Handling object update req_data {:?}", req_data);
+		debug!("🎮 GenericPropsPlugin: Handling object update req_data {:?}", req_data);
 
 		// Ensure we have access to the gorc instances manager
 		let Some(gorc_instances) = events.get_gorc_instances() else {

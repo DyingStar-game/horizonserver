@@ -168,7 +168,7 @@ impl GenericPropsPlugin {
         let props1 = Arc::clone(&self.props);
         
         events.on_plugin("genericprops", "update_object", move |event: serde_json::Value| {
-            println!("plugin genericprops (update): Receive object message {:?}", event);
+            debug!("plugin genericprops (update): Receive object message {:?}", event);
             if let Err(e) = update::handle_object_update(
                                 definitions1.clone(),
                                 props1.clone(),
@@ -190,7 +190,7 @@ impl GenericPropsPlugin {
         let props2 = Arc::clone(&self.props);
         
         events.on_plugin("genericprops", "create_object", move |event: serde_json::Value| {
-            println!("plugin genericprops (create): Receive object message {:?}", event);
+            debug!("plugin genericprops (create): Receive object message {:?}", event);
             if let Err(e) = update::handle_object_create(
                                 definitions2.clone(),
                                 props2.clone(),

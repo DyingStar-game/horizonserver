@@ -111,6 +111,9 @@ pub async fn handle_player_connected(
     
     println!("🎮 GORC: ✅ GORC instances manager available, registering player {}", event.object_data.connection_id);
     
+    // Clone object_data before creating player to avoid partial move
+    let object_data = event.object_data.clone();
+    
     // Create a new GORC player object with default configuration
     let player = GorcPlayer::new(
         event.object_uuid,
@@ -152,8 +155,8 @@ pub async fn handle_player_connected(
         if let Err(e) = events_clone.emit_gorc_instance(
             gorc_id,
             0, // Channel 0 for critical info
-            "gorc_info",
-            &gorc_info,
+            "gorc_zone_enter",
+            &object_data,
             horizon_event_system::Dest::Client
         ).await {
             error!("🎮 GORC: ❌ Failed to send GORC info to client: {}", e);

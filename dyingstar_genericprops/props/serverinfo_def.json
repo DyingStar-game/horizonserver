@@ -1,0 +1,23 @@
+{
+	"channels": [
+		{
+			"zone": 0,
+			"distance": 9000000000000.0,
+			"frequency": 1.0,
+			"properties": [
+				"fps",
+				"objects_number",
+				"players_number",
+				"scenes_number"
+			]
+		},
+		{
+			"zone": 6,
+			"distance": 9000000000001.0,
+			"frequency": 1.0,
+			"properties": [
+				"scenename"
+			]
+		}
+	]
+}

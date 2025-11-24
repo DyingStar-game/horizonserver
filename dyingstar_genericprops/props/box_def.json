@@ -20,7 +20,7 @@
 		},
 		{
 			"zone": 3,
-			"distance": 600.0,
+			"distance": 210.0,
 			"frequency": 2.0,
 			"properties": [
 				"qrcode",
@@ -31,7 +31,7 @@
 		},
 		{
 			"zone": 6,
-			"distance": 620.0,
+			"distance": 220.0,
 			"frequency": 3.0,
 			"properties": [
 				"scenename",

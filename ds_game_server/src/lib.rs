@@ -374,7 +374,7 @@ impl SimplePlugin for DsGameServerPlugin {
             "movement",
             "update_velocity",
             move |wrapper: ClientEventWrapper<serde_json::Value>, _player_id: PlayerId, _connection: ClientConnectionRef| {
-                info!("📝 LoggerPlugin: 🦘 Client movement from player {}", wrapper.player_id);
+                debug!("📝 LoggerPlugin: 🦘 Client movement from player {}", wrapper.player_id);
                 // println!("player movement {:?}", wrapper);
                 // println!("📝 LoggerPlugin: 🦘 Client movement");
 

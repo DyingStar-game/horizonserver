@@ -62,6 +62,7 @@ use horizon_event_system::{
     create_simple_plugin,
     EventSystem,
     GorcObjectId,
+    GorcEvent,
     LogLevel,
     PlayerId,
     PluginError,
@@ -437,18 +438,15 @@ impl PlayerPlugin {
         let events_for_move = Arc::clone(&events);
         let luminal_handle_move = luminal_handle.clone();
         events
-            .on_gorc_client(
-                luminal_handle,
+            .on_gorc_instance(
                 "GorcPlayer",
                 0, // Channel 0: Critical movement data
                 "move",
-                move |gorc_event, client_player, connection, object_instance| {
+                move |gorc_event: GorcEvent, object_instance| {
                     debug!("🎮 PlayerPlugin: received GORC channel 0 (movement) event!");                    
                     // Use the dedicated movement handler
                     movement::handle_movement_request_sync(
                         gorc_event,
-                        client_player,
-                        connection,
                         object_instance,
                         events_for_move.clone(),
                         luminal_handle_move.clone()

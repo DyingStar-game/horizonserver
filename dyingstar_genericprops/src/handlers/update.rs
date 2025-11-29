@@ -130,7 +130,6 @@ pub fn handle_object_create(
 					for channel in &definition.channels {
 						object_instance.mark_needs_update(channel.zone);
 					}
-					// object_instance.update_position(position)
 					// Emit the object creation event to notify clients
 					if req_data.object_type == "planet" {
 						if let Err(e) = events.emit_gorc_instance(
@@ -195,6 +194,17 @@ pub fn handle_object_update(
 					let zone_set = object_instance.get_object_mut::<GenericProps>().expect("Object must exists").update(req_data.object_data.clone());
 					for zone in zone_set {
 						object_instance.mark_needs_update(zone);
+
+						if let Some(position_value) = req_data.object_data.get("position") {
+							if let Ok(position) = serde_json::from_value(position_value.clone()) {
+								// TODO Not sure required to update object_instance position here
+								// object_instance.update_position(position);
+
+								// we update the position in gorc for update zones 
+								gorc_instances.update_object_position(gorc_id, position).await;
+								// TODO get children objects and update their position too in 'global position'
+							}
+						}
 
 						for replicationlayer in object_instance.get_object::<GenericProps>().expect("Object must exists").get_layers().iter() {
 							if replicationlayer.channel == zone {

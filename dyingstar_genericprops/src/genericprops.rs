@@ -82,6 +82,7 @@ impl GorcObject for GenericProps {
     }
 
     fn position(&self) -> Vec3 {
+		println!("Getting position for object {}", self.uuid);
         //self.position
 		if let Some(zone) = self.object_def.index.get("position") {
 			 serde_json::from_value::<Vec3>(self.data[zone].get("position").unwrap().clone()).expect("Object should have position")

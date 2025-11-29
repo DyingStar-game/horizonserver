@@ -12,6 +12,7 @@ pub mod props;
 use crate::props::testplanet::Testplanet;
 use crate::props::player::Player;
 use crate::props::box50cm::Box50cm;
+use crate::props::storagewarehouse::{randomize_storage_warehouse, StorageType, get_item_scene_path};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -218,7 +219,8 @@ impl SimplePlugin for DyingstarPropsPlugin {
 
                 let player = props::player::Player::new(
                     event.object_data.name.clone(),
-                    Vec3::new(2200000.0, 0.0 + y, 0.0 + z),
+                    Vec3::new(-2422100.0, 0.0 + y, 0.0 + z),
+                    // Vec3::new(-2125000.667, 249.366 + y, 6000.0 + z), // City
                     Vec3::new(0.0, 0.0, 0.0),
                     event.object_uuid.clone(),
                 );
@@ -233,8 +235,9 @@ impl SimplePlugin for DyingstarPropsPlugin {
                             "position": player.position,
                             "rotation": player.rotation,
                             "connection_id": event.object_data.connection_id,
-                            // "parent_id": "3a695373-a9b7-45b1-b5b2-6649dd5e12dc", // TODO temp planet parent_id
-                            "parent_id": "65345350-5a40-4f44-a3c1-0ca5641cb97a",
+                            "parent_id": "9f29bc8f-c01d-4bfc-a781-a38a70807da3", // Sandbox
+                            // "parent_id": "65345350-5a40-4f44-a3c1-0ca5641cb97a", // Tarsis 5
+                            // "parent_id": "85927094-ccd5-4d21-9980-ee087cc46ce8", // tarsis_5_2
 
                         }
                     }))
@@ -721,6 +724,162 @@ impl SimplePlugin for DyingstarPropsPlugin {
                         }
                     }),
                 ).await.map_err(|e| PluginError::ExecutionError(format!("failed to emit plugin event: {}", e)))?;
+
+                // wait 10 seconds, time to planets spawned
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+
+                // spawn the city
+                // let city_uuid = Uuid::new_v4().to_string();
+                // context.events().emit_plugin("genericprops", "create_object", &serde_json::json!({
+                // "object_type": "city",
+                // "object_uuid": city_uuid,
+                // "object_data": {
+                //     "name": "city",
+                //     "parent_id": "9f29bc8f-c01d-4bfc-a781-a38a70807da3", // Sandbox
+                //     "scenename": "scenes/props/city/sandbox_capital.tscn",
+                //     "position": {"x": -2122000.0, "y": 0.0, "z": 0.0},
+                //     "rotation": {"x": 0.0, "y": 0.0, "z": 1.5708},
+                // }
+                // })).await.map_err(|e| PluginError::ExecutionError(format!("failed to emit plugin event: {}", e)))?;
+
+                // context.events().emit_plugin("gameserverplugin", "spawn_object", &serde_json::json!({
+                // "object_type": "city",
+                // "object_uuid": city_uuid,
+                // "object_data": {
+                //     "name": "city",
+                //     "parent_id": "9f29bc8f-c01d-4bfc-a781-a38a70807da3", // Sandbox
+                //     "scenename": "scenes/props/city/sandbox_capital.tscn",
+                //     "position": {"x": -2122000.0, "y": 0.0, "z": 0.0},
+                //     "rotation": {"x": 0.0, "y": 0.0, "z": 1.5708},
+                // }
+                // })).await.map_err(|e| PluginError::ExecutionError(format!("failed to emit plugin event: {}", e)))?;
+
+                /////////////////////////////////////////////////////////////////////////////////////////////////////////
+                /// Code for storagewarehouse object spawning
+                /////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+                // spawn the storagewarehouse
+                let storagewarehouse_uuid = Uuid::new_v4().to_string();
+                context.events().emit_plugin("genericprops", "create_object", &serde_json::json!({
+                "object_type": "storagewarehouse",
+                "object_uuid": storagewarehouse_uuid,
+                "object_data": {
+                    "name": "storagewarehouse",
+                    "parent_id": "9f29bc8f-c01d-4bfc-a781-a38a70807da3", // Sandbox
+                    "scenename": "scenes/props/StorageBoxes/storagewarehouse.tscn",
+                    "position": {"x": -2422000.0, "y": 0.0, "z": 0.0},
+                    "rotation": {"x": 0.0, "y": 0.0, "z": 1.5708},
+                }
+                })).await.map_err(|e| PluginError::ExecutionError(format!("failed to emit plugin event: {}", e)))?;
+
+                context.events().emit_plugin("gameserverplugin", "spawn_object", &serde_json::json!({
+                "object_type": "storagewarehouse",
+                "object_uuid": storagewarehouse_uuid,
+                "object_data": {
+                    "name": "storagewarehouse",
+                    "parent_id": "9f29bc8f-c01d-4bfc-a781-a38a70807da3", // Sandbox
+                    "scenename": "scenes/props/StorageBoxes/storagewarehouse.tscn",
+                    "position": {"x": -2422000.0, "y": 0.0, "z": 0.0},
+                    "rotation": {"x": 0.0, "y": 0.0, "z": 1.5708},
+                }
+                })).await.map_err(|e| PluginError::ExecutionError(format!("failed to emit plugin event: {}", e)))?;
+
+                // spawn dynamic boxes inside the storagewarehouse
+
+                // 15 rangees de containers, jusqu'a  4 de hauteur
+
+                // 1 rangee de container = 3 palettes (largeur) jusqu'a 9 de hauteur. en longeur 10 palettes
+
+// -16.675 0.0 -26.06
+// -16.675 0.0 -22.927
+
+
+// 21.706 0.0 -29.52
+// 21.706 0.0 -28.52
+
+
+
+
+
+
+
+                // scenes/props/StorageBoxes/container_liquid_1200x240x240.tscn
+                // scenes/props/StorageBoxes/container_standard_a_1200x240x240.tscn
+                // scenes/props/StorageBoxes/container_standard_b_1200x240x240.tscn
+                // scenes/props/StorageBoxes/pallet_benne_120x80x100.tscn
+                // scenes/props/StorageBoxes/pallet_crate_120x80x100.tscn
+                // scenes/props/StorageBoxes/pallet_liquid_120x80x100.tscn
+
+                // generate the boxes
+                let mut boxes_counter = 0;
+                for row in 0..15 {
+                    let storage_config = randomize_storage_warehouse();
+                    let row_offset = row as f32 * 2.6;
+
+                    info!("🔧 DyingstarPropsPlugin: Generated storage configuration: {:?}", storage_config.storage_type);
+                    info!("🔧 DyingstarPropsPlugin: Number of items to spawn: {}", storage_config.items.len());
+                    
+                    // Base position for the storage warehouse
+                    let base_x = -16.675;
+                    let base_y = 0.0;
+                    let base_z = -26.06 + row_offset;
+                    
+                    // Spawn each item in the storage configuration
+                    for item in storage_config.items {
+                        let item_uuid = Uuid::new_v4().to_string();
+                        let scene_path = get_item_scene_path(storage_config.storage_type, &item.item_type);
+                        
+                        // Calculate position based on storage type and item position
+                        let (pos_x, pos_y, pos_z) = match storage_config.storage_type {
+                            StorageType::Container => {
+                                // Linear positioning for containers
+                                // Spacing: 13 units between containers
+                                let x_offset = item.position.0 as f32 * 2.4;
+                                (base_x + x_offset, base_y, base_z)
+                            }
+                            StorageType::Pallet => {
+                                // Grid positioning for pallets
+                                // line (depth), column (width), height
+                                let line_spacing = 1.3; // 10 lines with spacing
+                                let column_spacing = 0.9; // 3 columns with spacing
+                                let height_spacing = 1.0; // vertical stacking
+
+                                let x_offset = item.position.0 as f32 * line_spacing;
+                                let z_offset = item.position.1 as f32 * column_spacing;
+                                let y_offset = item.position.2 as f32 * height_spacing;
+                                
+                                (base_x + x_offset, base_y + y_offset, base_z + z_offset)
+                            }
+                        };
+                        
+                        // Spawn the item
+                        // TODO with gorc position problem, we not parent to storagewarehouse but to the planet directly
+                        let message = &serde_json::json!({
+                            "object_type": "box",
+                            "object_uuid": item_uuid,
+                            "object_data": {
+                                "name": format!("storage_{}_{}", 
+                                    match storage_config.storage_type {
+                                        StorageType::Container => "container",
+                                        StorageType::Pallet => "pallet",
+                                    },
+                                    item.item_type
+                                ),
+                                // "parent_id": storagewarehouse_uuid,
+                                "parent_id": "9f29bc8f-c01d-4bfc-a781-a38a70807da3",
+                                "scenename": scene_path,
+                                "position": {"x": -2422000.0 + pos_x, "y": pos_y, "z": pos_z},
+                                "rotation": {"x": 0.0, "y": 0.0, "z": 0.0},
+                            }
+                        });
+                        boxes_counter += 1;
+                        context.events().emit_plugin("genericprops", "create_object", message).await.map_err(|e| PluginError::ExecutionError(format!("failed to emit plugin event: {}", e)))?;
+                        context.events().emit_plugin("gameserverplugin", "spawn_object", message).await.map_err(|e| PluginError::ExecutionError(format!("failed to emit plugin event: {}", e)))?;
+                    }
+                }
+                
+                info!("🔧 DyingstarPropsPlugin: ✅ Storage warehouse items ({} boxes) spawned successfully!", boxes_counter);
+
                 Ok(())
             }.await;
             if let Err(e) = result {

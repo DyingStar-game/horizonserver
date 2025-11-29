@@ -164,24 +164,28 @@ impl SimplePlugin for DyingstarServicesPlugin {
                                         // Loop through each object in the data array
                                         for (index, obj) in data_array_clone.iter().enumerate() {
                                             if let Some(object_type) = obj.get("object_type").and_then(|t| t.as_str()) {
+                                                let mut modified_obj = obj.clone();
                                                 if object_type == "planet" {
                                                     debug!("Emitting planet object to genericprops...");
-                                                    if let Err(e) = context_clone.events().emit_plugin("genericprops", "create_object", obj).await {
+                                                    if let Some(scenename) = modified_obj["object_data"]["scenename"].as_str() {
+                                                        modified_obj["object_data"]["scenename"] = scenename.replace("scenes/planet/", "scenes/systems/tarsis/").into();
+                                                    }
+
+                                                    if let Err(e) = context_clone.events().emit_plugin("genericprops", "create_object", &modified_obj).await {
                                                         error!("Failed to emit plugin event: {}", e);
                                                     }
 
                                                     // to gameserver
                                                     debug!("Emitting planet object to gameserver...");
-                                                    if let Err(e) = context_clone.events().emit_plugin("gameserverplugin", "spawn_object", obj).await {
+                                                    if let Err(e) = context_clone.events().emit_plugin("gameserverplugin", "spawn_object", &modified_obj).await {
                                                         error!("Failed to emit plugin event: {}", e);
                                                     }
                                                 }
                                                 else if object_type == "moon" {
                                                     debug!("Emitting moon object to genericprops...");
-                                                    let mut modified_obj = obj.clone();
                                                     modified_obj["object_type"] = "planet".into();
                                                     if let Some(scenename) = modified_obj["object_data"]["scenename"].as_str() {
-                                                        modified_obj["object_data"]["scenename"] = scenename.replace("moon", "planet").into();
+                                                        modified_obj["object_data"]["scenename"] = scenename.replace("scenes/moon/", "scenes/systems/tarsis/").into();
                                                     }
                                                     
                                                     if let Err(e) = context_clone.events().emit_plugin("genericprops", "create_object", &modified_obj).await {
@@ -193,6 +197,32 @@ impl SimplePlugin for DyingstarServicesPlugin {
                                                     if let Err(e) = context_clone.events().emit_plugin("gameserverplugin", "spawn_object", &modified_obj).await {
                                                         error!("Failed to emit plugin event: {}", e);
                                                     }
+                                                } else if object_type == "star" {
+                                                    debug!("Emitting star object to genericprops...");
+                                                    if let Some(scenename) = modified_obj["object_data"]["scenename"].as_str() {
+                                                        modified_obj["object_data"]["scenename"] = scenename.replace("scenes/systems/tarsis/tarsis.tscn", "scenes/star/star.tscn").into();
+                                                    }
+                                                    if let Some(parent_id) = modified_obj["object_data"]["parent_id"].as_str() {
+                                                        modified_obj["object_data"]["parent_id"] = "".into();
+                                                    }
+                                                    modified_obj["object_data"]["position"] = serde_json::json!({
+                                                        "x": 0.0,
+                                                        "y": 0.0,
+                                                        "z": 0.0
+                                                    });
+                                                    
+                                                    if let Err(e) = context_clone.events().emit_plugin("genericprops", "create_object", &modified_obj).await {
+                                                        error!("Failed to emit plugin event: {}", e);
+                                                    }
+
+                                                    // to gameserver
+                                                    debug!("Emitting star object to gameserver...");
+                                                    if let Err(e) = context_clone.events().emit_plugin("gameserverplugin", "spawn_object", &modified_obj).await {
+                                                        error!("Failed to emit plugin event: {}", e);
+                                                    }
+                                                } else {
+                                                    warn!("Unknown object_type '{}' at index {}", object_type, index);
+                                                    
                                                 }
                                             }
                                         }

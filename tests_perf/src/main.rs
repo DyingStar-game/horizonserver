@@ -35,6 +35,10 @@ struct Args {
     /// Enable player movement after connection (disabled by default)
     #[arg(short = 'm', long, default_value = "false")]
     enable_movement: bool,
+    
+    /// Enable verbose output
+    #[arg(short, long, default_value = "false")]
+    verbose: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -85,6 +89,7 @@ async fn create_websocket_client(
     duration: Duration,
     stats: Arc<ConnectionStats>,
     enable_movement: bool,
+    verbose: bool,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let login_name = format!("{}_{}", base_name, client_id);
     
@@ -192,7 +197,9 @@ async fn create_websocket_client(
                 match msg {
                     Some(Ok(Message::Text(text))) => {
                         stats.messages_received.fetch_add(1, Ordering::Relaxed);
-                        println!("Client {}: Received message: {}", client_id, text);
+                        if verbose {
+                            println!("Client {}: Received message: {}", client_id, text);
+                        }
                         
                         // Check if this is an init_ack message
                         if !init_ack_received {
@@ -307,6 +314,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let stats_clone = Arc::clone(&stats);
         
         let enable_movement = args.enable_movement;
+        let verbose = args.verbose;
         
         let task = tokio::spawn(async move {
             if let Err(e) = create_websocket_client(
@@ -317,6 +325,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 duration,
                 stats_clone,
                 enable_movement,
+                verbose,
             ).await {
                 eprintln!("Client {}: Task failed: {}", client_id, e);
             }

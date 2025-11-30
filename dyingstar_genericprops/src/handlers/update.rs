@@ -4,7 +4,8 @@ use horizon_event_system::{
     EventError,
 };
 use luminal::Handle;
-use tracing::{debug, error};
+use luminal::error;
+use tracing::{debug, info, error};
 use serde_json;
 use dashmap::DashMap;
 
@@ -84,6 +85,59 @@ async fn broadcast_object_update(
     }
 }
 
+/// Update the global positions of all child objects when parent moves
+async fn update_children_positions(
+    parent_gorc_id: GorcObjectId,
+    parent_position: horizon_event_system::Vec3,
+    props: Arc<DashMap<String, GorcObjectId>>,
+    gorc_instances: &horizon_event_system::GorcInstanceManager,
+) {
+    let parent_id_str = parent_gorc_id.to_string();
+    
+    // Iterate through all objects to find children
+    for entry in props.iter() {
+        let child_gorc_id = *entry.value();
+        
+        // Skip if it's the parent itself
+        if child_gorc_id == parent_gorc_id {
+            continue;
+        }
+        
+        // Get the child object instance
+        if let Some(mut child_instance) = gorc_instances.get_object(child_gorc_id).await {
+            if let Some(child_props) = child_instance.get_object_mut::<GenericProps>() {
+                // Check if this object has a parent_id property matching our parent
+                let has_matching_parent = child_props.data.values()
+                    .filter_map(|zone_data| zone_data.get("parent_id"))
+                    .any(|parent_id_value| {
+                        parent_id_value.as_str() == Some(&parent_id_str)
+                    });
+                
+                if has_matching_parent {
+                    // Get the child's local position
+                    let child_local_position = child_props.position();
+                    
+                    // Calculate the new global position
+                    let new_global_position = horizon_event_system::Vec3 {
+                        x: parent_position.x + child_local_position.x,
+                        y: parent_position.y + child_local_position.y,
+                        z: parent_position.z + child_local_position.z,
+                    };
+                    
+                    debug!(
+                        "🚀 GORC: Updating child object {} global position to {:?}",
+                        child_gorc_id.to_string(),
+                        new_global_position
+                    );
+                    
+                    // Update the child's position in the GORC system
+                    gorc_instances.update_object_position(child_gorc_id, new_global_position).await;
+                }
+            }
+        }
+    }
+}
+
 
 pub fn handle_object_create(
 		definitions: Arc<DashMap<String, ObjectDefinition>>,
@@ -109,21 +163,61 @@ pub fn handle_object_create(
 					error!("🎮 GORC: ❌ Object definition not found for type: {}", req_data.object_type);
 					return;
 				};
-				let obj = GenericProps::new(
+				let mut obj = GenericProps::new(
 					definition.clone(),
 					req_data.object_data.clone(),
 					req_data.object_uuid // if empty, it will generate a new uuid
 				);
 				let uuid = obj.uuid.clone();
 				let position = obj.position();
+
+				// Check if object has a parent_id and get parent's global_position
+				let parent_id = obj.data.values()
+					.filter_map(|zone_data| zone_data.get("parent_id"))
+					.filter_map(|v| v.as_str())
+					.find(|s| !s.is_empty())
+					.map(|s| s.to_string());
+
+				if let Some(parent_id_str) = parent_id {
+					// Search for parent object in props
+					if let Some(parent_gorc_id) = props.get(&parent_id_str) {
+						let parent_gorc_id = *parent_gorc_id;
+						// Get parent object instance to access its global_position
+						if let Some(parent_instance) = gorc_instances.get_object(parent_gorc_id).await {
+							if let Some(parent_props) = parent_instance.get_object::<GenericProps>() {
+								// Set global_position to parent's global_position + local position
+								obj.global_position = horizon_event_system::Vec3 {
+									x: parent_props.global_position.x + position.x,
+									y: parent_props.global_position.y + position.y,
+									z: parent_props.global_position.z + position.z,
+								};
+								debug!("🚀 GORC: Setting child object {} global_position based on parent {} global_position: {:?}", 
+									uuid, parent_id_str, obj.global_position);
+							} else {
+								error!("🚀 GORC: ❌ Parent object props not found for child {}", uuid);
+								obj.global_position = position.clone();
+							}
+						} else {
+							error!("🚀 GORC: ❌ Parent object instance not found for child {}", uuid);
+							obj.global_position = position.clone();
+						}
+					} else {
+						error!("🚀 GORC: ❌ Parent object not found for child {}", uuid);
+						obj.global_position = position.clone();
+					}
+				} else {
+					obj.global_position = position.clone();
+				}
+
                 // Convert parse Result -> Option<GorcObjectId>
                 let maybe_obj_id = match GorcObjectId::from_str(&uuid) {
                     Ok(id) => Some(id),
-                    Err(_e) => {
-                        None
-                    }
-                };
-				let gorc_id = gorc_instances.register_object_with_uuid(obj, position.clone(), maybe_obj_id).await;
+					Err(_e) => {
+						None
+					}
+				};
+				let global_position = obj.global_position.clone();
+				let gorc_id = gorc_instances.register_object_with_uuid(obj, global_position, maybe_obj_id).await;
 				debug!("🚀 GORC: object register {}", gorc_id.to_string());
 				props.insert(uuid, gorc_id.clone());
 				if let Some(mut object_instance) = gorc_instances.get_object(gorc_id).await {
@@ -196,13 +290,57 @@ pub fn handle_object_update(
 						object_instance.mark_needs_update(zone);
 
 						if let Some(position_value) = req_data.object_data.get("position") {
-							if let Ok(position) = serde_json::from_value(position_value.clone()) {
+							if let Ok(position) = serde_json::from_value::<horizon_event_system::Vec3>(position_value.clone()) {
 								// TODO Not sure required to update object_instance position here
 								// object_instance.update_position(position);
 
-								// we update the position in gorc for update zones 
-								gorc_instances.update_object_position(gorc_id, position).await;
-								// TODO get children objects and update their position too in 'global position'
+								// we update the position in gorc for update zones
+
+								// Check if object has a parent_id and adjust position accordingly
+								let final_position = if let Some(parent_id_value) = req_data.object_data.get("parent_id") {
+									if let Some(parent_id_str) = parent_id_value.as_str() {
+										if !parent_id_str.is_empty() {
+											// Search for parent object in props
+											if let Some(parent_gorc_ref) = props_clone.get(parent_id_str) {
+												let parent_gorc_id = *parent_gorc_ref;
+												// Get parent object instance to access its global_position
+												if let Some(parent_instance) = gorc_instances.get_object(parent_gorc_id).await {
+													if let Some(parent_props) = parent_instance.get_object::<GenericProps>() {
+														// Calculate global position: parent's global_position + local position
+														let global_pos = horizon_event_system::Vec3 {
+															x: parent_props.global_position.x + position.x,
+															y: parent_props.global_position.y + position.y,
+															z: parent_props.global_position.z + position.z,
+														};
+														debug!("🚀 GORC: Child object {} position adjusted with parent {} global_position: {:?}", 
+															gorc_id.to_string(), parent_id_str, global_pos);
+														global_pos
+													} else {
+														position
+													}
+												} else {
+													position
+												}
+											} else {
+												position
+											}
+										} else {
+											position
+										}
+									} else {
+										position
+									}
+								} else {
+									position
+								};
+								
+								// Update the object_instance global_position property
+								object_instance.get_object_mut::<GenericProps>().expect("Object must exists").global_position = final_position;
+								
+								gorc_instances.update_object_position(gorc_id, final_position).await;
+
+								// Update children objects' global positions
+								update_children_positions(gorc_id, final_position, Arc::clone(&props_clone), &gorc_instances).await;
 							}
 						}
 

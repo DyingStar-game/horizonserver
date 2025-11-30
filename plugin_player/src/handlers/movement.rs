@@ -223,11 +223,49 @@ pub fn handle_movement_request_sync(
         if let Some(player_id_str) = event_data["player_id"].as_str() {
             match PlayerId::from_str(player_id_str) {
                 Ok(player_id) => {
-                    if let Err(e) = events.update_player_position(player_id, move_data.new_position).await {
+                    // Check if player has a parent_id
+                    let mut final_position = move_data.new_position;
+
+                    if let Some(gorc_instances) = events.get_gorc_instances() {
+                        if let Ok(gorc_id) = GorcObjectId::from_str(&object_id_str) {
+                            if let Some(player_instance) = gorc_instances.get_object(gorc_id).await {
+                                if let Some(player) = player_instance.get_object::<crate::player::GorcPlayer>() {
+                                    let parent_id = &player.critical_data.parent_id;
+                                    
+                                    // If parent_id is not empty, search for parent object
+                                    if !parent_id.is_empty() {
+                                        debug!("🚀 STEP 11.3: Player has parent_id: {}", parent_id);
+                                        
+                                        if let Ok(parent_gorc_id) = GorcObjectId::from_str(parent_id) {
+                                            if let Some(parent_instance) = gorc_instances.get_object(parent_gorc_id).await {
+                                                let parent_position = parent_instance.object.position();
+                                                
+                                                // Calculate global position as parent position + player local position
+                                                final_position = horizon_event_system::Vec3 {
+                                                    x: parent_position.x + move_data.new_position.x,
+                                                    y: parent_position.y + move_data.new_position.y,
+                                                    z: parent_position.z + move_data.new_position.z,
+                                                };
+                                                
+                                                debug!("🚀 STEP 11.4: ✅ Updated position based on parent {} position {:?}, final position: {:?}",
+                                                    parent_id, parent_position, final_position);
+                                            } else {
+                                                debug!("🚀 STEP 11.4: ⚠️ Parent object {} not found", parent_id);
+                                            }
+                                        } else {
+                                            debug!("🚀 STEP 11.4: ⚠️ Failed to parse parent_id as GorcObjectId: {}", parent_id);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    
+                    if let Err(e) = events.update_player_position(player_id, final_position).await {
                         error!("🚀 STEP 11.5: ❌ Failed to update GORC player tracking: {}", e);
                     } else {
                         debug!("🚀 STEP 11.5: ✅ Updated GORC player tracking for player {} at position {:?}",
-                            player_id_str, move_data.new_position);
+                            player_id_str, final_position);
                     }
                 }
                 Err(e) => {

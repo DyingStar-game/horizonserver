@@ -810,75 +810,82 @@ impl SimplePlugin for DyingstarPropsPlugin {
                 // scenes/props/StorageBoxes/pallet_crate_120x80x100.tscn
                 // scenes/props/StorageBoxes/pallet_liquid_120x80x100.tscn
 
-                // // generate the boxes
-                // let mut boxes_counter = 0;
-                // for row in 0..15 {
-                //     let storage_config = randomize_storage_warehouse();
-                //     let row_offset = row as f32 * 2.6;
+                // generate the boxes
+                let mut boxes_counter = 0;
+                for row in 0..17 {
+                    if row == 7 || row == 8 || row == 9 {
+                        continue;
+                    }
+                    let storage_config = randomize_storage_warehouse();
+                    let row_offset = row as f32 * 3.0;
 
-                //     info!("🔧 DyingstarPropsPlugin: Generated storage configuration: {:?}", storage_config.storage_type);
-                //     info!("🔧 DyingstarPropsPlugin: Number of items to spawn: {}", storage_config.items.len());
+                    info!("🔧 DyingstarPropsPlugin: Generated storage configuration: {:?}", storage_config.storage_type);
+                    info!("🔧 DyingstarPropsPlugin: Number of items to spawn: {}", storage_config.items.len());
                     
-                //     // Base position for the storage warehouse
-                //     let base_x = -16.675;
-                //     let base_y = 0.0;
-                //     let base_z = -26.06 + row_offset;
+                    // Base position for the storage warehouse
+                    let base_x = -16.675;
+                    let base_y = 0.0;
+                    let base_z = -26.06 + row_offset;
                     
-                //     // Spawn each item in the storage configuration
-                //     for item in storage_config.items {
-                //         let item_uuid = Uuid::new_v4().to_string();
-                //         let scene_path = get_item_scene_path(storage_config.storage_type, &item.item_type);
+                    // Spawn each item in the storage configuration
+                    for item in storage_config.items {
+                        let item_uuid = Uuid::new_v4().to_string();
+                        let scene_path = get_item_scene_path(storage_config.storage_type, &item.item_type);
                         
-                //         // Calculate position based on storage type and item position
-                //         let (pos_x, pos_y, pos_z) = match storage_config.storage_type {
-                //             StorageType::Container => {
-                //                 // Linear positioning for containers
-                //                 // Spacing: 13 units between containers
-                //                 let x_offset = item.position.0 as f32 * 2.4;
-                //                 (base_x + x_offset, base_y, base_z)
-                //             }
-                //             StorageType::Pallet => {
-                //                 // Grid positioning for pallets
-                //                 // line (depth), column (width), height
-                //                 let line_spacing = 1.3; // 10 lines with spacing
-                //                 let column_spacing = 0.9; // 3 columns with spacing
-                //                 let height_spacing = 1.0; // vertical stacking
+                        // Calculate position based on storage type and item position
+                        let (pos_x, pos_y, pos_z) = match storage_config.storage_type {
+                            StorageType::Container => {
+                                // Linear positioning for containers
+                                // Spacing: 13 units between containers
+                                // size = 1200x240x240
+                                let y_offset = item.position.2 as f32 * 2.4;
+                                (6.0 + base_x, base_y + y_offset, 1.5 + base_z)
+                            }
+                            StorageType::Pallet => {
+                                // Grid positioning for pallets
+                                // line (depth), column (width), height
+                                // size = 120x80x100
+                                let line_spacing = 1.4; // 10 lines with spacing
+                                let column_spacing = 1.0; // 3 columns with spacing
+                                let height_spacing = 1.0; // vertical stacking
 
-                //                 let x_offset = item.position.0 as f32 * line_spacing;
-                //                 let z_offset = item.position.1 as f32 * column_spacing;
-                //                 let y_offset = item.position.2 as f32 * height_spacing;
+                                let x_offset = item.position.0 as f32 * line_spacing;
+                                let z_offset = item.position.1 as f32 * column_spacing;
+                                let y_offset = item.position.2 as f32 * height_spacing;
                                 
-                //                 (base_x + x_offset, base_y + y_offset, base_z + z_offset)
-                //             }
-                //         };
+                                (0.6 + base_x + x_offset, base_y + y_offset, 0.5 + base_z + z_offset)
+                            }
+                        };
                         
-                //         // Spawn the item
-                //         // TODO with gorc position problem, we not parent to storagewarehouse but to the planet directly
-                //         let message = &serde_json::json!({
-                //             "object_type": "box",
-                //             "object_uuid": item_uuid,
-                //             "object_data": {
-                //                 "name": format!("storage_{}_{}", 
-                //                     match storage_config.storage_type {
-                //                         StorageType::Container => "container",
-                //                         StorageType::Pallet => "pallet",
-                //                     },
-                //                     item.item_type
-                //                 ),
-                //                 // "parent_id": storagewarehouse_uuid,
-                //                 "parent_id": "9f29bc8f-c01d-4bfc-a781-a38a70807da3",
-                //                 "scenename": scene_path,
-                //                 "position": {"x": -2422000.0 + pos_x, "y": pos_y, "z": pos_z},
-                //                 "rotation": {"x": 0.0, "y": 0.0, "z": 0.0},
-                //             }
-                //         });
-                //         boxes_counter += 1;
-                //         context.events().emit_plugin("genericprops", "create_object", message).await.map_err(|e| PluginError::ExecutionError(format!("failed to emit plugin event: {}", e)))?;
-                //         context.events().emit_plugin("gameserverplugin", "spawn_object", message).await.map_err(|e| PluginError::ExecutionError(format!("failed to emit plugin event: {}", e)))?;
-                //     }
-                // }
+                        // Spawn the item
+                        // TODO with gorc position problem, we not parent to storagewarehouse but to the planet directly
+                        let message = &serde_json::json!({
+                            "object_type": "box",
+                            "object_uuid": item_uuid,
+                            "object_data": {
+                                "name": format!("storage_{}_{}", 
+                                    match storage_config.storage_type {
+                                        StorageType::Container => "container",
+                                        StorageType::Pallet => "pallet",
+                                    },
+                                    item.item_type
+                                ),
+                                // "parent_id": storagewarehouse_uuid,
+                                "parent_id": storagewarehouse_uuid,
+                                "scenename": scene_path,
+                                "position": {"x": pos_x, "y": pos_y, "z": pos_z},
+                                "rotation": {"x": 0.0, "y": 0.0, "z": 0.0},
+                                "led_state": false,
+                                "weight": 10.0,
+                            }
+                        });
+                        boxes_counter += 1;
+                        context.events().emit_plugin("genericprops", "create_object", message).await.map_err(|e| PluginError::ExecutionError(format!("failed to emit plugin event: {}", e)))?;
+                        context.events().emit_plugin("gameserverplugin", "spawn_object", message).await.map_err(|e| PluginError::ExecutionError(format!("failed to emit plugin event: {}", e)))?;
+                    }
+                }
                 
-                // info!("🔧 DyingstarPropsPlugin: ✅ Storage warehouse items ({} boxes) spawned successfully!", boxes_counter);
+                info!("🔧 DyingstarPropsPlugin: ✅ Storage warehouse items ({} boxes) spawned successfully!", boxes_counter);
 
                 Ok(())
             }.await;

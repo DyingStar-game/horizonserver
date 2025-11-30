@@ -63,7 +63,7 @@ fn generate_container_storage(rng: &mut impl Rng) -> Vec<StorageItem> {
         
         items.push(StorageItem {
             item_type: container_type,
-            position: (i, 0, 0), // Simple linear positioning for containers
+            position: (0, 0, i), // Simple linear positioning for containers
         });
     }
     

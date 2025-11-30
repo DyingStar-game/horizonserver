@@ -40,7 +40,7 @@ use horizon_event_system::{
     EventError,
 };
 use luminal::Handle;
-use tracing::{debug, error};
+use tracing::{debug, info, error};
 use serde_json;
 use crate::events::PlayerMoveRequest;
 
@@ -260,7 +260,8 @@ pub fn handle_movement_request_sync(
                             }
                         }
                     }
-                    
+                    info!("🚀 STEP 11.5: Updating GORC player global_position for player {} to {:?}",
+                        player_id_str, final_position);
                     if let Err(e) = events.update_player_position(player_id, final_position).await {
                         error!("🚀 STEP 11.5: ❌ Failed to update GORC player tracking: {}", e);
                     } else {

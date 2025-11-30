@@ -191,7 +191,7 @@ pub fn handle_object_create(
 									y: parent_props.global_position.y + position.y,
 									z: parent_props.global_position.z + position.z,
 								};
-								debug!("🚀 GORC: Setting child object {} global_position based on parent {} global_position: {:?}", 
+								info!("🚀 GORC: Setting child object {} global_position based on parent {} global_position: {:?}", 
 									uuid, parent_id_str, obj.global_position);
 							} else {
 								error!("🚀 GORC: ❌ Parent object props not found for child {}", uuid);
@@ -281,8 +281,27 @@ pub fn handle_object_update(
 		let gorc_instances = gorc_instances; // move into async
 		handle.spawn(async move {
 			// Look up the gorc id for this object UUID
-			if let Some(gorc_ref) = props_clone.get(&req_data.object_uuid) {
-				let gorc_id = *gorc_ref; // GorcObjectId appears to be Copy in other code
+			let gorc_id_opt = if let Some(gorc_ref) = props_clone.get(&req_data.object_uuid) {
+				Some(*gorc_ref)
+			} else {
+				// Fallback: Try to parse UUID as GORC ID directly (for externally created objects)
+				match GorcObjectId::from_str(&req_data.object_uuid) {
+					Ok(gorc_id) => {
+						// Check if this GORC ID actually exists in the instance manager
+						if gorc_instances.get_object(gorc_id).await.is_some() {
+							debug!("🎮 GORC: ✅ Found object via direct GORC ID lookup: {}", req_data.object_uuid);
+							// Add to props map for faster future lookups
+							props_clone.insert(req_data.object_uuid.clone(), gorc_id);
+							Some(gorc_id)
+						} else {
+							None
+						}
+					}
+					Err(_) => None
+				}
+			};
+			
+			if let Some(gorc_id) = gorc_id_opt {
 				if let Some(mut object_instance) = gorc_instances.get_object(gorc_id).await {
 					// Update the GenericProps on the object instance. Clone object_data to avoid reuse/move issues.
 					let zone_set = object_instance.get_object_mut::<GenericProps>().expect("Object must exists").update(req_data.object_data.clone());
@@ -363,10 +382,10 @@ pub fn handle_object_update(
 					}
 					gorc_instances.update_object(gorc_id, object_instance).await;
 				} else {
-					error!("🎮 GORC: ❌ Invalid props uuid in request: {}", req_data.object_uuid);
+					error!("🎮 GORC: ❌ Object instance not found in GORC for uuid: {}", req_data.object_uuid);
 				}
 			} else {
-				error!("🎮 GORC: ❌ Unknown props uuid in request: {}", req_data.object_uuid);
+				error!("🎮 GORC: ❌ Unknown props uuid in request (not in props map and not a valid GORC ID): {}", req_data.object_uuid);
 			}
 		});
 

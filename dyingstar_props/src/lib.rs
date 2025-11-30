@@ -27,6 +27,7 @@ pub struct NewPlayerDataObjectData {
     pub position: Vec3,
     pub rotation: Vec3,
     pub connection_id: PlayerId,
+    pub spawn_point: i8,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -209,17 +210,28 @@ impl SimplePlugin for DyingstarPropsPlugin {
 
                 // TODO get player from persistence service
                 
+                // Set default coordinates based on spawn_point
+                let spawn_point = event.object_data.spawn_point;
+                let (base_x, base_y, base_z, parent_uuid) = match spawn_point {
+                    1 => (15500.0, 300.0, 15500.0, "ed20bda3-f6f3-4053-b9de-968f73ebc44c".to_string()), // Sandbox surface => city
+                    2 => (-2422100.0, 100.0, 0.0, "9f29bc8f-c01d-4bfc-a781-a38a70807da3".to_string()), // Sandbox
+                    3 => (0.0, 3.0, -152.0, "b9d2e503-0adb-4add-919f-85aaff65be0f".to_string()), // moon 5_2 => storage warehouse 1
+                    4 => (-2422100.0, 0.0, 0.0, "c27c3d25-cdeb-4fef-a794-30f684fd8f67".to_string()), // moon 5_2
+                    _ => (-2422100.0, 100.0, 0.0, "9f29bc8f-c01d-4bfc-a781-a38a70807da3".to_string()),
+                };
+
+
                 // store in variable z the number of players and multiply it by 2.0
                 // The goal is to not spawn in same place (temporary code)
                 let player_count = players.read().await.len() as f64;
                 let row = (player_count / 20.0).floor();
                 let col = player_count % 20.0;
-                let z = col * 4.0;
-                let y = row * 4.0;
+                let z = col * 5.0;
+                let y = row * 5.0;
 
                 let player = props::player::Player::new(
                     event.object_data.name.clone(),
-                    Vec3::new(-2422100.0, 0.0 + y, 0.0 + z),
+                    Vec3::new(base_x, base_y + y, base_z + z),
                     // Vec3::new(-2125000.667, 249.366 + y, 6000.0 + z), // City
                     Vec3::new(0.0, 0.0, 0.0),
                     event.object_uuid.clone(),
@@ -235,9 +247,9 @@ impl SimplePlugin for DyingstarPropsPlugin {
                             "position": player.position,
                             "rotation": player.rotation,
                             "connection_id": event.object_data.connection_id,
-                            "parent_id": "9f29bc8f-c01d-4bfc-a781-a38a70807da3", // Sandbox
+                            "parent_id": parent_uuid,
                             // "parent_id": "65345350-5a40-4f44-a3c1-0ca5641cb97a", // Tarsis 5
-                            // "parent_id": "85927094-ccd5-4d21-9980-ee087cc46ce8", // tarsis_5_2
+                            // "parent_id": "c27c3d25-cdeb-4fef-a794-30f684fd8f67", // tarsis_5_2
 
                         }
                     }))
@@ -729,45 +741,45 @@ impl SimplePlugin for DyingstarPropsPlugin {
                 tokio::time::sleep(std::time::Duration::from_secs(10)).await;
 
                 // spawn the city
-                // let city_uuid = Uuid::new_v4().to_string();
-                // context.events().emit_plugin("genericprops", "create_object", &serde_json::json!({
-                // "object_type": "city",
-                // "object_uuid": city_uuid,
-                // "object_data": {
-                //     "name": "city",
-                //     "parent_id": "9f29bc8f-c01d-4bfc-a781-a38a70807da3", // Sandbox
-                //     "scenename": "scenes/props/city/sandbox_capital.tscn",
-                //     "position": {"x": -2122000.0, "y": 0.0, "z": 0.0},
-                //     "rotation": {"x": 0.0, "y": 0.0, "z": 1.5708},
-                // }
-                // })).await.map_err(|e| PluginError::ExecutionError(format!("failed to emit plugin event: {}", e)))?;
+                let city_uuid = "ed20bda3-f6f3-4053-b9de-968f73ebc44c".to_string();
+                context.events().emit_plugin("genericprops", "create_object", &serde_json::json!({
+                "object_type": "city",
+                "object_uuid": city_uuid,
+                "object_data": {
+                    "name": "city",
+                    "parent_id": "9f29bc8f-c01d-4bfc-a781-a38a70807da3", // Sandbox
+                    "scenename": "scenes/props/city/sandbox_capital.tscn",
+                    "position": {"x": -2122000.0, "y": 0.0, "z": 0.0},
+                    "rotation": {"x": 0.0, "y": 0.0, "z": 1.5708},
+                }
+                })).await.map_err(|e| PluginError::ExecutionError(format!("failed to emit plugin event: {}", e)))?;
 
-                // context.events().emit_plugin("gameserverplugin", "spawn_object", &serde_json::json!({
-                // "object_type": "city",
-                // "object_uuid": city_uuid,
-                // "object_data": {
-                //     "name": "city",
-                //     "parent_id": "9f29bc8f-c01d-4bfc-a781-a38a70807da3", // Sandbox
-                //     "scenename": "scenes/props/city/sandbox_capital.tscn",
-                //     "position": {"x": -2122000.0, "y": 0.0, "z": 0.0},
-                //     "rotation": {"x": 0.0, "y": 0.0, "z": 1.5708},
-                // }
-                // })).await.map_err(|e| PluginError::ExecutionError(format!("failed to emit plugin event: {}", e)))?;
+                context.events().emit_plugin("gameserverplugin", "spawn_object", &serde_json::json!({
+                "object_type": "city",
+                "object_uuid": city_uuid,
+                "object_data": {
+                    "name": "city",
+                    "parent_id": "9f29bc8f-c01d-4bfc-a781-a38a70807da3", // Sandbox
+                    "scenename": "scenes/props/city/sandbox_capital.tscn",
+                    "position": {"x": -2122000.0, "y": 0.0, "z": 0.0},
+                    "rotation": {"x": 0.0, "y": 0.0, "z": 1.5708},
+                }
+                })).await.map_err(|e| PluginError::ExecutionError(format!("failed to emit plugin event: {}", e)))?;
 
                 /////////////////////////////////////////////////////////////////////////////////////////////////////////
                 /// Code for storagewarehouse object spawning
                 /////////////////////////////////////////////////////////////////////////////////////////////////////////
 
                 // spawn the storagewarehouse
-                let storagewarehouse_uuid = Uuid::new_v4().to_string();
+                let storagewarehouse_uuid = "b9d2e503-0adb-4add-919f-85aaff65be0f".to_string();
                 context.events().emit_plugin("genericprops", "create_object", &serde_json::json!({
                 "object_type": "storagewarehouse",
                 "object_uuid": storagewarehouse_uuid,
                 "object_data": {
                     "name": "storagewarehouse",
-                    "parent_id": "9f29bc8f-c01d-4bfc-a781-a38a70807da3", // Sandbox
+                    "parent_id": "c27c3d25-cdeb-4fef-a794-30f684fd8f67", // Moon 5_2
                     "scenename": "scenes/props/StorageBoxes/storagewarehouse.tscn",
-                    "position": {"x": -2422000.0, "y": 0.0, "z": 0.0},
+                    "position": {"x": -1970000.0, "y": 0.0, "z": 0.0},
                     "rotation": {"x": 0.0, "y": 0.0, "z": 1.5708},
                 }
                 })).await.map_err(|e| PluginError::ExecutionError(format!("failed to emit plugin event: {}", e)))?;
@@ -777,9 +789,9 @@ impl SimplePlugin for DyingstarPropsPlugin {
                 "object_uuid": storagewarehouse_uuid,
                 "object_data": {
                     "name": "storagewarehouse",
-                    "parent_id": "9f29bc8f-c01d-4bfc-a781-a38a70807da3", // Sandbox
+                    "parent_id": "c27c3d25-cdeb-4fef-a794-30f684fd8f67", // Moon 5_2
                     "scenename": "scenes/props/StorageBoxes/storagewarehouse.tscn",
-                    "position": {"x": -2422000.0, "y": 0.0, "z": 0.0},
+                    "position": {"x": -1970000.0, "y": 0.0, "z": 0.0},
                     "rotation": {"x": 0.0, "y": 0.0, "z": 1.5708},
                 }
                 })).await.map_err(|e| PluginError::ExecutionError(format!("failed to emit plugin event: {}", e)))?;

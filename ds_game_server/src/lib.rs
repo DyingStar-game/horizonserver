@@ -179,6 +179,8 @@ impl SimplePlugin for DsGameServerPlugin {
                                                                 error!("Failed to update player position via EventSystem: {}", e);
                                                             }
                                                         });
+                                                    } else {
+                                                        error!("Invalid position coordinates in player data: {:?}", player_data["pos"]);
                                                     }
                                                 } else {
                                                     error!("Invalid position coordinates in player data: {:?}", player_data["pos"]);

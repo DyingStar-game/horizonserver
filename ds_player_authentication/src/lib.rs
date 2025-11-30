@@ -19,6 +19,7 @@ pub struct PlayerInit {
 pub struct PlayerInitData {
     pub login: String,
     pub password: String,
+    pub spawn_point: i8,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -199,6 +200,7 @@ impl SimplePlugin for DsPlayerAuthenticationPlugin {
                                 "position": Vec3::new(0.0, 0.0, 0.0),
                                 "rotation": Vec3::new(0.0, 0.0, 0.0),
                                 "connection_id": event.player_id,
+                                "spawn_point": event.data.spawn_point,
                             }
                         }))
                         .await

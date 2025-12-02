@@ -159,17 +159,21 @@ pub fn handle_object_create(
 		debug!("🎮 GenericPropsPlugin: Handling object create {:?}", req_data);
 		handle.spawn(async move {
 			if !props.contains_key(&req_data.object_uuid) {
+				// it's right case, object not added yet
+				// Load the definitions of type of object (json files into folder dyingstar_genericprops/props)
 				let Some(definition) = definitions.get(&req_data.object_type) else {
 					error!("🎮 GORC: ❌ Object definition not found for type: {}", req_data.object_type);
 					return;
 				};
+				// we create the GenericProps instance
 				let mut obj = GenericProps::new(
 					definition.clone(),
 					req_data.object_data.clone(),
 					req_data.object_uuid // if empty, it will generate a new uuid
 				);
 				let uuid = obj.uuid.clone();
-				let position = obj.position();
+				// Get the position from attributes or default to (0,0,0)
+				let position = obj.object_def.get_position(&req_data.object_data);
 
 				// Check if object has a parent_id and get parent's global_position
 				let parent_id = obj.data.values()
@@ -178,36 +182,30 @@ pub fn handle_object_create(
 					.find(|s| !s.is_empty())
 					.map(|s| s.to_string());
 
-				if let Some(parent_id_str) = parent_id {
-					// Search for parent object in props
-					if let Some(parent_gorc_id) = props.get(&parent_id_str) {
-						let parent_gorc_id = *parent_gorc_id;
-						// Get parent object instance to access its global_position
-						if let Some(parent_instance) = gorc_instances.get_object(parent_gorc_id).await {
-							if let Some(parent_props) = parent_instance.get_object::<GenericProps>() {
-								// Set global_position to parent's global_position + local position
-								obj.global_position = horizon_event_system::Vec3 {
-									x: parent_props.global_position.x + position.x,
-									y: parent_props.global_position.y + position.y,
-									z: parent_props.global_position.z + position.z,
-								};
-								info!("🚀 GORC: Setting child object {} global_position based on parent {} global_position: {:?}", 
-									uuid, parent_id_str, obj.global_position);
-							} else {
-								error!("🚀 GORC: ❌ Parent object props not found for child {}", uuid);
-								obj.global_position = position.clone();
-							}
+				
+				if let Some(parent_id_str) = &parent_id {
+					if let Ok(parent_gorc_id) = GorcObjectId::from_str(parent_id_str) {
+						if let Some(parent_global_position) = gorc_instances.get_object_position(parent_gorc_id).await {
+							obj.global_position = horizon_event_system::Vec3 {
+								x: parent_global_position.x + position.x,
+								y: parent_global_position.y + position.y,
+								z: parent_global_position.z + position.z,
+							};
+							debug!("🚀 GORC: Setting child object {} global_position based on parent {} global_position: {:?}", 
+								uuid, parent_id_str, obj.global_position);
 						} else {
-							error!("🚀 GORC: ❌ Parent object instance not found for child {}", uuid);
+							error!("🚀 GORC: ❌ Parent object position not found for child {}", uuid);
 							obj.global_position = position.clone();
 						}
 					} else {
-						error!("🚀 GORC: ❌ Parent object not found for child {}", uuid);
+						error!("🚀 GORC: ❌ Invalid parent GORC ID for child {}", uuid);
 						obj.global_position = position.clone();
 					}
 				} else {
 					obj.global_position = position.clone();
+					debug!("Creating object {} at global position {:?}", uuid, obj.global_position);
 				}
+				debug!("Creating object {} at global position {:?}", uuid, obj.global_position);
 
                 // Convert parse Result -> Option<GorcObjectId>
                 let maybe_obj_id = match GorcObjectId::from_str(&uuid) {
@@ -216,7 +214,7 @@ pub fn handle_object_create(
 						None
 					}
 				};
-				let global_position = obj.global_position.clone();
+				let global_position = obj.position();
 				let gorc_id = gorc_instances.register_object_with_uuid(obj, global_position, maybe_obj_id).await;
 				debug!("🚀 GORC: object register {}", gorc_id.to_string());
 				props.insert(uuid, gorc_id.clone());

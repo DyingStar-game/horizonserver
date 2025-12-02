@@ -237,18 +237,15 @@ pub fn handle_movement_request_sync(
                                         debug!("🚀 STEP 11.3: Player has parent_id: {}", parent_id);
                                         
                                         if let Ok(parent_gorc_id) = GorcObjectId::from_str(parent_id) {
-                                            if let Some(parent_instance) = gorc_instances.get_object(parent_gorc_id).await {
-                                                let parent_position = parent_instance.object.position();
-                                                
+                                            if let Some(parent_global_position) = gorc_instances.get_object_position(parent_gorc_id).await {
                                                 // Calculate global position as parent position + player local position
                                                 final_position = horizon_event_system::Vec3 {
-                                                    x: parent_position.x + move_data.new_position.x,
-                                                    y: parent_position.y + move_data.new_position.y,
-                                                    z: parent_position.z + move_data.new_position.z,
+                                                    x: parent_global_position.x + move_data.new_position.x,
+                                                    y: parent_global_position.y + move_data.new_position.y,
+                                                    z: parent_global_position.z + move_data.new_position.z,
                                                 };
-                                                
                                                 debug!("🚀 STEP 11.4: ✅ Updated position based on parent {} position {:?}, final position: {:?}",
-                                                    parent_id, parent_position, final_position);
+                                                    parent_id, parent_global_position, final_position);
                                             } else {
                                                 debug!("🚀 STEP 11.4: ⚠️ Parent object {} not found", parent_id);
                                             }
@@ -288,7 +285,7 @@ pub fn handle_movement_request_sync(
             }
 
             debug!("🚀 STEP 13: About to call emit_gorc_instance on channel 0");
-
+            info!(":::::::::::::::player movement of uuid {}", gorc_id);
             match events.emit_gorc_instance(
                 gorc_id,
                 0, // Channel 0: Critical movement data

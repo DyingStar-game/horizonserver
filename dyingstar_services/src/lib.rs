@@ -13,6 +13,8 @@ use std::net::TcpStream;
 use websocket::message::OwnedMessage;
 use websocket::sender::Writer;
 use websocket::result::WebSocketError;
+use std::fs;
+use std::path::Path;
 
 /// DyingstarServices Plugin
 pub struct DyingstarServicesPlugin {
@@ -24,11 +26,51 @@ pub struct DyingstarServicesPlugin {
 impl DyingstarServicesPlugin {
     pub fn new() -> Self {
         info!("🔧 DyingstarServicesPlugin: Creating new instance");
+
+        // Read socket URL from plugins.toml configuration file
+        let socket_url = Self::read_config_url().unwrap_or_else(|e| {
+            error!("Failed to read configuration: {}. Using default URL.", e);
+            "ws://localhost:9200".to_string()
+        });
+
+        info!("🔧 DyingstarServicesPlugin: Using resources dynamic address: {}", socket_url);
+
         Self {
             name: "dyingstar_services".to_string(),
-            socket_url: "ws://localhost:9200".to_string(),
+            socket_url,
             websocket: Arc::new(Mutex::new(None)),
         }
+    }
+
+    fn read_config_url() -> Result<String, String> {
+        // Try multiple possible paths for the plugins.toml file
+        let possible_paths = vec![
+            "../Horizon/plugins.toml",
+            "Horizon/plugins.toml",
+            "plugins.toml",
+        ];
+
+        for path in possible_paths {
+            if Path::new(path).exists() {
+                let contents = fs::read_to_string(path)
+                    .map_err(|e| format!("Failed to read {}: {}", path, e))?;
+                
+                let config: toml::Value = toml::from_str(&contents)
+                    .map_err(|e| format!("Failed to parse TOML: {}", e))?;
+                
+                if let Some(dyingstar_services) = config.get("dyingstar_services") {
+                    if let Some(address) = dyingstar_services.get("resources_dynamic_address") {
+                        if let Some(address_str) = address.as_str() {
+                            return Ok(format!("ws://{}", address_str));
+                        }
+                    }
+                }
+                
+                return Err(format!("'dyingstar_services.resources_dynamic_address' not found in {}", path));
+            }
+        }
+
+        Err("plugins.toml file not found in any expected location".to_string())
     }
 }
 
@@ -170,6 +212,7 @@ impl SimplePlugin for DyingstarServicesPlugin {
                                                     if let Some(scenename) = modified_obj["object_data"]["scenename"].as_str() {
                                                         modified_obj["object_data"]["scenename"] = scenename.replace("scenes/planet/", "scenes/systems/tarsis/").into();
                                                     }
+                                                    modified_obj["object_data"]["parent_id"] = "".into();
 
                                                     if let Err(e) = context_clone.events().emit_plugin("genericprops", "create_object", &modified_obj).await {
                                                         error!("Failed to emit plugin event: {}", e);

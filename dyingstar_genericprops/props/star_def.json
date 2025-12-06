@@ -8,9 +8,16 @@
 				"name",
 				"positions",
 				"rotations",
-				"scenename",
-				"parent_id",
 				"from_timestamp"
+			]
+		},
+		{
+			"zone": 6,
+			"distance": 400000000001.0,
+			"frequency": 1.0,
+			"properties": [
+				"scenename",
+				"parent_id"
 			]
 		}
 	]

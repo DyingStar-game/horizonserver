@@ -52,6 +52,7 @@ struct InitMessage {
 struct InitData {
     login: String,
     password: String,
+    spawn_point: i8,
 }
 
 #[derive(Debug)]
@@ -118,6 +119,7 @@ async fn create_websocket_client(
         data: InitData {
             login: login_name.clone(),
             password: password.clone(),
+            spawn_point: 1,
         },
     };
 

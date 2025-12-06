@@ -190,7 +190,25 @@ impl SimplePlugin for DsPlayerAuthenticationPlugin {
                         tracing::error!("Failed to send init_ack to client: {}", e);
                     }
 
-                    // send to propsplugin the new player event
+                    // Update the player_id stored in the connection manager
+                    // This replaces the temporary connection-level player_id with the database player_id
+                    if let Err(e) = events_system
+                        .emit_core("update_player_id", &serde_json::json!({
+                            "old_player_id": player_id,
+                            "new_player_id": player_db_id,
+                            "connection_id": player_id,  // The connection_id is currently the old player_id
+                        }))
+                        .await
+                    {
+                        tracing::error!("Failed to emit update_player_id event: {}", e);
+                    }
+
+
+                    // TODO emit event to the player_plugin for registration (connection)
+                    // TODO will replace the .on_core("player_connected")
+                    // TODO simplify game_server plugin to use unique player_id instead use mapping
+
+                    // send to gorcplugin (player plugin) the new player event
                     if let Err(e) = events_system
                         .emit_plugin("propsplugin", "new_player", &serde_json::json!({
                             "object_type": "player",
@@ -199,13 +217,13 @@ impl SimplePlugin for DsPlayerAuthenticationPlugin {
                                 "name": event.data.login,
                                 "position": Vec3::new(0.0, 0.0, 0.0),
                                 "rotation": Vec3::new(0.0, 0.0, 0.0),
-                                "connection_id": event.player_id,
+                                "connection_id": player_db_id,  // Use the new player_db_id here
                                 "spawn_point": event.data.spawn_point,
                             }
                         }))
                         .await
                     {
-                        tracing::error!("Failed to emit plugin event to propsplugin: {}", e);
+                        tracing::error!("Failed to emit plugin event to gorcplugin: {}", e);
                     }
                 });
             });

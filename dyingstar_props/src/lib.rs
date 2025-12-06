@@ -199,10 +199,7 @@ impl SimplePlugin for DyingstarPropsPlugin {
         let events_clone = events.clone();
         events.on_plugin("propsplugin", "new_player", move |event: NewPlayerData| {
             let players = players_clone.clone();
-        //     let planets = planets_clone.clone();
             let events = events_clone.clone();
-            // use the per-handler clone captured above
-        //     let mut gorc_system = gorc_for_new_player.clone();
             let runtime = runtime_for_new_player.clone();
             runtime.spawn(async move {
                 println!("PROP Receive new player: {:?}", event);
@@ -215,8 +212,8 @@ impl SimplePlugin for DyingstarPropsPlugin {
                 let (base_x, base_y, base_z, parent_uuid) = match spawn_point {
                     1 => (15500.0, 300.0, 15500.0, "ed20bda3-f6f3-4053-b9de-968f73ebc44c".to_string()), // Sandbox surface => city
                     2 => (-2422100.0, 100.0, 0.0, "9f29bc8f-c01d-4bfc-a781-a38a70807da3".to_string()), // Sandbox
-                    3 => (0.0, 3.0, -152.0, "b9d2e503-0adb-4add-919f-85aaff65be0f".to_string()), // moon 5_2 => storage warehouse 1
-                    4 => (-2422100.0, 0.0, 0.0, "c27c3d25-cdeb-4fef-a794-30f684fd8f67".to_string()), // moon 5_2
+                    3 => (0.0, 3.0, -152.0, "b9d2e503-0adb-4add-919f-85aaff65be0f".to_string()), // moon 5_1 => storage warehouse 1
+                    4 => (-1200100.0, 0.0, 0.0, "5ef9afed-e754-4410-8087-691619c7e776".to_string()), // moon 5_1
                     _ => (-2422100.0, 100.0, 0.0, "9f29bc8f-c01d-4bfc-a781-a38a70807da3".to_string()),
                 };
 
@@ -777,9 +774,9 @@ impl SimplePlugin for DyingstarPropsPlugin {
                 "object_uuid": storagewarehouse_uuid,
                 "object_data": {
                     "name": "storagewarehouse",
-                    "parent_id": "c27c3d25-cdeb-4fef-a794-30f684fd8f67", // Moon 5_2
+                    "parent_id": "5ef9afed-e754-4410-8087-691619c7e776", // Moon 5_1
                     "scenename": "scenes/props/StorageBoxes/storagewarehouse.tscn",
-                    "position": {"x": -1970000.0, "y": 0.0, "z": 0.0},
+                    "position": {"x": -854100.0, "y": 0.0, "z": 0.0},
                     "rotation": {"x": 0.0, "y": 0.0, "z": 1.5708},
                 }
                 })).await.map_err(|e| PluginError::ExecutionError(format!("failed to emit plugin event: {}", e)))?;
@@ -789,9 +786,9 @@ impl SimplePlugin for DyingstarPropsPlugin {
                 "object_uuid": storagewarehouse_uuid,
                 "object_data": {
                     "name": "storagewarehouse",
-                    "parent_id": "c27c3d25-cdeb-4fef-a794-30f684fd8f67", // Moon 5_2
+                    "parent_id": "5ef9afed-e754-4410-8087-691619c7e776", // Moon 5_1
                     "scenename": "scenes/props/StorageBoxes/storagewarehouse.tscn",
-                    "position": {"x": -1970000.0, "y": 0.0, "z": 0.0},
+                    "position": {"x": -854100.0, "y": 0.0, "z": 0.0},
                     "rotation": {"x": 0.0, "y": 0.0, "z": 1.5708},
                 }
                 })).await.map_err(|e| PluginError::ExecutionError(format!("failed to emit plugin event: {}", e)))?;

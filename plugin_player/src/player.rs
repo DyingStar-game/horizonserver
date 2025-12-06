@@ -86,6 +86,7 @@ use chrono::{DateTime, Utc};
 pub struct PlayerCriticalData {
     /// Current position in world coordinates (meters)
     pub position: Vec3,
+    pub rotation: Vec3,
     /// Current velocity vector (meters/second)
     pub velocity: Vec3,
     /// Current health points (0.0 to 100.0)
@@ -303,6 +304,7 @@ impl GorcPlayer {
             last_update: Utc::now(),
             critical_data: PlayerCriticalData {
                 position,
+                rotation: Vec3::new(0.0, 0.0, 0.0),
                 velocity: Vec3::new(0.0, 0.0, 0.0),
                 health: 100.0,
                 parent_id,

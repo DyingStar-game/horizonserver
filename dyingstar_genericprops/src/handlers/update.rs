@@ -169,7 +169,7 @@ pub fn handle_object_create(
 				let mut obj = GenericProps::new(
 					definition.clone(),
 					req_data.object_data.clone(),
-					req_data.object_uuid // if empty, it will generate a new uuid
+					req_data.object_uuid.clone(),
 				);
 				let uuid = obj.uuid.clone();
 				// Get the position from attributes or default to (0,0,0)
@@ -203,7 +203,6 @@ pub fn handle_object_create(
 					}
 				} else {
 					obj.global_position = position.clone();
-					debug!("Creating object {} at global position {:?}", uuid, obj.global_position);
 				}
 				debug!("Creating object {} at global position {:?}", uuid, obj.global_position);
 
@@ -222,30 +221,10 @@ pub fn handle_object_create(
 					for channel in &definition.channels {
 						object_instance.mark_needs_update(channel.zone);
 					}
-					// Emit the object creation event to notify clients
-					if req_data.object_type == "planet" {
-						if let Err(e) = events.emit_gorc_instance(
-							gorc_id,
-							0, // Default channel for object creation
-							"gorc_create",
-							&serde_json::json!({
-								"object_id": gorc_id.to_string(),
-								"object_type": req_data.object_type,
-								"object_data": req_data.object_data,
-								"position": position
-							}),
-							horizon_event_system::Dest::Client
-						).await {
-							error!("🚀 GORC: ❌ Failed to emit object creation event: {}", e);
-						} else {
-							debug!("🚀 GORC: ✅ Object creation event emitted successfully");
-						}
-					}
 					gorc_instances.update_object(gorc_id, object_instance).await;
-					if req_data.object_type != "planet" {
-						// notifiy to send gorc_zone_enter
-						let _ = events.notify_players_for_new_gorc_object(gorc_id).await;
-					}
+
+					// notifiy to send gorc_zone_enter
+					let _ = events.notify_players_for_new_gorc_object(gorc_id).await;
 				}
 			}
 		});
@@ -313,43 +292,62 @@ pub fn handle_object_update(
 
 								// we update the position in gorc for update zones
 
-								// Check if object has a parent_id and adjust position accordingly
-								let final_position = if let Some(parent_id_value) = req_data.object_data.get("parent_id") {
-									if let Some(parent_id_str) = parent_id_value.as_str() {
-										if !parent_id_str.is_empty() {
-											// Search for parent object in props
-											if let Some(parent_gorc_ref) = props_clone.get(parent_id_str) {
-												let parent_gorc_id = *parent_gorc_ref;
-												// Get parent object instance to access its global_position
-												if let Some(parent_instance) = gorc_instances.get_object(parent_gorc_id).await {
-													if let Some(parent_props) = parent_instance.get_object::<GenericProps>() {
-														// Calculate global position: parent's global_position + local position
-														let global_pos = horizon_event_system::Vec3 {
-															x: parent_props.global_position.x + position.x,
-															y: parent_props.global_position.y + position.y,
-															z: parent_props.global_position.z + position.z,
-														};
-														debug!("🚀 GORC: Child object {} position adjusted with parent {} global_position: {:?}", 
-															gorc_id.to_string(), parent_id_str, global_pos);
-														global_pos
-													} else {
-														position
-													}
-												} else {
-													position
-												}
-											} else {
-												position
-											}
-										} else {
-											position
+								let parent_id = object_instance.get_object::<GenericProps>().and_then(|props| {
+									props.data.values()
+										.filter_map(|zone_data| zone_data.get("parent_id"))
+										.filter_map(|v| v.as_str())
+										.find(|s| !s.is_empty())
+										.map(|s| s.to_string())
+								});
+								let mut final_position = position;
+
+								if let Some(parent_id_str) = &parent_id {
+									if let Ok(parent_gorc_id) = GorcObjectId::from_str(parent_id_str) {
+										if let Some(parent_global_position) = gorc_instances.get_object_position(parent_gorc_id).await {
+											final_position = horizon_event_system::Vec3 {
+												x: parent_global_position.x + position.x,
+												y: parent_global_position.y + position.y,
+												z: parent_global_position.z + position.z,
+											};
+											// debug!("🚀 GORC: Setting child object {} global_position based on parent {} global_position: {:?}", 
+											// 	uuid, parent_id_str, gorc_id_opt.global_position);
+										// } else {
+										// 	error!("🚀 GORC: ❌ Parent object position not found for child {}", uuid);
+											// gorc_id_opt.global_position = position.clone();
 										}
-									} else {
-										position
+									// } else {
+									// 	error!("🚀 GORC: ❌ Invalid parent GORC ID for child {}", uuid);
+									// 	gorc_id_opt.global_position = position.clone();
 									}
-								} else {
-									position
-								};
+								}
+
+								// // Check if object has a parent_id and adjust position accordingly
+								// let final_position = if let Some(parent_id_value) = req_data.object_data.get("parent_id") {
+								// 	if let Some(parent_id_str) = parent_id_value.as_str() {
+								// 		if !parent_id_str.is_empty() {
+								// 			if let Ok(parent_gorc_id) = GorcObjectId::from_str(parent_id_str) {
+								// 				if let Some(parent_global_position) = gorc_instances.get_object_position(parent_gorc_id).await {
+								// 					// Calculate global position: parent's global_position + local position
+								// 					horizon_event_system::Vec3 {
+								// 						x: parent_global_position.x + position.x,
+								// 						y: parent_global_position.y + position.y,
+								// 						z: parent_global_position.z + position.z,
+								// 					}
+								// 				} else {
+								// 					position
+								// 				}
+								// 			} else {
+								// 				position
+								// 			}
+								// 		} else {
+								// 			position
+								// 		}
+								// 	} else {
+								// 		position
+								// 	}
+								// } else {
+								// 	position
+								// };
 								
 								// Update the object_instance global_position property
 								object_instance.get_object_mut::<GenericProps>().expect("Object must exists").global_position = final_position;

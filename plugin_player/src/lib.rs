@@ -329,34 +329,24 @@ impl PlayerPlugin {
         let events_for_conn = Arc::clone(&events);
         let luminal_handle_connect = luminal_handle.clone();
 
-        events.on_plugin("gorcplugin", "new_player", move |event: NewPlayerData| {
+        events.on_plugin("gorcplugin", "new_player", move |event: serde_json::Value| {
+            // events.on_plugin("gorcplugin", "new_player", move |event: NewPlayerData| {
             println!("🎮 PlayerPlugin: received new_player event!");
             let players = players_conn.clone();
             let events = events_for_conn.clone();
             let handle = luminal_handle_connect.clone();
 
             // Use the dedicated connection handler
-            let handle_clone = handle.clone();
+            let event_clone = event.clone();
             handle.spawn(async move {
-                // match
-                //     serde_json::from_value::<horizon_event_system::PlayerConnectedEvent>(event)
-                // {
-                    // Ok(player_event) => {
-                        if
-                            let Err(e) = handle_player_connected(
-                                event,
-                                players,
-                                events,
-                                handle_clone
-                            ).await
-                        {
-                            error!("🎮 Failed to handle player connection: {}", e);
-                        }
-                    // }
-                    // Err(e) => {
-                    //     error!("🎮 Failed to deserialize PlayerConnectedEvent: {}", e);
-                    // }
-                // }
+                // No nested spawn needed - we're already in async context
+                if let Err(e) = handle_player_connected(
+                    event_clone,
+                    players,
+                    events,
+                ).await {
+                    error!("🎮 Failed to handle player connection: {}", e);
+                }
             });
 
             Ok(())
@@ -400,9 +390,27 @@ impl PlayerPlugin {
 
         // Register player disconnection handler
         let players_disc = Arc::clone(&self.players);
+        let luminal_handle_disconnect = luminal_handle.clone();
+        let events_for_disc = Arc::clone(&events);
         events
             .on_core("player_disconnected", move |event: serde_json::Value| {
                 let players = players_disc.clone();
+                let handle = luminal_handle_disconnect.clone();
+                let events = events_for_disc.clone();
+                info!("🎮 PlayerPlugin: received player_disconnected event!");
+
+                handle.spawn(async move {
+                    match serde_json::from_value::<horizon_event_system::PlayerDisconnectedEvent>(event) {
+                        Ok(player_event) => {
+                            if let Err(e) = handle_player_disconnected(player_event, players, events).await {
+                                error!("🎮 Failed to handle player disconnection: {}", e);
+                            }
+                        }
+                        Err(e) => {
+                            error!("🎮 Failed to deserialize PlayerDisconnectedEvent: {}", e);
+                        }
+                    }
+                });
 
                 Ok(())
             }).await

@@ -207,6 +207,7 @@ pub fn handle_movement_request_sync(
     let position_update = serde_json::json!({
         "player_id": move_data.player_id,
         "new_position": move_data.new_position,
+        "new_rotation": move_data.new_rotation,
         "velocity": move_data.velocity,
         "movement_state": move_data.movement_state,
         "client_timestamp": chrono::Utc::now()
@@ -219,12 +220,13 @@ pub fn handle_movement_request_sync(
         // CRITICAL FIX: Update BOTH player position AND object position in GORC tracking
         // This ensures the spatial tracking has the correct positions for distance calculations
 
+        let mut final_position = move_data.new_position;
+
         // Update player position in GORC tracking
         if let Some(player_id_str) = event_data["player_id"].as_str() {
             match PlayerId::from_str(player_id_str) {
                 Ok(player_id) => {
                     // Check if player has a parent_id
-                    let mut final_position = move_data.new_position;
 
                     if let Some(gorc_instances) = events.get_gorc_instances() {
                         if let Ok(gorc_id) = GorcObjectId::from_str(&object_id_str) {
@@ -257,7 +259,7 @@ pub fn handle_movement_request_sync(
                             }
                         }
                     }
-                    info!("🚀 STEP 11.5: Updating GORC player global_position for player {} to {:?}",
+                    debug!("🚀 STEP 11.5: Updating GORC player global_position for player {} to {:?}",
                         player_id_str, final_position);
                     if let Err(e) = events.update_player_position(player_id, final_position).await {
                         error!("🚀 STEP 11.5: ❌ Failed to update GORC player tracking: {}", e);
@@ -277,15 +279,14 @@ pub fn handle_movement_request_sync(
         if let Ok(gorc_id) = GorcObjectId::from_str(&object_id_str) {
             debug!("🚀 STEP 12: Parsed GORC ID successfully: {:?}", gorc_id);
 
-            if let Err(e) = events.update_object_position(gorc_id, move_data.new_position).await {
+            if let Err(e) = events.update_object_position(gorc_id, final_position).await {
                 error!("🚀 STEP 12.5: ❌ Failed to update GORC object tracking: {}", e);
             } else {
                 debug!("🚀 STEP 12.5: ✅ Updated GORC object tracking for {:?} at {:?}",
-                    gorc_id, move_data.new_position);
+                    gorc_id, final_position);
             }
 
             debug!("🚀 STEP 13: About to call emit_gorc_instance on channel 0");
-            info!(":::::::::::::::player movement of uuid {}", gorc_id);
             match events.emit_gorc_instance(
                 gorc_id,
                 0, // Channel 0: Critical movement data

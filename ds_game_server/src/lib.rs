@@ -27,19 +27,7 @@ use std::process::exit;
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Once;
-
-// Global mapping from player UUID to internal connection ID
-static mut MAPPING_PLAYER_GORC_TO_INTERNAL: Option<Mutex<HashMap<String, String>>> = None;
-static INIT_MAPPING: Once = Once::new();
-
-fn get_mapping() -> &'static Mutex<HashMap<String, String>> {
-    unsafe {
-        INIT_MAPPING.call_once(|| {
-            MAPPING_PLAYER_GORC_TO_INTERNAL = Some(Mutex::new(HashMap::new()));
-        });
-        MAPPING_PLAYER_GORC_TO_INTERNAL.as_ref().unwrap()
-    }
-}
+use std::fs;
 
 static SOCKET_URL: Lazy<String> = Lazy::new(|| {
     dotenv().ok(); // Loads variables from `.env` file
@@ -69,11 +57,50 @@ impl DsGameServerPlugin {
     pub fn new() -> Self {
         info!("🔧 DsGameServerPlugin: Creating new instance");
 
+        // Read socket URL from plugins.toml configuration file
+        let socket_url = Self::read_config_url().unwrap_or_else(|e| {
+            error!("Failed to read configuration: {}. Using default URL.", e);
+            "ws://127.0.0.1:8980".to_string()
+        });
+
+        info!("🔧 DsGameServerPlugin: Using game server address: {}", socket_url);
+
         Self {
             name: "ds_game_server".to_string(),
-            socket_url: SOCKET_URL.clone(),
+            socket_url,
             websocket: Arc::new(Mutex::new(None)),
         }
+    }
+
+    fn read_config_url() -> Result<String, String> {
+        // Try multiple possible paths for the plugins.toml file
+        let possible_paths = vec![
+            "../Horizon/plugins.toml",
+            "Horizon/plugins.toml",
+            "plugins.toml",
+        ];
+
+        for path in possible_paths {
+            if Path::new(path).exists() {
+                let contents = fs::read_to_string(path)
+                    .map_err(|e| format!("Failed to read {}: {}", path, e))?;
+                
+                let config: toml::Value = toml::from_str(&contents)
+                    .map_err(|e| format!("Failed to parse TOML: {}", e))?;
+                
+                if let Some(ds_game_server) = config.get("ds_game_server") {
+                    if let Some(address) = ds_game_server.get("game_server_address") {
+                        if let Some(address_str) = address.as_str() {
+                            return Ok(format!("ws://{}", address_str));
+                        }
+                    }
+                }
+                
+                return Err(format!("'ds_game_server.game_server_address' not found in {}", path));
+            }
+        }
+
+        Err("plugins.toml file not found in any expected location".to_string())
     }
 }
 
@@ -144,49 +171,42 @@ impl SimplePlugin for DsGameServerPlugin {
                                     // notify EventSystem about the player position
                                     for player_data in value["data"].as_array().unwrap() {
                                         if let Some(uuid_str) = player_data["player_id"].as_str() {
-                                            // Get gorc_id from mapping or fallback to direct field
-                                            let gorc_id_str = if let Ok(mapping) = get_mapping().lock() {
-                                                mapping.get(uuid_str).cloned()
-                                            } else {
-                                                None
-                                            }.or_else(|| player_data["gorc_id"].as_str().map(|s| s.to_string()));
-                                            
-                                            if let Some(gorc_id_str) = gorc_id_str {
-                                                if let (Ok(player_id), Ok(gorc_id)) = (
-                                                    PlayerId::from_str(uuid_str),
-                                                    GorcObjectId::from_str(&gorc_id_str)
+                                            if let (Ok(player_id), Ok(gorc_id)) = (
+                                                PlayerId::from_str(uuid_str),
+                                                GorcObjectId::from_str(uuid_str)
+                                            ) {
+                                                if let (Some(x), Some(y), Some(z), Some(rx), Some(ry), Some(rz)) = (
+                                                    player_data["pos"]["x"].as_f64(),
+                                                    player_data["pos"]["y"].as_f64(),
+                                                    player_data["pos"]["z"].as_f64(),
+                                                    player_data["rot"]["x"].as_f64(),
+                                                    player_data["rot"]["y"].as_f64(),
+                                                    player_data["rot"]["z"].as_f64()
                                                 ) {
-                                                    if let (Some(x), Some(y), Some(z)) = (
-                                                        player_data["pos"]["x"].as_f64(),
-                                                        player_data["pos"]["y"].as_f64(),
-                                                        player_data["pos"]["z"].as_f64()
-                                                    ) {
-                                                        let events_clone = events2.clone();
-                                                        let _ = rt.block_on(async move {
-                                                            if let Err(e) = events_clone.emit_gorc_instance(
-                                                                gorc_id,
-                                                                0,
-                                                                "move",
-                                                                &serde_json::json!({
-                                                                    "player_id": player_id,
-                                                                    "new_position": Vec3::new(x, y, z),
-                                                                    "velocity": { "x": 0.0, "y": 0.0, "z": 0.0 },
-                                                                    "movement_state": 1,
-                                                                    "client_timestamp": chrono::Utc::now().to_rfc3339(),
-                                                                }),
-                                                                Dest::Both
-                                                            ).await {
-                                                                error!("Failed to update player position via EventSystem: {}", e);
-                                                            }
-                                                        });
-                                                    } else {
-                                                        error!("Invalid position coordinates in player data: {:?}", player_data["pos"]);
-                                                    }
+                                                    let events_clone = events2.clone();
+                                                    let _ = rt.block_on(async move {
+                                                        if let Err(e) = events_clone.emit_gorc_instance(
+                                                            gorc_id,
+                                                            0,
+                                                            "move",
+                                                            &serde_json::json!({
+                                                                "player_id": player_id,
+                                                                "new_position": Vec3::new(x, y, z),
+                                                                "new_rotation": Vec3::new(rx, ry, rz),
+                                                                "velocity": { "x": 0.0, "y": 0.0, "z": 0.0 },
+                                                                "movement_state": 1,
+                                                                "client_timestamp": chrono::Utc::now().to_rfc3339(),
+                                                            }),
+                                                            Dest::Both
+                                                        ).await {
+                                                            error!("Failed to update player position via EventSystem: {}", e);
+                                                        }
+                                                    });
                                                 } else {
                                                     error!("Invalid position coordinates in player data: {:?}", player_data["pos"]);
                                                 }
                                             } else {
-                                                error!("Failed to parse player/object ID from UUID (mapping): {}", uuid_str);
+                                                error!("Invalid position coordinates in player data: {:?}", player_data["pos"]);
                                             }
                                         } else {
                                             error!("Missing player_id in player data: {:?}", player_data);
@@ -338,21 +358,6 @@ impl SimplePlugin for DsGameServerPlugin {
         events.on_plugin("gorcplugin", "new_player", move |event: serde_json::Value| {
             info!("🔧 DsGameServerPlugin: New player event {:?}", event);
             
-            // Check if this is a player object and store the mapping
-            if let Some(object_type) = event["object_type"].as_str() {
-                if object_type == "player" {
-                    if let (Some(object_uuid), Some(connection_id)) = (
-                        event["object_uuid"].as_str(),
-                        event["object_data"]["connection_id"].as_str()
-                    ) {
-                        if let Ok(mut mapping) = get_mapping().lock() {
-                            mapping.insert(connection_id.to_string(), object_uuid.to_string());
-                            info!("🔧 DsGameServerPlugin: Stored mapping {} -> {}", connection_id, object_uuid);
-                        }
-                    }
-                }
-            }
-            
             let message = json!({
                 "namespace": "server",
                 "event": "add_prop",
@@ -469,6 +474,7 @@ impl SimplePlugin for DsGameServerPlugin {
         &mut self,
         context: Arc<dyn ServerContext>,
     ) -> Result<(), PluginError> {
+
         // Get the log level from ServerContext
         let log_level = context.log_level();
         

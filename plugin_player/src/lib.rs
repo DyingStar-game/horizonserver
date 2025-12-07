@@ -112,6 +112,8 @@ pub struct PlayerPlugin {
     /// Thread-safe registry mapping PlayerId to GorcObjectId for resource management
     /// This allows efficient lookup during movement, combat, and cleanup operations
     players: Arc<DashMap<PlayerId, GorcObjectId>>,
+    /// Tokio runtime for spawning async tasks (required because luminal tasks may not be polled)
+    runtime: Arc<tokio::runtime::Runtime>,
 }
 
 impl PlayerPlugin {
@@ -136,9 +138,16 @@ impl PlayerPlugin {
     /// ```
     pub fn new() -> Self {
         debug!("🎮 PlayerPlugin: Creating new instance with GORC architecture");
+        let runtime = Arc::new(
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("failed to build plugin runtime"),
+        );
         Self {
             name: "PlayerPlugin".to_string(),
             players: Arc::new(DashMap::new()),
+            runtime,
         }
     }
 }
@@ -226,7 +235,7 @@ impl SimplePlugin for PlayerPlugin {
         ).await?;
 
         // Register GORC client event handlers for real-time gameplay
-        self.register_movement_handler(Arc::clone(&events), luminal_handle.clone()).await?;
+        self.register_movement_handler(Arc::clone(&events)).await?;
         self.register_combat_handler(Arc::clone(&events), luminal_handle.clone()).await?;
         self.register_communication_handler(Arc::clone(&events), luminal_handle.clone()).await?;
         self.register_scanning_handler(Arc::clone(&events), luminal_handle.clone()).await?;
@@ -320,28 +329,29 @@ impl PlayerPlugin {
         &self,
         events: Arc<EventSystem>,
         context: Arc<dyn ServerContext>,
-        luminal_handle: luminal::Handle
+        _luminal_handle: luminal::Handle
     ) -> Result<(), PluginError> {
         debug!("🎮 PlayerPlugin: Registering connection lifecycle handlers");
+
+        // Use our own tokio runtime for spawning async tasks
+        // (luminal_handle tasks may not be polled correctly)
+        let runtime = self.runtime.clone();
 
         // Register player connection handler
         let players_conn = Arc::clone(&self.players);
         let events_for_conn = Arc::clone(&events);
-        let luminal_handle_connect = luminal_handle.clone();
+        let runtime_for_conn = runtime.clone();
 
-        events.on_plugin("gorcplugin", "new_player", move |event: serde_json::Value| {
-            // events.on_plugin("gorcplugin", "new_player", move |event: NewPlayerData| {
+        events.on_plugin("pluginplayer", "new_player", move |event: serde_json::Value| {
             println!("🎮 PlayerPlugin: received new_player event!");
             let players = players_conn.clone();
             let events = events_for_conn.clone();
-            let handle = luminal_handle_connect.clone();
-
-            // Use the dedicated connection handler
-            let event_clone = event.clone();
-            handle.spawn(async move {
-                // No nested spawn needed - we're already in async context
-                if let Err(e) = handle_player_connected(
-                    event_clone,
+            
+            // Use tokio runtime.spawn() like dyingstar_props does
+            // This ensures the async task is actually polled
+            runtime_for_conn.spawn(async move {
+                if let Err(e) = handlers::handle_player_connected(
+                    event,
                     players,
                     events,
                 ).await {
@@ -390,16 +400,16 @@ impl PlayerPlugin {
 
         // Register player disconnection handler
         let players_disc = Arc::clone(&self.players);
-        let luminal_handle_disconnect = luminal_handle.clone();
         let events_for_disc = Arc::clone(&events);
+        let runtime_for_disc = runtime.clone();
         events
             .on_core("player_disconnected", move |event: serde_json::Value| {
                 let players = players_disc.clone();
-                let handle = luminal_handle_disconnect.clone();
                 let events = events_for_disc.clone();
                 info!("🎮 PlayerPlugin: received player_disconnected event!");
 
-                handle.spawn(async move {
+                // Use tokio runtime.spawn() like dyingstar_props does
+                runtime_for_disc.spawn(async move {
                     match serde_json::from_value::<horizon_event_system::PlayerDisconnectedEvent>(event) {
                         Ok(player_event) => {
                             if let Err(e) = handle_player_disconnected(player_event, players, events).await {
@@ -431,7 +441,6 @@ impl PlayerPlugin {
     /// # Parameters
     ///
     /// - `events`: Event system reference for handler registration
-    /// - `luminal_handle`: Async runtime handle for background operations
     ///
     /// # Returns
     ///
@@ -439,12 +448,11 @@ impl PlayerPlugin {
     async fn register_movement_handler(
         &self,
         events: Arc<EventSystem>,
-        luminal_handle: luminal::Handle
     ) -> Result<(), PluginError> {
         debug!("🎮 PlayerPlugin: Registering GORC channel 0 (movement) handler");
 
+        // Handler 1: For GORC events (server-to-server replication)
         let events_for_move = Arc::clone(&events);
-        let luminal_handle_move = luminal_handle.clone();
         events
             .on_gorc_instance(
                 "GorcPlayer",
@@ -457,7 +465,6 @@ impl PlayerPlugin {
                         gorc_event,
                         object_instance,
                         events_for_move.clone(),
-                        luminal_handle_move.clone()
                     )
                 }
             ).await

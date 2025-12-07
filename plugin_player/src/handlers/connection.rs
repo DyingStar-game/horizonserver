@@ -112,18 +112,45 @@ pub async fn handle_player_connected(
     // Clone object_data before creating player to avoid partial move
     let object_data = event["object_data"].clone();
     
-    // Create a new GORC player object with default configuration
-    let position: Vec3 = serde_json::from_value(event["object_data"]["position"].clone())?;
+    println!("🎮 GORC: Step A - parsing position");
+    // Get local position from event
+    let local_position: Vec3 = serde_json::from_value(event["object_data"]["position"].clone())?;
+    println!("🎮 GORC: Step B - parsing player_id");
     let player_id = PlayerId::from_str(
         event["object_uuid"].as_str()
             .ok_or("Missing or invalid object_uuid")?
     )?;
+    println!("🎮 GORC: Step C - checking parent_id");
+    
+    // Calculate global position FIRST based on parent object
+    let parent_id = event["object_data"]["parent_id"].as_str().map(|s| s.to_string());
+    let mut global_position = local_position.clone();
+
+    if let Some(parent_id_str) = &parent_id {
+        println!("🎮 GORC: Step D - parsing parent GORC ID: {}", parent_id_str);
+        if let Ok(parent_gorc_id) = GorcObjectId::from_str(parent_id_str) {
+            println!("🎮 GORC: Step E - getting parent position (lock-free)");
+            if let Some(parent_global_position) = gorc_instances.get_object_position(parent_gorc_id) {
+                println!("🎮 GORC: Step F - got parent position: {:?}", parent_global_position);
+                global_position = horizon_event_system::Vec3 {
+                    x: parent_global_position.x + local_position.x,
+                    y: parent_global_position.y + local_position.y,
+                    z: parent_global_position.z + local_position.z,
+                };
+            } else {
+                println!("🎮 GORC: Step F - parent position not found");
+            }
+        }
+    }
+    println!("🎮 GORC: Step G - creating GorcPlayer");
+    
+    // CRITICAL: Create GorcPlayer with GLOBAL position so zones are centered correctly
     let player = GorcPlayer::new(
         player_id,
         event["object_data"]["name"].as_str()
             .ok_or("Missing or invalid name")?
             .to_string(),
-        position,
+        global_position,  // Use global position for proper zone calculations
         event["object_data"]["parent_id"].as_str()
             .ok_or("Missing or invalid parent_id")?
             .to_string(),
@@ -147,22 +174,13 @@ pub async fn handle_player_connected(
         }
     };
 
-    // calculate global position based on parent object
-    let parent_id = event["object_data"]["parent_id"].as_str().map(|s| s.to_string());
-    let mut global_position = position.clone();
+    // CRITICAL FIX: Add player to spatial tracking BEFORE registering their object
+    // This ensures the player gets subscribed to their own object during registration
+    // Without this, the player would have 0 subscribers and never receive movement confirmations
+    gorc_instances.add_player(player_id, global_position).await;
+    println!("🎮 GORC: ✅ Player {} added to spatial tracking BEFORE object registration", player_id);
 
-    if let Some(parent_id_str) = &parent_id {
-        if let Ok(parent_gorc_id) = GorcObjectId::from_str(parent_id_str) {
-            if let Some(parent_global_position) = gorc_instances.get_object_position(parent_gorc_id).await {
-                global_position = horizon_event_system::Vec3 {
-                    x: parent_global_position.x + position.x,
-                    y: parent_global_position.y + position.y,
-                    z: parent_global_position.z + position.z,
-                };
-            }
-        }
-    }
-
+    // Now register the object - player will be auto-subscribed since they're in player_positions
     let gorc_id = gorc_instances.register_object_with_uuid(player, global_position, maybe_obj_id).await;
 
     // Store the GORC ID for future operations (movement, cleanup, etc.)
@@ -171,7 +189,7 @@ pub async fn handle_player_connected(
     println!("🎮 GORC: ✅ Player {} registered with GORC instance ID {:?} at position {:?}",
         event["object_data"]["connection_id"], gorc_id, event["object_data"]["position"]);
 
-    // Send GORC object info to client on channel 0
+    // Send GORC object info to client on channel 0 (player's own object)
     if let Err(e) = events.emit_gorc_instance(
         gorc_id,
         0, // Channel 0 for critical info
@@ -184,19 +202,27 @@ pub async fn handle_player_connected(
         println!("🎮 GORC: ✅ Sent GORC object info to client: {}", object_data);
     }
 
-    // CRITICAL: Trigger zone message distribution by updating player position
-    // This ensures nearby players receive zone data for the new player
-    if let Err(e) = events.update_player_position(player_id, global_position).await {
-        error!("🎮 GORC: ❌ Failed to update player position via EventSystem: {}", e);
+    // CRITICAL: Subscribe the new player to all existing objects they're within range of
+    // This detects zones for planets, cities, etc. that existed before the player connected
+    if let Err(e) = events.subscribe_player_to_existing_objects(player_id, global_position).await {
+        error!("🎮 GORC: ❌ Failed to subscribe player to existing objects: {}", e);
     } else {
-        println!("🎮 GORC: ✅ EventSystem.update_player_position completed successfully");
+        println!("🎮 GORC: ✅ Player subscribed to existing objects successfully");
     }
 
-    // Add player to GORC spatial tracking system (after zone messages are sent)
-    gorc_instances.add_player(player_id, global_position).await;
+    // Note: add_player was already called BEFORE register_object_with_uuid
+    // to ensure the player gets subscribed to their own object
 
     println!("🎮 GORC: ✅ Player {} fully integrated into GORC system", player_id);
     
+    // now send player data to the game server
+    if let Err(e) = events
+        .emit_plugin("plugingameserver", "new_player", &serde_json::json!(event))
+        .await
+    {
+        tracing::error!("Failed to emit plugin event to player plugin: {}", e);
+    }
+
     Ok(())
 }
 

@@ -236,7 +236,7 @@ impl SimplePlugin for DyingstarPropsPlugin {
 
                 // Send to pluginplayer for gorc integration
                 if let Err(e) = events
-                    .emit_plugin("gorcplugin", "new_player", &serde_json::json!({
+                    .emit_plugin("pluginplayer", "new_player", &serde_json::json!({
                         "object_type": "player",
                         "object_uuid": player.uuid,
                         "object_data": {

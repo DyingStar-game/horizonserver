@@ -28,7 +28,7 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Once;
 use std::fs;
-use std::sync::mpsc;
+use tokio::sync::mpsc as tokio_mpsc;
 
 /// Message types for the async processor
 #[derive(Debug)]
@@ -126,13 +126,18 @@ impl SimplePlugin for DsGameServerPlugin {
     async fn register_handlers(
         &mut self,
         events: Arc<EventSystem>,
-        _context: Arc<dyn ServerContext>,
+        context: Arc<dyn ServerContext>,
     ) -> Result<(), PluginError> {
         info!("🔧 DsGameServerPlugin: Registering event handlers...");
+
+        // Get the tokio runtime handle from the ServerContext
+        // This is the proper way to get the runtime handle across DLL boundaries
+        let runtime_handle = context.tokio_handle();
 
         let url = self.socket_url.clone();
         let websocket = Arc::clone(&self.websocket);
         let events1 = events.clone();
+        let runtime_handle_clone = runtime_handle.clone();
 
         // initialize websocket connection to game server
         events.on_plugin("gameserverplugin", "init_server", move |event: serde_json::Value| {
@@ -142,7 +147,8 @@ impl SimplePlugin for DsGameServerPlugin {
             let url = url.clone();
             let websocket = Arc::clone(&websocket);
             let events2 = events1.clone();
-            let initial_event = event.clone();
+            let _initial_event = event.clone();
+            let runtime_handle = runtime_handle_clone.clone();
 
             std::thread::spawn(move || {
                 // Connect and store writer
@@ -150,82 +156,81 @@ impl SimplePlugin for DsGameServerPlugin {
                 let (mut receiver, sender) = socket.split().unwrap();
                 *websocket.lock().unwrap() = Some(sender);
 
-                // Create channel for async processing - this decouples websocket reading from event emission
-                let (tx, rx) = mpsc::channel::<GameServerMessage>();
+                // Create tokio channel for async processing
+                let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<GameServerMessage>();
 
-                // Spawn async processor thread with multi-threaded runtime
+                // Spawn async processor on the MAIN runtime (not a new one!)
+                // This avoids cross-runtime lock issues with EventSystem
                 let events_processor = events2.clone();
                 let websocket_processor = websocket.clone();
-                std::thread::spawn(move || {
-                    let rt = tokio::runtime::Builder::new_multi_thread()
-                        .worker_threads(2)
-                        .enable_all()
-                        .build()
-                        .expect("failed to build async processor runtime");
-
-                    rt.block_on(async move {
-                        info!("🔧 DsGameServerPlugin: Async processor thread started");
-                        while let Ok(msg) = rx.recv() {
-                            match msg {
-                                GameServerMessage::PlayerPositions(position_updates) => {
-                                    for (gorc_id, player_id, x, y, z, rx, ry, rz) in position_updates {
-                                        if let Err(e) = events_processor.emit_gorc_instance(
-                                            gorc_id,
-                                            0,
-                                            "move",
-                                            &serde_json::json!({
-                                                "player_id": player_id,
-                                                "new_position": Vec3::new(x, y, z),
-                                                "new_rotation": Vec3::new(rx, ry, rz),
-                                                "velocity": { "x": 0.0, "y": 0.0, "z": 0.0 },
-                                                "movement_state": 1,
-                                                "client_timestamp": chrono::Utc::now().to_rfc3339(),
-                                            }),
-                                            Dest::Both
-                                        ).await {
-                                            error!("Failed to update player position via EventSystem: {}", e);
-                                        }
+                
+                runtime_handle.spawn(async move {
+                    info!("🔧 DsGameServerPlugin: Async processor task started on main runtime");
+                    let mut message_count = 0u64;
+                    while let Some(msg) = rx.recv().await {
+                        message_count += 1;
+                        if message_count % 100 == 0 {
+                            debug!("� Async processor: processed {} messages", message_count);
+                        }
+                        match msg {
+                            GameServerMessage::PlayerPositions(position_updates) => {
+                                for (gorc_id, player_id, x, y, z, rx, ry, rz) in position_updates {
+                                    if let Err(e) = events_processor.emit_gorc_instance(
+                                        gorc_id,
+                                        0,
+                                        "move",
+                                        &serde_json::json!({
+                                            "player_id": player_id,
+                                            "new_position": Vec3::new(x, y, z),
+                                            "new_rotation": Vec3::new(rx, ry, rz),
+                                            "velocity": { "x": 0.0, "y": 0.0, "z": 0.0 },
+                                            "movement_state": 1,
+                                            "client_timestamp": chrono::Utc::now().to_rfc3339(),
+                                        }),
+                                        Dest::Both
+                                    ).await {
+                                        error!("Failed to update player position via EventSystem: {}", e);
                                     }
                                 }
-                                GameServerMessage::PropPosition(prop_data) => {
-                                    if let Err(e) = events_processor.emit_plugin("genericprops", "update_object", &serde_json::json!({
+                            }
+                            GameServerMessage::PropPosition(prop_data) => {
+                                if let Err(e) = events_processor.emit_plugin("genericprops", "update_object", &serde_json::json!({
+                                    "object_type": prop_data["type"],
+                                    "object_uuid": prop_data["uuid"],
+                                    "object_data": prop_data,
+                                })).await {
+                                    error!("Failed to emit plugin event to propsplugin: {}", e);
+                                }
+                            }
+                            GameServerMessage::PropCreate(prop_data) => {
+                                if let Err(e) = events_processor.emit_plugin("genericprops", "create_object", &serde_json::json!({
+                                    "object_type": prop_data["type"],
+                                    "object_uuid": prop_data["uuid"],
+                                    "object_data": prop_data,
+                                })).await {
+                                    error!("Failed to emit plugin event to propsplugin: {}", e);
+                                }
+
+                                let message = json!({
+                                    "namespace": "server",
+                                    "event": "add_prop",
+                                    "data": {
                                         "object_type": prop_data["type"],
                                         "object_uuid": prop_data["uuid"],
                                         "object_data": prop_data,
-                                    })).await {
-                                        error!("Failed to emit plugin event to propsplugin: {}", e);
                                     }
-                                }
-                                GameServerMessage::PropCreate(prop_data) => {
-                                    if let Err(e) = events_processor.emit_plugin("genericprops", "create_object", &serde_json::json!({
-                                        "object_type": prop_data["type"],
-                                        "object_uuid": prop_data["uuid"],
-                                        "object_data": prop_data,
-                                    })).await {
-                                        error!("Failed to emit plugin event to propsplugin: {}", e);
-                                    }
-
-                                    let message = json!({
-                                        "namespace": "server",
-                                        "event": "add_prop",
-                                        "data": {
-                                            "object_type": prop_data["type"],
-                                            "object_uuid": prop_data["uuid"],
-                                            "object_data": prop_data,
-                                        }
-                                    });
-                                    if let Ok(mut ws_guard) = websocket_processor.lock() {
-                                        if let Some(w) = ws_guard.as_mut() {
-                                            if let Err(e) = w.send_message(&OwnedMessage::Text(message.to_string())) {
-                                                error!("Failed to send websocket message: {}", e);
-                                            }
+                                });
+                                if let Ok(mut ws_guard) = websocket_processor.lock() {
+                                    if let Some(w) = ws_guard.as_mut() {
+                                        if let Err(e) = w.send_message(&OwnedMessage::Text(message.to_string())) {
+                                            error!("Failed to send websocket message: {}", e);
                                         }
                                     }
                                 }
                             }
                         }
-                        warn!("🔧 DsGameServerPlugin: Async processor channel closed");
-                    });
+                    }
+                    warn!("🔧 DsGameServerPlugin: Async processor channel closed");
                 });
 
                 info!("WebSocket reader thread started");
@@ -363,7 +368,7 @@ impl SimplePlugin for DsGameServerPlugin {
 
         // specific player
         let websocket = Arc::clone(&self.websocket);
-        events.on_plugin("gorcplugin", "new_player", move |event: serde_json::Value| {
+        events.on_plugin("plugingameserver", "new_player", move |event: serde_json::Value| {
             info!("🔧 DsGameServerPlugin: New player event {:?}", event);
             
             let message = json!({

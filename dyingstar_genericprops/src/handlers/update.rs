@@ -185,7 +185,7 @@ pub fn handle_object_create(
 				
 				if let Some(parent_id_str) = &parent_id {
 					if let Ok(parent_gorc_id) = GorcObjectId::from_str(parent_id_str) {
-						if let Some(parent_global_position) = gorc_instances.get_object_position(parent_gorc_id).await {
+						if let Some(parent_global_position) = gorc_instances.get_object_position(parent_gorc_id) {
 							obj.global_position = horizon_event_system::Vec3 {
 								x: parent_global_position.x + position.x,
 								y: parent_global_position.y + position.y,
@@ -303,7 +303,7 @@ pub fn handle_object_update(
 
 								if let Some(parent_id_str) = &parent_id {
 									if let Ok(parent_gorc_id) = GorcObjectId::from_str(parent_id_str) {
-										if let Some(parent_global_position) = gorc_instances.get_object_position(parent_gorc_id).await {
+										if let Some(parent_global_position) = gorc_instances.get_object_position(parent_gorc_id) {
 											final_position = horizon_event_system::Vec3 {
 												x: parent_global_position.x + position.x,
 												y: parent_global_position.y + position.y,

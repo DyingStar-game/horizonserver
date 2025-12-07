@@ -39,7 +39,6 @@ use horizon_event_system::{
     EventSystem, PlayerId, GorcEvent, GorcObjectId, ClientConnectionRef, ObjectInstance,
     EventError,
 };
-use luminal::Handle;
 use tracing::{debug, info, error};
 use serde_json;
 use crate::events::PlayerMoveRequest;
@@ -150,7 +149,6 @@ pub fn handle_movement_request_sync(
     gorc_event: GorcEvent,
     object_instance: &mut ObjectInstance,
     events: Arc<EventSystem>,
-    luminal_handle: Handle,
 ) -> Result<(), EventError> {
 
     // Parse the movement data from the GORC event payload
@@ -214,7 +212,17 @@ pub fn handle_movement_request_sync(
     });
     debug!("🚀 STEP 10: Created position update payload: {}", position_update);
     
-    luminal_handle.spawn(async move {
+    // CRITICAL: Must use the tokio runtime handle because EventSystem uses tokio::sync primitives.
+    // Try to get current handle, or use block_in_place if already in a tokio context.
+    let handle = match tokio::runtime::Handle::try_current() {
+        Ok(h) => h,
+        Err(_) => {
+            error!("🚀 STEP 10.5: ❌ No tokio runtime available for movement broadcast");
+            return Ok(());
+        }
+    };
+    
+    handle.spawn(async move {
         debug!("🚀 STEP 11: Inside async broadcast task");
 
         // CRITICAL FIX: Update BOTH player position AND object position in GORC tracking
@@ -239,7 +247,7 @@ pub fn handle_movement_request_sync(
                                         debug!("🚀 STEP 11.3: Player has parent_id: {}", parent_id);
                                         
                                         if let Ok(parent_gorc_id) = GorcObjectId::from_str(parent_id) {
-                                            if let Some(parent_global_position) = gorc_instances.get_object_position(parent_gorc_id).await {
+                                            if let Some(parent_global_position) = gorc_instances.get_object_position(parent_gorc_id) {
                                                 // Calculate global position as parent position + player local position
                                                 final_position = horizon_event_system::Vec3 {
                                                     x: parent_global_position.x + move_data.new_position.x,

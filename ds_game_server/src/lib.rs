@@ -203,7 +203,7 @@ impl SimplePlugin for DsGameServerPlugin {
                                 }
                             }
                             GameServerMessage::PropCreate(prop_data) => {
-                                if let Err(e) = events_processor.emit_plugin("genericprops", "create_object", &serde_json::json!({
+                                if let Err(e) = events_processor.emit_plugin("genericprops", "create_object_from_gameserver", &serde_json::json!({
                                     "object_type": prop_data["type"],
                                     "object_uuid": prop_data["uuid"],
                                     "object_data": prop_data,

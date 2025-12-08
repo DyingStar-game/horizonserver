@@ -144,13 +144,16 @@ pub fn handle_object_create(
 		props: Arc<DashMap<String, GorcObjectId>>,
 		events: Arc<EventSystem>,
 		event: serde_json::Value,
-		handle: luminal::Handle
+		handle: luminal::Handle,
+		spawn_in_gameserver: bool,
 	) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 		
 		let Some(gorc_instances) = events.get_gorc_instances() else {
 			error!("🎮 GORC: ❌ No GORC instances manager available");
 			return Ok(()); // Not a fatal error, just log and continue
 		};
+		// Clone event before consuming it with from_value, so we can use it later for spawn_object
+		let event_clone = event.clone();
 		let req_data = serde_json::from_value::<GenericPropsRequest>(event)
         .map_err(|e| {
             error!("🚀 Plugin: ❌ Failed to parse GenericPropsRequest: {}", e);
@@ -225,6 +228,17 @@ pub fn handle_object_create(
 
 					// notifiy to send gorc_zone_enter
 					let _ = events.notify_players_for_new_gorc_object(gorc_id).await;
+				}
+				if spawn_in_gameserver {
+					// Send to ds_game_server to spawn in game world
+					if let Err(e) = events
+						.emit_plugin("gameserverplugin", "spawn_object", &serde_json::json!(event_clone))
+						.await
+					{
+						error!("🚀 Plugin: ❌ Failed to emit generic prop to DsGameServerPlugin: {}", e);
+					} else {
+						debug!("🚀 Plugin: ✅ Emitted generic prop to DsGameServerPlugin for object {}", req_data.object_uuid);
+					}
 				}
 			}
 		});
@@ -370,7 +384,7 @@ pub fn handle_object_update(
 								).await {
 									error!("🚀 GORC: ❌ Failed to broadcast channel update: {}", e);
 								} else {
-									debug!("🚀 GORC: ✅ Broadcasted channel update for ship");
+									debug!("🚀 GORC: ✅ Broadcasted channel update for object> {}", gorc_id);
 								}
 							}
 						}

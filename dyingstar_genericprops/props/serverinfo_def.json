@@ -8,7 +8,8 @@
 				"fps",
 				"objects_number",
 				"players_number",
-				"scenes_number"
+				"scenes_number",
+				"position"
 			]
 		},
 		{
@@ -16,7 +17,8 @@
 			"distance": 9000000000001.0,
 			"frequency": 1.0,
 			"properties": [
-				"scenename"
+				"scenename",
+				"name"
 			]
 		}
 	]

@@ -196,7 +196,30 @@ impl GenericPropsPlugin {
                                 props2.clone(),
                                 update_events2.clone(),
                                 event.clone(),
-                                handle2.clone()
+                                handle2.clone(),
+                                true,
+                            )
+                        {
+                            error!("🎮 Failed to handle object update: {}", e);
+                        }
+        Ok(())
+        }).await
+        .map_err(|e| PluginError::ExecutionError(e.to_string()))?;
+
+        let update_events3 = events.clone();
+        let handle3 = luminal_handle.clone();
+        let definitions3 = Arc::clone(&self.definitions);
+        let props3 = Arc::clone(&self.props);
+
+        events.on_plugin("genericprops", "create_object_from_gameserver", move |event: serde_json::Value| {
+            debug!("plugin genericprops (create from gameserver): Receive object message {:?}", event);
+            if let Err(e) = update::handle_object_create(
+                                definitions3.clone(),
+                                props3.clone(),
+                                update_events3.clone(),
+                                event.clone(),
+                                handle3.clone(),
+                                false,
                             )
                         {
                             error!("🎮 Failed to handle object update: {}", e);

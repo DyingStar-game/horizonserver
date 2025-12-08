@@ -217,12 +217,6 @@ impl SimplePlugin for DyingstarServicesPlugin {
                                                     if let Err(e) = context_clone.events().emit_plugin("genericprops", "create_object", &modified_obj).await {
                                                         error!("Failed to emit plugin event: {}", e);
                                                     }
-
-                                                    // to gameserver
-                                                    debug!("Emitting planet object to gameserver...");
-                                                    if let Err(e) = context_clone.events().emit_plugin("gameserverplugin", "spawn_object", &modified_obj).await {
-                                                        error!("Failed to emit plugin event: {}", e);
-                                                    }
                                                 }
                                                 else if object_type == "moon" {
                                                     debug!("Emitting moon object to genericprops...");
@@ -232,12 +226,6 @@ impl SimplePlugin for DyingstarServicesPlugin {
                                                     }
                                                     
                                                     if let Err(e) = context_clone.events().emit_plugin("genericprops", "create_object", &modified_obj).await {
-                                                        error!("Failed to emit plugin event: {}", e);
-                                                    }
-
-                                                    // to gameserver
-                                                    debug!("Emitting moon object to gameserver...");
-                                                    if let Err(e) = context_clone.events().emit_plugin("gameserverplugin", "spawn_object", &modified_obj).await {
                                                         error!("Failed to emit plugin event: {}", e);
                                                     }
                                                 } else if object_type == "star" {
@@ -255,12 +243,6 @@ impl SimplePlugin for DyingstarServicesPlugin {
                                                     });
                                                     
                                                     if let Err(e) = context_clone.events().emit_plugin("genericprops", "create_object", &modified_obj).await {
-                                                        error!("Failed to emit plugin event: {}", e);
-                                                    }
-
-                                                    // to gameserver
-                                                    debug!("Emitting star object to gameserver...");
-                                                    if let Err(e) = context_clone.events().emit_plugin("gameserverplugin", "spawn_object", &modified_obj).await {
                                                         error!("Failed to emit plugin event: {}", e);
                                                     }
                                                 } else {

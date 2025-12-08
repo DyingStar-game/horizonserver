@@ -212,111 +212,147 @@ pub fn handle_movement_request_sync(
     });
     debug!("🚀 STEP 10: Created position update payload: {}", position_update);
     
-    // CRITICAL: Must use the tokio runtime handle because EventSystem uses tokio::sync primitives.
-    // Try to get current handle, or use block_in_place if already in a tokio context.
-    let handle = match tokio::runtime::Handle::try_current() {
-        Ok(h) => h,
-        Err(_) => {
-            error!("🚀 STEP 10.5: ❌ No tokio runtime available for movement broadcast");
-            return Ok(());
-        }
-    };
+    // CRITICAL: We need to update player position synchronously for zone detection.
+    // Since the handler can run in either multi-threaded or single-threaded runtime,
+    // we use std::thread::spawn with a channel to safely execute async code.
     
-    handle.spawn(async move {
-        debug!("🚀 STEP 11: Inside async broadcast task");
+    info!("🚀 STEP 11: Updating player position for zone detection");
 
-        // CRITICAL FIX: Update BOTH player position AND object position in GORC tracking
-        // This ensures the spatial tracking has the correct positions for distance calculations
+    let mut final_position = move_data.new_position;
 
-        let mut final_position = move_data.new_position;
-
-        // Update player position in GORC tracking
-        if let Some(player_id_str) = event_data["player_id"].as_str() {
-            match PlayerId::from_str(player_id_str) {
-                Ok(player_id) => {
-                    // Check if player has a parent_id
-
-                    if let Some(gorc_instances) = events.get_gorc_instances() {
-                        if let Ok(gorc_id) = GorcObjectId::from_str(&object_id_str) {
-                            if let Some(player_instance) = gorc_instances.get_object(gorc_id).await {
-                                if let Some(player) = player_instance.get_object::<crate::player::GorcPlayer>() {
-                                    let parent_id = &player.critical_data.parent_id;
-                                    
-                                    // If parent_id is not empty, search for parent object
-                                    if !parent_id.is_empty() {
-                                        debug!("🚀 STEP 11.3: Player has parent_id: {}", parent_id);
+    // Update player position in GORC tracking
+    if let Some(player_id_str) = event_data["player_id"].as_str() {
+        match PlayerId::from_str(player_id_str) {
+            Ok(player_id) => {
+                // Check if player has a parent_id and calculate global position
+                if let Some(gorc_instances) = events.get_gorc_instances() {
+                    if let Ok(gorc_id) = GorcObjectId::from_str(&object_id_str) {
+                        let gorc_instances_clone = gorc_instances.clone();
+                        let events_clone = events.clone();
+                        let player_id_str_clone = player_id_str.to_string();
+                        let move_data_position = move_data.new_position;
+                        
+                        // Use a channel to get the result from a spawned thread
+                        let (tx, rx) = std::sync::mpsc::channel();
+                        
+                        std::thread::spawn(move || {
+                            // Create a new runtime in this thread
+                            let rt = tokio::runtime::Builder::new_current_thread()
+                                .enable_all()
+                                .build()
+                                .expect("Failed to create runtime");
+                            
+                            let result = rt.block_on(async {
+                                let mut computed_position = move_data_position;
+                                
+                                if let Some(player_instance) = gorc_instances_clone.get_object(gorc_id).await {
+                                    if let Some(player) = player_instance.get_object::<crate::player::GorcPlayer>() {
+                                        let parent_id = &player.critical_data.parent_id;
                                         
-                                        if let Ok(parent_gorc_id) = GorcObjectId::from_str(parent_id) {
-                                            if let Some(parent_global_position) = gorc_instances.get_object_position(parent_gorc_id) {
-                                                // Calculate global position as parent position + player local position
-                                                final_position = horizon_event_system::Vec3 {
-                                                    x: parent_global_position.x + move_data.new_position.x,
-                                                    y: parent_global_position.y + move_data.new_position.y,
-                                                    z: parent_global_position.z + move_data.new_position.z,
-                                                };
-                                                debug!("🚀 STEP 11.4: ✅ Updated position based on parent {} position {:?}, final position: {:?}",
-                                                    parent_id, parent_global_position, final_position);
-                                            } else {
-                                                debug!("🚀 STEP 11.4: ⚠️ Parent object {} not found", parent_id);
+                                        // If parent_id is not empty, calculate global position
+                                        if !parent_id.is_empty() {
+                                            debug!("🚀 STEP 11.3: Player has parent_id: {}", parent_id);
+                                            
+                                            if let Ok(parent_gorc_id) = GorcObjectId::from_str(parent_id) {
+                                                if let Some(parent_global_position) = gorc_instances_clone.get_object_position(parent_gorc_id) {
+                                                    // Calculate global position as parent position + player local position
+                                                    computed_position = horizon_event_system::Vec3 {
+                                                        x: parent_global_position.x + move_data_position.x,
+                                                        y: parent_global_position.y + move_data_position.y,
+                                                        z: parent_global_position.z + move_data_position.z,
+                                                    };
+                                                    debug!("🚀 STEP 11.4: ✅ Updated position based on parent {} position {:?}, final position: {:?}",
+                                                        parent_id, parent_global_position, computed_position);
+                                                } else {
+                                                    debug!("🚀 STEP 11.4: ⚠️ Parent object {} not found in GORC tracking", parent_id);
+                                                }
                                             }
-                                        } else {
-                                            debug!("🚀 STEP 11.4: ⚠️ Failed to parse parent_id as GorcObjectId: {}", parent_id);
                                         }
                                     }
                                 }
-                            }
+                                
+                                info!("🚀 STEP 11.5: Updating GORC player global_position for player {} to {:?}",
+                                    player_id_str_clone, computed_position);
+                                if let Err(e) = events_clone.update_player_position(player_id, computed_position).await {
+                                    error!("🚀 STEP 11.5: ❌ Failed to update GORC player tracking: {}", e);
+                                } else {
+                                    info!("🚀 STEP 11.5: ✅ Updated GORC player tracking for player {} at position {:?}",
+                                        player_id_str_clone, computed_position);
+                                }
+                                
+                                computed_position
+                            });
+                            
+                            let _ = tx.send(result);
+                        });
+                        
+                        // Wait for the result with a timeout
+                        if let Ok(pos) = rx.recv_timeout(std::time::Duration::from_secs(5)) {
+                            final_position = pos;
+                        } else {
+                            error!("🚀 STEP 11.5: ❌ Timeout waiting for position update");
                         }
                     }
-                    debug!("🚀 STEP 11.5: Updating GORC player global_position for player {} to {:?}",
-                        player_id_str, final_position);
-                    if let Err(e) = events.update_player_position(player_id, final_position).await {
-                        error!("🚀 STEP 11.5: ❌ Failed to update GORC player tracking: {}", e);
-                    } else {
-                        debug!("🚀 STEP 11.5: ✅ Updated GORC player tracking for player {} at position {:?}",
-                            player_id_str, final_position);
+                }
+            }
+            Err(e) => {
+                error!("🚀 STEP 11.5: ❌ Failed to parse player ID: {}", e);
+            }
+        }
+    } else {
+        error!("🚀 STEP 11.5: ❌ player_id is not a valid string");
+    }
+
+    // Also update object position and emit to subscribers
+    if let Ok(gorc_id) = GorcObjectId::from_str(&object_id_str) {
+        debug!("🚀 STEP 12: Parsed GORC ID successfully: {:?}", gorc_id);
+
+        let events_clone = events.clone();
+        let position_update_clone = position_update.clone();
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("Failed to create runtime");
+            
+            rt.block_on(async {
+                if let Err(e) = events_clone.update_object_position(gorc_id, final_position).await {
+                    error!("🚀 STEP 12.5: ❌ Failed to update GORC object tracking: {}", e);
+                } else {
+                    debug!("🚀 STEP 12.5: ✅ Updated GORC object tracking for {:?} at {:?}",
+                        gorc_id, final_position);
+                }
+
+                debug!("🚀 STEP 13: About to call emit_gorc_instance on channel 0");
+                match events_clone.emit_gorc_instance(
+                    gorc_id,
+                    0, // Channel 0: Critical movement data
+                    "move",
+                    &position_update_clone,
+                    horizon_event_system::Dest::Client
+                ).await {
+                    Ok(_) => {
+                        debug!("🚀 STEP 14: ✅ emit_gorc_instance completed successfully");
+                    },
+                    Err(e) => {
+                        error!("🚀 STEP 14: ❌ emit_gorc_instance failed: {}", e);
                     }
                 }
-                Err(e) => {
-                    error!("🚀 STEP 11.5: ❌ Failed to parse player ID: {}", e);
-                }
-            }
-        } else {
-            error!("🚀 STEP 11.5: ❌ player_id is not a valid string");
+            });
+            
+            let _ = tx.send(());
+        });
+        
+        // Wait for completion with timeout
+        if rx.recv_timeout(std::time::Duration::from_secs(5)).is_err() {
+            error!("🚀 STEP 14: ❌ Timeout waiting for emit_gorc_instance");
         }
-
-        if let Ok(gorc_id) = GorcObjectId::from_str(&object_id_str) {
-            debug!("🚀 STEP 12: Parsed GORC ID successfully: {:?}", gorc_id);
-
-            if let Err(e) = events.update_object_position(gorc_id, final_position).await {
-                error!("🚀 STEP 12.5: ❌ Failed to update GORC object tracking: {}", e);
-            } else {
-                debug!("🚀 STEP 12.5: ✅ Updated GORC object tracking for {:?} at {:?}",
-                    gorc_id, final_position);
-            }
-
-            debug!("🚀 STEP 13: About to call emit_gorc_instance on channel 0");
-            match events.emit_gorc_instance(
-                gorc_id,
-                0, // Channel 0: Critical movement data
-                "move",
-                &position_update,
-                horizon_event_system::Dest::Client
-            ).await {
-                Ok(_) => {
-                    debug!("🚀 STEP 14: ✅ emit_gorc_instance completed successfully for player {}", event_data["player_id"]);
-                    debug!("🚀 GORC: ✅ Broadcasted position update for ship {} to clients within 25m", event_data["player_id"]);
-                },
-                Err(e) => {
-                    error!("🚀 STEP 14: ❌ emit_gorc_instance failed: {}", e);
-                    error!("🚀 GORC: ❌ Failed to broadcast position update: {}", e);
-                }
-            }
-        } else {
-            error!("🚀 STEP 12: ❌ Failed to parse GORC object ID: {}", object_id_str);
-            error!("🚀 GORC: ❌ Invalid GORC object ID format: {}", object_id_str);
-        }
-        debug!("🚀 STEP 15: Exiting async broadcast task");
-    });
+    } else {
+        error!("🚀 STEP 12: ❌ Failed to parse GORC object ID: {}", object_id_str);
+    }
+    debug!("🚀 STEP 15: Exiting movement handler");
     
     Ok(())
 }

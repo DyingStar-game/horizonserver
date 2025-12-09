@@ -62,6 +62,7 @@ use horizon_event_system::{
     create_simple_plugin,
     EventSystem,
     GorcObjectId,
+    GorcEvent,
     LogLevel,
     PlayerId,
     PluginError,
@@ -99,6 +100,7 @@ use handlers::*;
 /// - Player registry uses `DashMap` for lock-free concurrent access
 /// - All handlers are async and non-blocking
 /// - Event processing is distributed across multiple async tasks
+/// - **Connection processing uses MPSC to prevent deadlocks**
 ///
 /// ## Resource Management
 ///
@@ -111,6 +113,11 @@ pub struct PlayerPlugin {
     /// Thread-safe registry mapping PlayerId to GorcObjectId for resource management
     /// This allows efficient lookup during movement, combat, and cleanup operations
     players: Arc<DashMap<PlayerId, GorcObjectId>>,
+    /// Tokio runtime for spawning async tasks (required because luminal tasks may not be polled)
+    runtime: Arc<tokio::runtime::Runtime>,
+    /// Connection processor that queues and processes connections sequentially via MPSC
+    /// This prevents deadlocks when many players connect simultaneously
+    connection_processor: Option<handlers::ConnectionProcessor>,
 }
 
 impl PlayerPlugin {
@@ -135,9 +142,22 @@ impl PlayerPlugin {
     /// ```
     pub fn new() -> Self {
         debug!("🎮 PlayerPlugin: Creating new instance with GORC architecture");
+        let runtime = Arc::new(
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("failed to build plugin runtime"),
+        );
+        
+        // Create the connection processor with MPSC channel
+        // Buffer size of 1000 allows queueing many simultaneous connections
+        let connection_processor = handlers::ConnectionProcessor::new(runtime.clone(), 1000);
+        
         Self {
             name: "PlayerPlugin".to_string(),
             players: Arc::new(DashMap::new()),
+            runtime,
+            connection_processor: Some(connection_processor),
         }
     }
 }
@@ -225,7 +245,7 @@ impl SimplePlugin for PlayerPlugin {
         ).await?;
 
         // Register GORC client event handlers for real-time gameplay
-        self.register_movement_handler(Arc::clone(&events), luminal_handle.clone()).await?;
+        self.register_movement_handler(Arc::clone(&events)).await?;
         self.register_combat_handler(Arc::clone(&events), luminal_handle.clone()).await?;
         self.register_communication_handler(Arc::clone(&events), luminal_handle.clone()).await?;
         self.register_scanning_handler(Arc::clone(&events), luminal_handle.clone()).await?;
@@ -307,6 +327,8 @@ impl PlayerPlugin {
     /// - Registers players with the spatial replication system
     /// - Cleans up resources when players disconnect
     ///
+    /// **NEW: Uses MPSC channel to process connections sequentially, preventing deadlocks**
+    ///
     /// # Parameters
     ///
     /// - `events`: Event system reference for handler registration
@@ -319,95 +341,64 @@ impl PlayerPlugin {
         &self,
         events: Arc<EventSystem>,
         context: Arc<dyn ServerContext>,
-        luminal_handle: luminal::Handle
+        _luminal_handle: luminal::Handle
     ) -> Result<(), PluginError> {
-        debug!("🎮 PlayerPlugin: Registering connection lifecycle handlers");
+        debug!("🎮 PlayerPlugin: Registering connection lifecycle handlers with MPSC queue");
+
+        // Get the connection sender for queueing events
+        // This processes connections one at a time to prevent deadlocks
+        let connection_sender = self.connection_processor
+            .as_ref()
+            .expect("ConnectionProcessor should be initialized")
+            .sender();
 
         // Register player connection handler
         let players_conn = Arc::clone(&self.players);
         let events_for_conn = Arc::clone(&events);
-        let luminal_handle_connect = luminal_handle.clone();
+        let conn_sender = connection_sender.clone();
 
-        events.on_plugin("gorcplugin", "new_player", move |event: NewPlayerData| {
-            println!("🎮 PlayerPlugin: received new_player event!");
+        events.on_plugin("pluginplayer", "new_player", move |event: serde_json::Value| {
+            println!("🎮 PlayerPlugin: received new_player event, queueing for sequential processing");
             let players = players_conn.clone();
             let events = events_for_conn.clone();
-            let handle = luminal_handle_connect.clone();
-
-            // Use the dedicated connection handler
-            let handle_clone = handle.clone();
-            handle.spawn(async move {
-                // match
-                //     serde_json::from_value::<horizon_event_system::PlayerConnectedEvent>(event)
-                // {
-                    // Ok(player_event) => {
-                        if
-                            let Err(e) = handle_player_connected(
-                                event,
-                                players,
-                                events,
-                                handle_clone
-                            ).await
-                        {
-                            error!("🎮 Failed to handle player connection: {}", e);
-                        }
-                    // }
-                    // Err(e) => {
-                    //     error!("🎮 Failed to deserialize PlayerConnectedEvent: {}", e);
-                    // }
-                // }
-            });
+            
+            // Queue the connection for sequential processing via MPSC
+            // This prevents deadlocks when many players connect simultaneously
+            if let Err(e) = conn_sender.queue_connection(event, players, events) {
+                error!("🎮 Failed to queue player connection: {}", e);
+            }
 
             Ok(())
         }).await
         .map_err(|e| PluginError::ExecutionError(e.to_string()))?;
 
-
-        // events
-        //     .on_core("player_connected", move |event: serde_json::Value| {
-        //         let players = players_conn.clone();
-        //         let events = events_for_conn.clone();
-        //         let handle = luminal_handle_connect.clone();
-
-        //         // Use the dedicated connection handler
-        //         let handle_clone = handle.clone();
-        //         handle.spawn(async move {
-        //             match
-        //                 serde_json::from_value::<horizon_event_system::PlayerConnectedEvent>(event)
-        //             {
-        //                 Ok(player_event) => {
-        //                     if
-        //                         let Err(e) = handle_player_connected(
-        //                             player_event,
-        //                             players,
-        //                             events,
-        //                             handle_clone
-        //                         ).await
-        //                     {
-        //                         error!("🎮 Failed to handle player connection: {}", e);
-        //                     }
-        //                 }
-        //                 Err(e) => {
-        //                     error!("🎮 Failed to deserialize PlayerConnectedEvent: {}", e);
-        //                 }
-        //             }
-        //         });
-
-        //         Ok(())
-        //     }).await
-        //     .map_err(|e| PluginError::ExecutionError(e.to_string()))?;
-
         // Register player disconnection handler
         let players_disc = Arc::clone(&self.players);
+        let events_for_disc = Arc::clone(&events);
+        let disc_sender = connection_sender.clone();
         events
             .on_core("player_disconnected", move |event: serde_json::Value| {
                 let players = players_disc.clone();
+                let events = events_for_disc.clone();
+                info!("🎮 PlayerPlugin: received player_disconnected event, queueing for sequential processing");
+
+                // Parse and queue the disconnection for sequential processing
+                match serde_json::from_value::<horizon_event_system::PlayerDisconnectedEvent>(event) {
+                    Ok(player_event) => {
+                        if let Err(e) = disc_sender.queue_disconnection(player_event, players, events) {
+                            error!("🎮 Failed to queue player disconnection: {}", e);
+                        }
+                    }
+                    Err(e) => {
+                        error!("🎮 Failed to deserialize PlayerDisconnectedEvent: {}", e);
+                    }
+                }
 
                 Ok(())
             }).await
             .map_err(|e| PluginError::ExecutionError(e.to_string()))?;
 
-        debug!("🎮 PlayerPlugin: ✅ Connection handlers registered");
+        debug!("🎮 PlayerPlugin: ✅ Connection handlers registered with MPSC queue");
         Ok(())
     }
 
@@ -422,7 +413,6 @@ impl PlayerPlugin {
     /// # Parameters
     ///
     /// - `events`: Event system reference for handler registration
-    /// - `luminal_handle`: Async runtime handle for background operations
     ///
     /// # Returns
     ///
@@ -430,28 +420,23 @@ impl PlayerPlugin {
     async fn register_movement_handler(
         &self,
         events: Arc<EventSystem>,
-        luminal_handle: luminal::Handle
     ) -> Result<(), PluginError> {
         debug!("🎮 PlayerPlugin: Registering GORC channel 0 (movement) handler");
 
+        // Handler 1: For GORC events (server-to-server replication)
         let events_for_move = Arc::clone(&events);
-        let luminal_handle_move = luminal_handle.clone();
         events
-            .on_gorc_client(
-                luminal_handle,
+            .on_gorc_instance(
                 "GorcPlayer",
                 0, // Channel 0: Critical movement data
                 "move",
-                move |gorc_event, client_player, connection, object_instance| {
+                move |gorc_event: GorcEvent, object_instance| {
                     debug!("🎮 PlayerPlugin: received GORC channel 0 (movement) event!");                    
                     // Use the dedicated movement handler
                     movement::handle_movement_request_sync(
                         gorc_event,
-                        client_player,
-                        connection,
                         object_instance,
                         events_for_move.clone(),
-                        luminal_handle_move.clone()
                     )
                 }
             ).await

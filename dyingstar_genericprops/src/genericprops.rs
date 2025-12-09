@@ -26,6 +26,7 @@ pub struct GenericProps {
 	//pub gorc_id: Option<GorcObjectId>,
     pub object_def: ObjectDefinition,
     pub uuid: String,
+	pub global_position: Vec3,
 	//data is zone ordered
 	pub data: HashMap<u8, serde_json::Value>,
 }
@@ -39,6 +40,7 @@ impl GenericProps {
         Self {
 			object_def,
 			uuid,
+			global_position: Vec3::zero(),
 			data
         }
     }
@@ -82,13 +84,7 @@ impl GorcObject for GenericProps {
     }
 
     fn position(&self) -> Vec3 {
-        //self.position
-		if let Some(zone) = self.object_def.index.get("position") {
-			 serde_json::from_value::<Vec3>(self.data[zone].get("position").unwrap().clone()).expect("Object should have position")
-		}
-		else {
-			Vec3::zero()
-		}
+		self.global_position
     }
 	
 	fn get_priority(&self, observer_pos: Vec3) -> ReplicationPriority {
@@ -130,10 +126,8 @@ impl GorcObject for GenericProps {
 		layers
     }
 	
-	//TODO found why this trait exist ; use by	event handlers but why it's in trait ?
 	fn update_position(&mut self, new_position: Vec3) {
-        //self.position = new_position
-		self.update(json!({"position":new_position}));
+		self.global_position = new_position;
     }
             
 	fn as_any(&self) -> &dyn std::any::Any {

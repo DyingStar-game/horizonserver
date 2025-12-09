@@ -5,7 +5,6 @@ use horizon_event_system::{
     EventSystem,
     GorcObjectId,
     LogLevel,
-    //PlayerId,
     PluginError,
     ServerContext,
     SimplePlugin,
@@ -79,11 +78,9 @@ impl SimplePlugin for GenericPropsPlugin {
 		//Register core server event handlers for player lifecycle management
         self.register_plugin_handlers(
             Arc::clone(&events),
-            //context.clone(),
             luminal_handle.clone()
         ).await?;
 		
-        //TODO? Register GORC client event handlers if any
 		self.register_gorc_handler(Arc::clone(&events), luminal_handle.clone(), 0).await?;
 		self.register_gorc_handler(Arc::clone(&events), luminal_handle.clone(), 1).await?;
 		self.register_gorc_handler(Arc::clone(&events), luminal_handle.clone(), 2).await?;
@@ -168,7 +165,7 @@ impl GenericPropsPlugin {
         let props1 = Arc::clone(&self.props);
         
         events.on_plugin("genericprops", "update_object", move |event: serde_json::Value| {
-            println!("plugin genericprops (update): Receive object message {:?}", event);
+            debug!("plugin genericprops (update): Receive object message {:?}", event);
             if let Err(e) = update::handle_object_update(
                                 definitions1.clone(),
                                 props1.clone(),
@@ -190,13 +187,36 @@ impl GenericPropsPlugin {
         let props2 = Arc::clone(&self.props);
         
         events.on_plugin("genericprops", "create_object", move |event: serde_json::Value| {
-            println!("plugin genericprops (create): Receive object message {:?}", event);
+            debug!("plugin genericprops (create): Receive object message {:?}", event);
             if let Err(e) = update::handle_object_create(
                                 definitions2.clone(),
                                 props2.clone(),
                                 update_events2.clone(),
                                 event.clone(),
-                                handle2.clone()
+                                handle2.clone(),
+                                true,
+                            )
+                        {
+                            error!("🎮 Failed to handle object update: {}", e);
+                        }
+        Ok(())
+        }).await
+        .map_err(|e| PluginError::ExecutionError(e.to_string()))?;
+
+        let update_events3 = events.clone();
+        let handle3 = luminal_handle.clone();
+        let definitions3 = Arc::clone(&self.definitions);
+        let props3 = Arc::clone(&self.props);
+
+        events.on_plugin("genericprops", "create_object_from_gameserver", move |event: serde_json::Value| {
+            debug!("plugin genericprops (create from gameserver): Receive object message {:?}", event);
+            if let Err(e) = update::handle_object_create(
+                                definitions3.clone(),
+                                props3.clone(),
+                                update_events3.clone(),
+                                event.clone(),
+                                handle3.clone(),
+                                false,
                             )
                         {
                             error!("🎮 Failed to handle object update: {}", e);

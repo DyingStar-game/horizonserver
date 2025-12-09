@@ -138,6 +138,7 @@ pub struct PlayerMoveRequest {
     pub player_id: PlayerId,
     /// Requested new position in world coordinates  
     pub new_position: Vec3,
+    pub new_rotation: Vec3,
     /// Current velocity vector for prediction
     pub velocity: Vec3,
     /// Current movement state (0=idle, 1=walking, 2=running, etc.)

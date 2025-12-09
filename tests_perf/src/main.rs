@@ -1,7 +1,7 @@
 use clap::Parser;
 use futures_util::{SinkExt, StreamExt};
+use rand::Rng;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -31,6 +31,14 @@ struct Args {
     /// Duration to keep connections alive (seconds)
     #[arg(short, long, default_value = "10")]
     duration: u64,
+    
+    /// Enable player movement after connection (disabled by default)
+    #[arg(short = 'm', long, default_value = "false")]
+    enable_movement: bool,
+    
+    /// Enable verbose output
+    #[arg(short, long, default_value = "false")]
+    verbose: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -44,6 +52,7 @@ struct InitMessage {
 struct InitData {
     login: String,
     password: String,
+    spawn_point: i8,
 }
 
 #[derive(Debug)]
@@ -80,6 +89,8 @@ async fn create_websocket_client(
     password: String,
     duration: Duration,
     stats: Arc<ConnectionStats>,
+    enable_movement: bool,
+    verbose: bool,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let login_name = format!("{}_{}", base_name, client_id);
     
@@ -108,6 +119,7 @@ async fn create_websocket_client(
         data: InitData {
             login: login_name.clone(),
             password: password.clone(),
+            spawn_point: 1,
         },
     };
 
@@ -123,17 +135,119 @@ async fn create_websocket_client(
     stats.messages_sent.fetch_add(1, Ordering::Relaxed);
     println!("Client {}: Init message sent successfully", client_id);
 
+    // Track if we've received init_ack and when to send movement
+    let mut init_ack_received = false;
+    let mut init_ack_time: Option<Instant> = None;
+    let mut movement_sent = false;
+    let mut player_uuid: Option<String> = None;
+
     // Listen for messages and keep connection alive
     let start_time = Instant::now();
     
     while start_time.elapsed() < duration {
+        // Check if it's time to send movement message
+        async fn send_movement_message(
+            client_id: usize,
+            uuid: &str,
+            ws_sender: &mut futures_util::stream::SplitSink<
+                tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+                Message
+            >,
+            stats: &Arc<ConnectionStats>,
+        ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            // Generate random rotation values in radians
+            let rot_x: f64;
+            let rot_y: f64;
+            let rot_z: f64;
+            {
+                let mut rng = rand::thread_rng();
+                rot_x = rng.gen_range(0.0..std::f64::consts::TAU);
+                rot_y = rng.gen_range(0.0..std::f64::consts::TAU);
+                rot_z = rng.gen_range(0.0..std::f64::consts::TAU);
+            } // rng is dropped here before the await
+            
+            let movement_message = serde_json::json!({
+                "namespace": "movement",
+                "event": "update_velocity",
+                "data": {
+                    "pos": {
+                        "x": 1.0,
+                        "y": 0.0
+                    },
+                    "rot": {
+                        "x": rot_x,
+                        "y": rot_y,
+                        "z": rot_z
+                    },
+                    "uuid": uuid
+                }
+            });
+            
+            let message_json = serde_json::to_string(&movement_message)?;
+            ws_sender.send(Message::Text(message_json)).await?;
+            
+            println!("Client {}: Movement message sent (rot: {:.2}, {:.2}, {:.2})", 
+                     client_id, rot_x, rot_y, rot_z);
+            stats.messages_sent.fetch_add(1, Ordering::Relaxed);
+            
+            Ok(())
+        }
+        
         tokio::select! {
             // Listen for incoming messages
             msg = ws_receiver.next() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
                         stats.messages_received.fetch_add(1, Ordering::Relaxed);
-                        println!("Client {}: Received message: {}", client_id, text);
+                        if verbose {
+                            println!("Client {}: Received message: {}", client_id, text);
+                        }
+                        
+                        // Check if this is an init_ack message
+                        if !init_ack_received {
+                            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text) {
+                                println!("Client {}: Parsed JSON message: {:?}", client_id, parsed);
+                                
+                                // Check both "type" and "event" fields for "init_ack"
+                                let is_init_ack = parsed.get("type").and_then(|t| t.as_str()) == Some("init_ack") 
+                                    || parsed.get("event").and_then(|e| e.as_str()) == Some("init_ack");
+                                    
+                                if is_init_ack {
+                                    println!("Client {}: Received init_ack, parsing UUID...", client_id);
+                                    
+                                    // Extract player UUID from various possible fields
+                                    if let Some(uuid) = parsed.get("player_id").and_then(|u| u.as_str()) {
+                                        player_uuid = Some(uuid.to_string());
+                                        println!("Client {}: Found player_id: {}", client_id, uuid);
+                                    } else if let Some(uuid) = parsed.get("client_uuid").and_then(|u| u.as_str()) {
+                                        player_uuid = Some(uuid.to_string());
+                                        println!("Client {}: Found client_uuid: {}", client_id, uuid);
+                                    } else if let Some(data) = parsed.get("data") {
+                                        if let Some(uuid) = data.get("client_uuid").and_then(|u| u.as_str()) {
+                                            player_uuid = Some(uuid.to_string());
+                                            println!("Client {}: Found client_uuid in data: {}", client_id, uuid);
+                                        } else if let Some(uuid) = data.get("player_id").and_then(|u| u.as_str()) {
+                                            player_uuid = Some(uuid.to_string());
+                                            println!("Client {}: Found player_id in data: {}", client_id, uuid);
+                                        }
+                                    }
+                                    
+                                    if player_uuid.is_none() {
+                                        println!("Client {}: WARNING - No UUID found in init_ack message: {}", client_id, text);
+                                    }
+                                    
+                                    init_ack_received = true;
+                                    init_ack_time = Some(Instant::now());
+                                    if enable_movement {
+                                        if let Some(ref uuid) = player_uuid {
+                                            if let Err(e) = send_movement_message(client_id, uuid, &mut ws_sender, &stats).await {
+                                                println!("Client {}: Failed to send movement message: {}", client_id, e);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                     Some(Ok(Message::Binary(data))) => {
                         stats.messages_received.fetch_add(1, Ordering::Relaxed);
@@ -183,6 +297,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Server URL: {}", args.url);
     println!("Base name: {}", args.base_name);
     println!("Duration: {} seconds", args.duration);
+    println!("Movement enabled: {}", args.enable_movement);
     println!("================================\n");
     
     let stats = Arc::new(ConnectionStats::new());
@@ -200,6 +315,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let password = args.password.clone();
         let stats_clone = Arc::clone(&stats);
         
+        let enable_movement = args.enable_movement;
+        let verbose = args.verbose;
+        
         let task = tokio::spawn(async move {
             if let Err(e) = create_websocket_client(
                 client_id,
@@ -208,6 +326,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 password,
                 duration,
                 stats_clone,
+                enable_movement,
+                verbose,
             ).await {
                 eprintln!("Client {}: Task failed: {}", client_id, e);
             }

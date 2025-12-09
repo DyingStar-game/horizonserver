@@ -6,6 +6,7 @@ use tracing::{ debug, error };
 use std::string::String;
 use std::error::Error;
 use std::sync::Arc;
+use horizon_event_system::Vec3;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ObjectDefinition {
@@ -68,5 +69,33 @@ impl ObjectDefinition {
 			},
 			_ => return Err("object creation error: Invalid data input".into())
 		}
+	}
+	
+	/// Get position from object definition data
+	/// Priority order:
+	/// 1. Check for "positions" array and return first item
+	/// 2. Check for "position" value and return it
+	/// 3. Return Vec3::zero() as fallback
+	pub fn get_position(&self, data: &serde_json::Value) -> Vec3 {
+		// Case 1: Check for "positions" array
+		if let Some(positions) = data.get("positions") {
+			if let Some(array) = positions.as_array() {
+				if let Some(first_pos) = array.first() {
+					if let Ok(position) = serde_json::from_value::<Vec3>(first_pos.clone()) {
+						return position;
+					}
+				}
+			}
+		}
+		
+		// Case 2: Check for "position" value
+		if let Some(position) = data.get("position") {
+			if let Ok(pos) = serde_json::from_value::<Vec3>(position.clone()) {
+				return pos;
+			}
+		}
+		
+		// Case 3: Return zero vector as fallback
+		Vec3::zero()
 	}
 }

@@ -46,6 +46,7 @@
 //! ```
 
 pub mod connection;
+pub mod connection_processor;
 pub mod movement;
 pub mod combat;
 pub mod communication;
@@ -53,6 +54,7 @@ pub mod scanning;
 
 // Re-export common handler utilities
 pub use connection::*;
+pub use connection_processor::*;
 pub use movement::*;
 pub use combat::*;
 pub use communication::*;

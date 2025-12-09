@@ -20,6 +20,7 @@ ADD plugins /app/plugins
 
 # Copy config
 COPY production_config.toml /app/config.toml
+COPY plugins.toml /app/plugins.toml
 
 # Copy server
 COPY horizon /app/server

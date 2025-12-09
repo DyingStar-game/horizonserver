@@ -5,7 +5,6 @@ use horizon_event_system::{
     EventSystem,
     GorcObjectId,
     LogLevel,
-    //PlayerId,
     PluginError,
     ServerContext,
     SimplePlugin,
@@ -79,11 +78,9 @@ impl SimplePlugin for GenericPropsPlugin {
 		//Register core server event handlers for player lifecycle management
         self.register_plugin_handlers(
             Arc::clone(&events),
-            //context.clone(),
             luminal_handle.clone()
         ).await?;
 		
-        //TODO? Register GORC client event handlers if any
 		self.register_gorc_handler(Arc::clone(&events), luminal_handle.clone(), 0).await?;
 		self.register_gorc_handler(Arc::clone(&events), luminal_handle.clone(), 1).await?;
 		self.register_gorc_handler(Arc::clone(&events), luminal_handle.clone(), 2).await?;

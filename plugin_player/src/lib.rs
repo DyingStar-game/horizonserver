@@ -100,6 +100,7 @@ use handlers::*;
 /// - Player registry uses `DashMap` for lock-free concurrent access
 /// - All handlers are async and non-blocking
 /// - Event processing is distributed across multiple async tasks
+/// - **Connection processing uses MPSC to prevent deadlocks**
 ///
 /// ## Resource Management
 ///
@@ -114,6 +115,9 @@ pub struct PlayerPlugin {
     players: Arc<DashMap<PlayerId, GorcObjectId>>,
     /// Tokio runtime for spawning async tasks (required because luminal tasks may not be polled)
     runtime: Arc<tokio::runtime::Runtime>,
+    /// Connection processor that queues and processes connections sequentially via MPSC
+    /// This prevents deadlocks when many players connect simultaneously
+    connection_processor: Option<handlers::ConnectionProcessor>,
 }
 
 impl PlayerPlugin {
@@ -144,10 +148,16 @@ impl PlayerPlugin {
                 .build()
                 .expect("failed to build plugin runtime"),
         );
+        
+        // Create the connection processor with MPSC channel
+        // Buffer size of 1000 allows queueing many simultaneous connections
+        let connection_processor = handlers::ConnectionProcessor::new(runtime.clone(), 1000);
+        
         Self {
             name: "PlayerPlugin".to_string(),
             players: Arc::new(DashMap::new()),
             runtime,
+            connection_processor: Some(connection_processor),
         }
     }
 }
@@ -317,6 +327,8 @@ impl PlayerPlugin {
     /// - Registers players with the spatial replication system
     /// - Cleans up resources when players disconnect
     ///
+    /// **NEW: Uses MPSC channel to process connections sequentially, preventing deadlocks**
+    ///
     /// # Parameters
     ///
     /// - `events`: Event system reference for handler registration
@@ -331,102 +343,62 @@ impl PlayerPlugin {
         context: Arc<dyn ServerContext>,
         _luminal_handle: luminal::Handle
     ) -> Result<(), PluginError> {
-        debug!("🎮 PlayerPlugin: Registering connection lifecycle handlers");
+        debug!("🎮 PlayerPlugin: Registering connection lifecycle handlers with MPSC queue");
 
-        // Use our own tokio runtime for spawning async tasks
-        // (luminal_handle tasks may not be polled correctly)
-        let runtime = self.runtime.clone();
+        // Get the connection sender for queueing events
+        // This processes connections one at a time to prevent deadlocks
+        let connection_sender = self.connection_processor
+            .as_ref()
+            .expect("ConnectionProcessor should be initialized")
+            .sender();
 
         // Register player connection handler
         let players_conn = Arc::clone(&self.players);
         let events_for_conn = Arc::clone(&events);
-        let runtime_for_conn = runtime.clone();
+        let conn_sender = connection_sender.clone();
 
         events.on_plugin("pluginplayer", "new_player", move |event: serde_json::Value| {
-            println!("🎮 PlayerPlugin: received new_player event!");
+            println!("🎮 PlayerPlugin: received new_player event, queueing for sequential processing");
             let players = players_conn.clone();
             let events = events_for_conn.clone();
             
-            // Use tokio runtime.spawn() like dyingstar_props does
-            // This ensures the async task is actually polled
-            runtime_for_conn.spawn(async move {
-                if let Err(e) = handlers::handle_player_connected(
-                    event,
-                    players,
-                    events,
-                ).await {
-                    error!("🎮 Failed to handle player connection: {}", e);
-                }
-            });
+            // Queue the connection for sequential processing via MPSC
+            // This prevents deadlocks when many players connect simultaneously
+            if let Err(e) = conn_sender.queue_connection(event, players, events) {
+                error!("🎮 Failed to queue player connection: {}", e);
+            }
 
             Ok(())
         }).await
         .map_err(|e| PluginError::ExecutionError(e.to_string()))?;
 
-
-        // events
-        //     .on_core("player_connected", move |event: serde_json::Value| {
-        //         let players = players_conn.clone();
-        //         let events = events_for_conn.clone();
-        //         let handle = luminal_handle_connect.clone();
-
-        //         // Use the dedicated connection handler
-        //         let handle_clone = handle.clone();
-        //         handle.spawn(async move {
-        //             match
-        //                 serde_json::from_value::<horizon_event_system::PlayerConnectedEvent>(event)
-        //             {
-        //                 Ok(player_event) => {
-        //                     if
-        //                         let Err(e) = handle_player_connected(
-        //                             player_event,
-        //                             players,
-        //                             events,
-        //                             handle_clone
-        //                         ).await
-        //                     {
-        //                         error!("🎮 Failed to handle player connection: {}", e);
-        //                     }
-        //                 }
-        //                 Err(e) => {
-        //                     error!("🎮 Failed to deserialize PlayerConnectedEvent: {}", e);
-        //                 }
-        //             }
-        //         });
-
-        //         Ok(())
-        //     }).await
-        //     .map_err(|e| PluginError::ExecutionError(e.to_string()))?;
-
         // Register player disconnection handler
         let players_disc = Arc::clone(&self.players);
         let events_for_disc = Arc::clone(&events);
-        let runtime_for_disc = runtime.clone();
+        let disc_sender = connection_sender.clone();
         events
             .on_core("player_disconnected", move |event: serde_json::Value| {
                 let players = players_disc.clone();
                 let events = events_for_disc.clone();
-                info!("🎮 PlayerPlugin: received player_disconnected event!");
+                info!("🎮 PlayerPlugin: received player_disconnected event, queueing for sequential processing");
 
-                // Use tokio runtime.spawn() like dyingstar_props does
-                runtime_for_disc.spawn(async move {
-                    match serde_json::from_value::<horizon_event_system::PlayerDisconnectedEvent>(event) {
-                        Ok(player_event) => {
-                            if let Err(e) = handle_player_disconnected(player_event, players, events).await {
-                                error!("🎮 Failed to handle player disconnection: {}", e);
-                            }
-                        }
-                        Err(e) => {
-                            error!("🎮 Failed to deserialize PlayerDisconnectedEvent: {}", e);
+                // Parse and queue the disconnection for sequential processing
+                match serde_json::from_value::<horizon_event_system::PlayerDisconnectedEvent>(event) {
+                    Ok(player_event) => {
+                        if let Err(e) = disc_sender.queue_disconnection(player_event, players, events) {
+                            error!("🎮 Failed to queue player disconnection: {}", e);
                         }
                     }
-                });
+                    Err(e) => {
+                        error!("🎮 Failed to deserialize PlayerDisconnectedEvent: {}", e);
+                    }
+                }
 
                 Ok(())
             }).await
             .map_err(|e| PluginError::ExecutionError(e.to_string()))?;
 
-        debug!("🎮 PlayerPlugin: ✅ Connection handlers registered");
+        debug!("🎮 PlayerPlugin: ✅ Connection handlers registered with MPSC queue");
         Ok(())
     }
 

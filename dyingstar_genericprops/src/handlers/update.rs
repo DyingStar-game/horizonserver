@@ -22,13 +22,6 @@ pub fn handle_client_update_request(
     events: Arc<EventSystem>,
 	luminal_handle: Handle,
 ) -> Result<(), EventError> {
-	// SECURITY: Validate connection authentication before processing any movement
-    // if !connection.is_authenticated() {
-    //     error!("🚀 GORC: ❌ Unauthenticated movement request from {}", connection.remote_addr);
-    //     return Err(EventError::HandlerExecution(
-    //         "Unauthenticated request".to_string()
-    //     ));
-    // }
 	
 	// Parse the movement data from the GORC event payload
     let event_data = serde_json::from_slice::<serde_json::Value>(&gorc_event.data)
@@ -42,9 +35,6 @@ pub fn handle_client_update_request(
             error!("🚀 GORC: ❌ Failed to parse GenericPropsGORCUpdateRequest: {}", e);
             EventError::HandlerExecution("Invalid update request format".to_string())
         })?;
-		
-	// SECURITY
-	// TODO Come from a playerwith ownership
     
     // Update the object instance directly (this is the authoritative update)
     object_instance.get_object_mut::<GenericProps>().expect("TODO").update(req_data.new_data.clone());
@@ -323,45 +313,9 @@ pub fn handle_object_update(
 												y: parent_global_position.y + position.y,
 												z: parent_global_position.z + position.z,
 											};
-											// debug!("🚀 GORC: Setting child object {} global_position based on parent {} global_position: {:?}", 
-											// 	uuid, parent_id_str, gorc_id_opt.global_position);
-										// } else {
-										// 	error!("🚀 GORC: ❌ Parent object position not found for child {}", uuid);
-											// gorc_id_opt.global_position = position.clone();
 										}
-									// } else {
-									// 	error!("🚀 GORC: ❌ Invalid parent GORC ID for child {}", uuid);
-									// 	gorc_id_opt.global_position = position.clone();
 									}
 								}
-
-								// // Check if object has a parent_id and adjust position accordingly
-								// let final_position = if let Some(parent_id_value) = req_data.object_data.get("parent_id") {
-								// 	if let Some(parent_id_str) = parent_id_value.as_str() {
-								// 		if !parent_id_str.is_empty() {
-								// 			if let Ok(parent_gorc_id) = GorcObjectId::from_str(parent_id_str) {
-								// 				if let Some(parent_global_position) = gorc_instances.get_object_position(parent_gorc_id).await {
-								// 					// Calculate global position: parent's global_position + local position
-								// 					horizon_event_system::Vec3 {
-								// 						x: parent_global_position.x + position.x,
-								// 						y: parent_global_position.y + position.y,
-								// 						z: parent_global_position.z + position.z,
-								// 					}
-								// 				} else {
-								// 					position
-								// 				}
-								// 			} else {
-								// 				position
-								// 			}
-								// 		} else {
-								// 			position
-								// 		}
-								// 	} else {
-								// 		position
-								// 	}
-								// } else {
-								// 	position
-								// };
 								
 								// Update the object_instance global_position property
 								object_instance.get_object_mut::<GenericProps>().expect("Object must exists").global_position = final_position;
@@ -388,7 +342,6 @@ pub fn handle_object_update(
 								}
 							}
 						}
-
 					}
 					gorc_instances.update_object(gorc_id, object_instance).await;
 				} else {
@@ -398,6 +351,5 @@ pub fn handle_object_update(
 				error!("🎮 GORC: ❌ Unknown props uuid in request (not in props map and not a valid GORC ID): {}", req_data.object_uuid);
 			}
 		});
-
 		Ok(())
 	}

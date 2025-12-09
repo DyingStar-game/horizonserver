@@ -15,10 +15,7 @@ use tracing_subscriber::util::SubscriberInitExt;
 use std::path::Path;
 use dotenvy::dotenv;
 use websocket::ClientBuilder;
-// use websocket::client::sync::Client;
 use websocket::r#async::client::{Client, ClientNew, Framed};
-// use websocket::r#async::TcpStream;
-// use websocket::stream::sync::TcpStream;
 use std::net::TcpStream;
 use websocket::message::OwnedMessage;
 use websocket::sender::Writer;
@@ -104,11 +101,9 @@ impl DsGameServerPlugin {
                         }
                     }
                 }
-                
                 return Err(format!("'ds_game_server.game_server_address' not found in {}", path));
             }
         }
-
         Err("plugins.toml file not found in any expected location".to_string())
     }
 }
@@ -395,8 +390,6 @@ impl SimplePlugin for DsGameServerPlugin {
             "update_velocity",
             move |wrapper: ClientEventWrapper<serde_json::Value>, _player_id: PlayerId, _connection: ClientConnectionRef| {
                 debug!("📝 LoggerPlugin: 🦘 Client movement from player {}", wrapper.player_id);
-                // println!("player movement {:?}", wrapper);
-                // println!("📝 LoggerPlugin: 🦘 Client movement");
 
                 let websocket = Arc::clone(&websocket);
 
@@ -425,8 +418,7 @@ impl SimplePlugin for DsGameServerPlugin {
                         }
                     }
                 });
- 
-                Ok(())
+                 Ok(())
             },
         )
         .await
@@ -472,12 +464,6 @@ impl SimplePlugin for DsGameServerPlugin {
         // )
         // .await
         // .map_err(|e| PluginError::ExecutionError(e.to_string()))?;
-
-        // events.on_core("player_disconnected", move |event: PlayerDisconnectedEvent| {
-        //     debug!("[disconnected]: {:?}", event);
-        //     println!("Player disconnected.");
-        //     Ok(())
-        // }).await.map_err(|e| PluginError::ExecutionError(e.to_string()))?;
 
         info!("🔧 DsGameServerPlugin: ✅ All handlers registered successfully!");
         Ok(())

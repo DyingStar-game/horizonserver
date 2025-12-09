@@ -66,66 +66,6 @@ impl DyingstarPropsPlugin {
         }
     }
 
-    // async fn setup_object_registry(&self) -> Result<(), String> {
-    //     // Register Box5ocm object types
-    //     Box50cm::register_with_gorc(self.object_registry.clone()).await
-    //         .map_err(|e| e.to_string())?;
-        
-    //     let objects = self.object_registry.list_objects().await;
-    //     info!("📦 Registered GORC objects: {:?}", objects);
-        
-    //     Ok(())
-    // }
-
-    // async fn setup_gorc_handlers(&self, events: Arc<EventSystem>) -> Result<(), PluginError> {
-    //     // Register GORC event handlers for Box50cm objects
-    //     events.on_gorc_instance("Box50cm", 2, "cosmetic_update", |event: GorcEvent, _instance| {
-    //         info!("✨ Box50cm cosmetic update: {}", event.object_id);
-    //         Ok(())
-    //     }).await.map_err(|e| PluginError::ExecutionError(e.to_string()))?;
-
-    //     Ok(())
-    // }
-    
-    // async fn demonstrate_object_replication(&self, events: Arc<EventSystem>) -> Result<(), String> {
-    //     // Create a box50cm and demonstrate replication
-    //     let box50cm = Box50cm::new(Vec3::new(500.0, 100.0, 300.0), Vec3::new(0.0, 0.0, 0.0));
-    //     let box50cm_id = "box50cm_001".to_string();
-        
-    //     let mut boxes = self.boxes50cm.write().await;
-    //     // let mut planets = self.planets.write().await;
-
-    //     boxes.insert(box50cm_id.clone(), box50cm.clone());
-
-    //     let critical_data = box50cm.serialize_for_layer(&ReplicationLayer::new(
-    //         0, 100.0, 60.0, vec!["position".to_string()], CompressionType::None
-    //     )).map_err(|e| format!("Serialization error: {}", e))?;
-
-
-    //     // Emit GORC events for the box
-    //     events.emit_gorc("Box50cm", 1, "mineral_scan", &GorcEvent {
-    //         object_id: box50cm_id.clone(),
-    //         instance_uuid: format!("box50cm_instance_{}", box50cm_id),
-    //         object_type: "Box50cm".to_string(),
-    //         channel: 1,
-    //         data: critical_data,
-    //         priority: "High".to_string(),
-    //         timestamp: std::time::SystemTime::now()
-    //             .duration_since(std::time::UNIX_EPOCH)
-    //             .map_err(|e| e.to_string())?
-    //             .as_secs(),
-    //     }).await.map_err(|e| e.to_string())?;
-
-
-    //     // Load Sandbox planet
-    //     // let sandbox = Testplanet::new("Sandbox".to_string(), Vec3::new(15067000000.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 0.0));
-    //     // planets.insert(sandbox.uuid.clone(), sandbox.clone());
-        
-
-    //     info!("✨ Demonstrated object replication for Box50cm");
-    //     Ok(())
-    // }
-
     pub async fn get_initial_props_for_server(&self) {
         let sandbox = Testplanet::new("Sandbox".to_string(), Vec3::new(15067000000.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 0.0));
         {
@@ -133,21 +73,6 @@ impl DyingstarPropsPlugin {
             planets.insert(sandbox.uuid.clone(), sandbox.clone());
         }
     }
-
-    // get player position and all arrounding props in dgraph database
-    // pub async fn get_initial_props_to_player(&self, session: &PlayerSession) -> Player {
-    //     info!("🔧 DyingstarPropsPlugin: initial props for player {} ({:?})", session.username, session.player_id);
-    //     // instantiate player with playersession data
-    //     let player = props::player::Player::new(
-    //         session.username.clone(), 
-    //         Vec3::new(15067000000.0, 12000.0, 0.0), 
-    //         Vec3::new(0.0, 0.0, 0.0),
-    //         session.player_id.to_string(),
-    //         "".to_string(),
-    //     );
-    //     self.players.write().await.insert(session.player_id.clone(), player.clone());
-    //     player
-    // }
 }
 
 #[async_trait]
@@ -210,7 +135,7 @@ impl SimplePlugin for DyingstarPropsPlugin {
                 // Set default coordinates based on spawn_point
                 let spawn_point = event.object_data.spawn_point;
                 let (base_x, base_y, base_z, parent_uuid) = match spawn_point {
-                    1 => (15500.0, 300.0, 15500.0, "ed20bda3-f6f3-4053-b9de-968f73ebc44c".to_string()), // Sandbox surface => city
+                    1 => (10500.0, 300.0, 10500.0, "ed20bda3-f6f3-4053-b9de-968f73ebc44c".to_string()), // Sandbox surface => city
                     2 => (-2422100.0, 100.0, 0.0, "9f29bc8f-c01d-4bfc-a781-a38a70807da3".to_string()), // Sandbox
                     3 => (0.0, 3.0, -152.0, "b9d2e503-0adb-4add-919f-85aaff65be0f".to_string()), // moon 5_1 => storage warehouse 1
                     4 => (-1200100.0, 0.0, 0.0, "5ef9afed-e754-4410-8087-691619c7e776".to_string()), // moon 5_1
@@ -300,64 +225,6 @@ impl SimplePlugin for DyingstarPropsPlugin {
                 }
             });
 
-
-
-
-
-
-
-
-            // // clone the event and the boxes Arc for the spawned async task
-            // let event_task = event.clone();
-            // let boxes_for_task = boxes50cm_for_spawn.clone();
-
-            // let runtime = runtime_for_spawn.clone();
-            // let mut gorc_system = gorc_for_spawn.clone();
-            // runtime.spawn(async move {
-            //     // check if event["type"] == "box50cm" or "box4m" or "ship" with match
-            //     match event_task["data"]["type"].as_str().unwrap_or("") {
-            //         "box50cm" => {
-            //             // println!("SPAWN BOX50CM YEAH");
-            //             // spawn box50cm
-            //             // create Box50cm and store it
-            //             let mut box50cm = Box50cm::new(
-            //                 Vec3::new(0.0, 0.0, 0.0),
-            //                 Vec3::new(0.0, 0.0, 0.0),
-            //                 "".to_string(),
-            //             );
-            //             let box50cm_id = uuid::Uuid::new_v4().to_string();
-
-
-            //             let gorc_id = gorc_system.register_object(box50cm.clone(), box50cm.position.clone()).await;
-            //             box50cm.gorc_id = Some(gorc_id);
-
-            //             // store box in boxes50cm (use the cloned Arc inside async task)
-            //             {
-            //                 let mut boxes = boxes_for_task.write().await;
-            //                 boxes.insert(box50cm_id.clone(), box50cm.clone());
-            //             }
-
-            //             let payload = serde_json::json!({
-            //                 "box50cm": box50cm.clone(),
-            //                 "player_uuid": event_task["data"]["player_uuid"].as_str().unwrap_or(""),
-            //             });
-
-            //             if let Err(e) = events.emit_plugin("gameserverplugin", "add_prop", &payload).await {
-            //                 tracing::error!("Failed to emit plugin event to propsplugin, add_prop: {}", e);
-            //             }
-            //         },
-            //         "box4m" => {
-            //             // spawn box4m
-            //         },
-            //         "ship" => {
-            //             // spawn ship
-            //         },
-            //         _ => {
-            //             error!("Unknown prop type: {}", event_task["type"]);
-            //         }
-            //     }
-            // });
-
             // keep original `event` available for sync logging (we cloned for the task)
             println!("PROP (sync) Receive spawn_request: {:?}", event);
             Ok(())
@@ -367,185 +234,11 @@ impl SimplePlugin for DyingstarPropsPlugin {
         let events_clone2 = events.clone();
         // clone players map for the players_position_update handler so we don't capture &mut self
         let players_for_players_update = self.players.clone();
-        // use tokio::spawn in this handler
-        // events.on_plugin("propsplugin", "players_position_update", move |event: serde_json::Value| {
-        //     // Clone the incoming event for the spawned task so we don't move `event`
-        //     // out of the sync handler closure.
-        //     let event_task = event.clone();
-
-        //     // TODO update position and rotation of the player (use `event_task` if needed)
-
-        //     // broadcast new position to all clients
-        //     let events = events_clone2.clone();
-        //     let runtime = runtime_for_players_update.clone();
-        //     // clone the players Arc here (per-call) so we don't move the captured Arc into the async task
-        //     let players_map_arc = players_for_players_update.clone();
-        //     runtime.spawn(async move {
-        //         let announcement = serde_json::json!({
-        //             "type": "update_props",
-        //             "planets": serde_json::json!([]),
-        //             "players": event_task["players"],
-        //         });
-
-        //         // loop on players in event and update server state
-        //         for player in event_task["players"].as_array().unwrap() {
-        //             let target_uuid = player["uuid"].as_str().unwrap_or("");
-        //             let new_pos = Vec3::new(
-        //                 player["pos"]["x"].as_f64().unwrap_or(0.0),
-        //                 player["pos"]["y"].as_f64().unwrap_or(0.0),
-        //                 player["pos"]["z"].as_f64().unwrap_or(0.0),
-        //             );
-
-        //             // acquire write lock to mutate Player entries
-        //             let mut players_map = players_map_arc.write().await;
-        //             for (_id, p) in players_map.iter_mut() {
-        //                 if p.uuid == target_uuid {
-        //                     // send emit_gorc_client to update player position
-        //                     let event = serde_json::json!({
-        //                         "type": "update_player_position",
-        //                         "player_uuid": p.internal_uuid.clone(),
-        //                         "pos": {
-        //                             "x": new_pos.x,
-        //                             "y": new_pos.y,
-        //                             "z": new_pos.z,
-        //                         },
-        //                     });
-
-        //                     // // notify EventSystem about the player position
-        //                     // if let Err(e) = events.update_player_position(p.hs_player_id, new_pos.clone()).await {
-        //                     //     error!("Failed to update player position via EventSystem: {}", e);
-        //                     // }
-        //                     // // println!("Updating position for player {} to {:?}", p.uuid, new_pos);
-        //                     // events.emit_client_with_context("test", "test", p.internal_uuid, &event).await;
-
-        //                     // update local player object
-        //                     p.position = new_pos;
-        //                 }
-        //             }
-        //         }
-        //     });
-
-        //     Ok(())
-        // }).await.unwrap();
 
         // prepare clones for player-disconnected handler (no await in sync closure)
         let players_for_disconnect = self.players.clone();
         let events_for_disconnect = events.clone();
-
-        // events.on_core("player_disconnected", move |event: PlayerDisconnectedEvent| {
-        //     // move clones into the handler
-        //     let players = players_for_disconnect.clone();
-        //     let events = events_for_disconnect.clone();
-        //     // we'll spawn an async task with tokio::spawn
-
-        //     let internal_uuid = event.player_id.clone();
-
-        //     // spawn async task to use .await inside
-        //     let runtime = runtime_for_disconnect.clone();
-        //     runtime.spawn(async move {
-        //         // println!("PROP Player disconnected event: {:?}", event);
-        //         // println!("PROP Player disconnected, list of players {:?}", players.read().await);
-        //         // acquire write lock to remove the player
-        //         let mut players_map = players.write().await;
-        //         // loop on players_map for player have the internal_uuid = internal_uuid
-        //         for (uuid, player) in players_map.iter() {
-        //             if player.internal_uuid == internal_uuid {
-        //                 println!("Found player: {:?}", player);
-        //                 // send to all clients the player disconnected
-        //                 let payload = serde_json::json!({
-        //                     "type": "delete_player",
-        //                     "player_uuid": player.uuid.clone(),
-        //                 });
-        //                 println!("Broadcasting player disconnected: {:?}", payload);
-        //                 if let Err(e) = events.broadcast(&payload).await {
-        //                     error!("Failed to broadcast event: {}", e);
-        //                 }
-        //             }
-        //         }
-        //     });
-
-        //     Ok(())
-        // }).await.map_err(|e| PluginError::ExecutionError(e.to_string()))?;
-
-
         let events_clone3 = events.clone();
-        // props update from game server
-        // events.on_plugin("propsplugin", "props_position_update", move |event: serde_json::Value| {
-        //     // clone event for the spawned task
-        //     let event_task = event.clone();
-        //     let events = events_clone3.clone();
-        //     let runtime = runtime_for_props_update.clone();
-        //     let boxes_for_updatepos = boxes50cm_for_updatepos.clone();
-        //    // use the per-handler GORC clone (do not use the original gorc_system here)
-        //    let gorc = gorc_for_props_update.clone();
-        //     runtime.spawn(async move {
-        //         let announcement = serde_json::json!({
-        //             "type": "props_position_update",
-        //             "props": event_task["props"],
-        //         });
-
-        //         // loop on event_task["props"] that is Vec of objects
-        //         for prop in event_task["props"].as_array().unwrap() {
-        //             match prop["type"].as_str().unwrap_or("") {
-        //                 "box50cm" => {
-        //                     // "uuid": uuid,
-        //                     // "pos": {
-        //                     // 	"x": convert_value_to_universe(position[0], POSITION_CONVERSION_X),
-        //                     // 	"y": convert_value_to_universe(position[1], POSITION_CONVERSION_Y),
-        //                     // 	"z": convert_value_to_universe(position[2], POSITION_CONVERSION_Z)
-        //                     // },
-        //                     // "rot": {
-        //                     // 	"x": rotation[0],
-        //                     // 	"y": rotation[1],
-        //                     // 	"z": rotation[2]
-        //                     // },
-        //                     // "type": type,                            
-
-        //                     // acquire a write lock so we can mutate the Box50cm
-        //                     let mut boxes = boxes_for_updatepos.write().await;
-        //                     if let Some(box50cm) = boxes.get_mut(prop["uuid"].as_str().unwrap_or("")) {
-        //                         box50cm.update_position(
-        //                             Vec3::new(
-        //                                 prop["pos"]["x"].as_f64().unwrap_or(0.0),
-        //                                 prop["pos"]["y"].as_f64().unwrap_or(0.0),
-        //                                 prop["pos"]["z"].as_f64().unwrap_or(0.0),
-        //                             )
-        //                         );
-
-        //                         // Update GORC object position via EventSystem API
-        //                         if let Some(gorc_id) = box50cm.gorc_id.as_ref() {
-        //                             // events.update_object_position expects (object_id, new_position)
-        //                             if let Err(e) = events.update_object_position(gorc_id.clone(), box50cm.position.clone()).await {
-        //                                 error!("Failed to update GORC object position via EventSystem: {}", e);
-        //                             }
-        //                         } else {
-        //                             error!("Box50cm has no gorc_id, cannot update position");
-        //                         }
-
-        //                     } else {
-        //                         error!("Box50cm with uuid {} not found for position update", prop["uuid"]);
-        //                     }
-        //                 },
-        //                 // 
-        //                 // "box4m" => {
-        //                 //     // println!("Update position for box4m {:?}", prop);
-        //                 // },
-        //                 // "ship" => {
-        //                 //     // println!("Update position for ship {:?}", prop);
-        //                 // },
-        //                 _ => {
-        //                     error!("Unknown prop type in position update: {}", prop["type"]);
-        //                 }
-        //             }
-        //         }
-
-        //         // if let Err(e) = events.broadcast(&announcement).await {
-        //         //     error!("Failed to broadcast event: {}", e);
-        //         // }
-        //     });
-
-        //     Ok(())
-        // }).await.unwrap();
 
         // Spawn the GORC tick loop in a dedicated OS thread with its own current-thread Tokio runtime.
         // This avoids requiring the gorc tick future to be `Send`.
@@ -602,14 +295,11 @@ impl SimplePlugin for DyingstarPropsPlugin {
 
         info!("🔧 DyingstarPropsPlugin: Starting up!");
 
-        // TODO: Add your initialization logic here
-
-
-        // wait 10 seconds to finish all plugins initialized
+        // wait 2 seconds to finish all plugins initialized
 
         self.runtime.spawn(async move {
-            println!("Waiting 4 seconds before emitting planet object...");
-            tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+            println!("Waiting 2 seconds before emitting planet object...");
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
             println!("Send init to gameserver plugin to connect to GORC server...");
             if let Err(e) = context.events().emit_plugin("gameserverplugin", "init_server", &serde_json::json!({})).await {
@@ -635,8 +325,8 @@ impl SimplePlugin for DyingstarPropsPlugin {
                 }
                 })).await.map_err(|e| PluginError::ExecutionError(format!("failed to emit plugin event: {}", e)))?;
 
-                info!("Waiting 4 seconds before emitting planet object...");
-                tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+                info!("Waiting 2 seconds before emitting planet object...");
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
                 info!("Send init to gameserver plugin to connect to GORC server...");
                 context.events().emit_plugin("gameserverplugin", "init_server", &serde_json::json!({})).await
@@ -660,7 +350,7 @@ impl SimplePlugin for DyingstarPropsPlugin {
                 ).await.map_err(|e| PluginError::ExecutionError(format!("failed to emit plugin event: {}", e)))?;
 
                 // wait 10 seconds, time to planets spawned
-                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                tokio::time::sleep(std::time::Duration::from_secs(4)).await;
 
                 // spawn the city
                 let city_uuid = "ed20bda3-f6f3-4053-b9de-968f73ebc44c".to_string();
@@ -699,19 +389,6 @@ impl SimplePlugin for DyingstarPropsPlugin {
                 // 15 rangees de containers, jusqu'a  4 de hauteur
 
                 // 1 rangee de container = 3 palettes (largeur) jusqu'a 9 de hauteur. en longeur 10 palettes
-
-// -16.675 0.0 -26.06
-// -16.675 0.0 -22.927
-
-
-// 21.706 0.0 -29.52
-// 21.706 0.0 -28.52
-
-
-
-
-
-
 
                 // scenes/props/StorageBoxes/container_liquid_1200x240x240.tscn
                 // scenes/props/StorageBoxes/container_standard_a_1200x240x240.tscn

@@ -216,7 +216,7 @@ pub fn handle_movement_request_sync(
     // Since the handler can run in either multi-threaded or single-threaded runtime,
     // we use std::thread::spawn with a channel to safely execute async code.
     
-    info!("🚀 STEP 11: Updating player position for zone detection");
+    debug!("🚀 STEP 11: Updating player position for zone detection");
 
     let mut final_position = move_data.new_position;
 
@@ -271,12 +271,12 @@ pub fn handle_movement_request_sync(
                                     }
                                 }
                                 
-                                info!("🚀 STEP 11.5: Updating GORC player global_position for player {} to {:?}",
+                                debug!("🚀 STEP 11.5: Updating GORC player global_position for player {} to {:?}",
                                     player_id_str_clone, computed_position);
                                 if let Err(e) = events_clone.update_player_position(player_id, computed_position).await {
                                     error!("🚀 STEP 11.5: ❌ Failed to update GORC player tracking: {}", e);
                                 } else {
-                                    info!("🚀 STEP 11.5: ✅ Updated GORC player tracking for player {} at position {:?}",
+                                    debug!("🚀 STEP 11.5: ✅ Updated GORC player tracking for player {} at position {:?}",
                                         player_id_str_clone, computed_position);
                                 }
                                 

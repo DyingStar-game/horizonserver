@@ -1,0 +1,11 @@
+# ============================================================================
+# DyingStar plugins configuration
+# ============================================================================
+#
+[ds_game_server]
+
+game_server_address = "127.0.0.1:8980"
+
+[dyingstar_services]
+
+resources_dynamic_address = "localhost:9200"

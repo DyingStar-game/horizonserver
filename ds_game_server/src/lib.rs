@@ -1,19 +1,11 @@
 use async_trait::async_trait;
-use std::env;
-use once_cell::sync::Lazy;
 use horizon_event_system::{
     create_simple_plugin, EventError, EventSystem, PlayerId, LogLevel, PluginError, ServerContext, SimplePlugin, ClientEventWrapper, PlayerDisconnectedEvent, ClientConnectionRef, GorcObjectId, Dest, GorcEvent, Vec3, current_timestamp
 };
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 use tracing::{info, error, debug, warn};
-use tracing_appender::rolling;
-use tracing_appender::non_blocking;
-use tracing_subscriber::fmt::MakeWriter;
-use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::util::SubscriberInitExt;
 use std::path::Path;
-use dotenvy::dotenv;
 use websocket::ClientBuilder;
 use websocket::r#async::client::{Client, ClientNew, Framed};
 use std::net::TcpStream;
@@ -23,9 +15,7 @@ use websocket::result::WebSocketError;
 use std::process::exit;
 use serde_json::json;
 use std::collections::HashMap;
-use std::sync::Once;
 use std::fs;
-use tokio::sync::mpsc as tokio_mpsc;
 
 /// Message types for the async processor
 #[derive(Debug)]
@@ -35,10 +25,6 @@ enum GameServerMessage {
     PropCreate(serde_json::Value),
 }
 
-static SOCKET_URL: Lazy<String> = Lazy::new(|| {
-    dotenv().ok(); // Loads variables from `.env` file
-    env::var("SOCKET_URL").unwrap_or_else(|_| "ws://127.0.0.1:8980".to_string())
-});
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlayerInit {
@@ -137,7 +123,6 @@ impl SimplePlugin for DsGameServerPlugin {
         // initialize websocket connection to game server
         events.on_plugin("gameserverplugin", "init_server", move |event: serde_json::Value| {
             info!("🔧 DsGameServerPlugin: Initializing server with event {:?}", event);
-            info!("Connecting to server: {:?}", SOCKET_URL.clone());
 
             let url = url.clone();
             let websocket = Arc::clone(&websocket);

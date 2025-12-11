@@ -2,20 +2,6 @@
 
 set -e
 
-
-build() {
-    cd "$1"
-    RUSTFLAGS="" cargo build --release
-    cp target/release/*.so ../Horizon/plugins
-    cd ..
-}
-
-
 mkdir -p "Horizon/plugins"
-
-build "dyingstar_genericprops"
-build "ds_game_server"
-build "plugin_player"
-build "ds_player_authentication"
-build "dyingstar_props"
-build "dyingstar_services"
+RUSTFLAGS="" cargo build --release
+cp target/release/*.so ./Horizon/plugins

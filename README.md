@@ -9,7 +9,7 @@ To build the plugins and launch the horizon server follow the steps:
 - Enter the docker container with `docker exec -it horizon_1 bash`
 - Run `scripts/install.sh` to clone the horizon repository
 - Modify the bind address in `Horizon/config.toml` to `0.0.0.0:7040`
-- You can add `SOCKET_URL=ws://host.docker.internal:8980` in the file `Horizon/.env` if you are not on linux
+- You can modify the `game_server_address` in `Horizon/plugins.toml` to `host.docker.internal:8980` if you are not on linux
 - Run `scripts/build.sh` to build the plugins
 - Run `scripts/run.sh` to start the horizon server
 

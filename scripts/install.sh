@@ -15,3 +15,4 @@ git checkout $REF
 git pull origin $REF
 
 git apply ../horizon.diff
+cp ../plugins.toml . 

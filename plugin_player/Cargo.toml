@@ -7,7 +7,7 @@ edition = "2021"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-horizon_event_system = { path = "../Horizon/crates/horizon_event_system" }
+horizon_event_system = { workspace = true }
 luminal_rt = "0.4.1"
 tokio = { version = "1.46.1", features = ["full"] }
 futures = "0.3"

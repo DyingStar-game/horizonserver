@@ -163,7 +163,7 @@ impl GenericPropsPlugin {
         let handle1 = luminal_handle.clone();
         let definitions1 = Arc::clone(&self.definitions);
         let props1 = Arc::clone(&self.props);
-        
+
         events.on_plugin("genericprops", "update_object", move |event: serde_json::Value| {
             debug!("plugin genericprops (update): Receive object message {:?}", event);
             if let Err(e) = update::handle_object_update(
@@ -220,6 +220,27 @@ impl GenericPropsPlugin {
                             )
                         {
                             error!("🎮 Failed to handle object update: {}", e);
+                        }
+        Ok(())
+        }).await
+        .map_err(|e| PluginError::ExecutionError(e.to_string()))?;
+
+        let delete_events = events.clone();
+        let handle_delete = luminal_handle.clone();
+        let definitions_delete = Arc::clone(&self.definitions);
+        let props_delete = Arc::clone(&self.props);
+
+        events.on_plugin("genericprops", "delete_object", move |event: serde_json::Value| {
+            debug!("plugin genericprops (delete): Receive object message {:?}", event);
+            if let Err(e) = delete::handle_object_delete(
+                                definitions_delete.clone(),
+                                props_delete.clone(),
+                                delete_events.clone(),
+                                event.clone(),
+                                handle_delete.clone()
+                            )
+                        {
+                            error!("🎮 Failed to handle object delete: {}", e);
                         }
         Ok(())
         }).await

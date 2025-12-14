@@ -135,7 +135,7 @@ impl SimplePlugin for DyingstarPropsPlugin {
                 // Set default coordinates based on spawn_point
                 let spawn_point = event.object_data.spawn_point;
                 let (base_x, base_y, base_z, parent_uuid) = match spawn_point {
-                    1 => (10500.0, 300.0, 10500.0, "ed20bda3-f6f3-4053-b9de-968f73ebc44c".to_string()), // Sandbox surface => city
+                    1 => (10500.0, 0.5, 10500.0, "ed20bda3-f6f3-4053-b9de-968f73ebc44c".to_string()), // Sandbox surface => city
                     2 => (-2422100.0, 100.0, 0.0, "9f29bc8f-c01d-4bfc-a781-a38a70807da3".to_string()), // Sandbox
                     3 => (0.0, 3.0, -152.0, "b9d2e503-0adb-4add-919f-85aaff65be0f".to_string()), // moon 5_1 => storage warehouse 1
                     4 => (-1200100.0, 0.0, 0.0, "5ef9afed-e754-4410-8087-691619c7e776".to_string()), // moon 5_1
@@ -365,6 +365,21 @@ impl SimplePlugin for DyingstarPropsPlugin {
                     "rotation": {"x": 0.0, "y": 0.0, "z": 1.5708},
                 }
                 })).await.map_err(|e| PluginError::ExecutionError(format!("failed to emit plugin event: {}", e)))?;
+
+                // Spawn a box50cm for testing
+                let box50cm_uuid = Uuid::new_v4().to_string();
+                context.events().emit_plugin("genericprops", "create_object", &serde_json::json!({
+                "object_type": "box",
+                "object_uuid": box50cm_uuid,
+                "object_data": {
+                    "name": "box50cm_test",
+                    "parent_id": city_uuid,
+                    "scenename": "scenes/props/testbox/box_50cm.tscn",
+                    "position": {"x": 10500.0, "y": 0.5, "z": 10510.0},
+                    "rotation": {"x": 0.0, "y": 0.0, "z": 0.0},
+                }
+                })).await.map_err(|e| PluginError::ExecutionError(format!("failed to emit plugin event: {}", e)))?;
+
 
                 /////////////////////////////////////////////////////////////////////////////////////////////////////////
                 /// Code for storagewarehouse object spawning

@@ -3,4 +3,4 @@
 set -e
 
 cd Horizon
-cargo run --bin horizon
+cargo run --release --bin horizon

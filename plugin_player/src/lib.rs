@@ -250,6 +250,8 @@ impl SimplePlugin for PlayerPlugin {
         self.register_communication_handler(Arc::clone(&events), luminal_handle.clone()).await?;
         self.register_scanning_handler(Arc::clone(&events), luminal_handle.clone()).await?;
 
+        self.register_update_handler(Arc::clone(&events), luminal_handle.clone()).await?;
+
         context.log(
             LogLevel::Info,
             "🎮 PlayerPlugin: ✅ All GORC player handlers registered successfully!"
@@ -443,6 +445,39 @@ impl PlayerPlugin {
             .map_err(|e| PluginError::ExecutionError(e.to_string()))?;
 
         debug!("🎮 PlayerPlugin: ✅ Movement handler registered on channel 0");
+        Ok(())
+    }
+
+    async fn register_update_handler(
+        &self,
+        events: Arc<EventSystem>,
+        luminal_handle: luminal::Handle
+    ) -> Result<(), PluginError> {
+        debug!("🎮 PlayerPlugin: Registering GORC channel 4 (update) handler");
+
+        let events_for_update = Arc::clone(&events);
+        let luminal_handle_update = luminal_handle.clone();
+        events
+            .on_gorc_client(
+                luminal_handle,
+                "GorcPlayer",
+                0,
+                "update",
+                move |gorc_event, client_player, connection, object_instance| {
+                    // Use the dedicated update handler
+                    handlers::handle_update_request(
+                        gorc_event,
+                        client_player,
+                        connection,
+                        object_instance,
+                        events_for_update.clone(),
+                        luminal_handle_update.clone()
+                    )
+                }
+            ).await
+            .map_err(|e| PluginError::ExecutionError(e.to_string()))?;
+
+        debug!("🎮 PlayerPlugin: ✅ Update handler registered on channel 4");
         Ok(())
     }
 

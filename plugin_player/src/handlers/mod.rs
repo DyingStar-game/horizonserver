@@ -51,6 +51,7 @@ pub mod movement;
 pub mod combat;
 pub mod communication;
 pub mod scanning;
+pub mod update;
 
 // Re-export common handler utilities
 pub use connection::*;
@@ -59,3 +60,4 @@ pub use movement::*;
 pub use combat::*;
 pub use communication::*;
 pub use scanning::*;
+pub use update::*;

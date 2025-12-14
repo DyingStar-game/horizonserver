@@ -92,6 +92,10 @@ pub struct PlayerCriticalData {
     /// Current health points (0.0 to 100.0)
     pub health: f32,
     pub parent_id: String,
+    pub action: String,
+    pub stamina: f32,
+    pub hunger: f32,
+    pub thirst: f32,
 }
 
 impl GorcZoneData for PlayerCriticalData {
@@ -131,6 +135,10 @@ pub struct PlayerDetailedData {
     pub movement_state: String,
     /// Player experience level (1-100)
     pub level: u32,
+    pub oxygen_level: f32,
+    pub inventory: Vec<String>,
+    pub equiped_tools: Vec<String>,
+    pub integrity: u8,
 }
 
 impl GorcZoneData for PlayerDetailedData {
@@ -307,11 +315,19 @@ impl GorcPlayer {
                 rotation: Vec3::new(0.0, 0.0, 0.0),
                 velocity: Vec3::new(0.0, 0.0, 0.0),
                 health: 100.0,
+                stamina: 100.0,
+                action: "idle".to_string(),
                 parent_id,
+                hunger: 100.0,
+                thirst: 100.0,
             },
             detailed_data: PlayerDetailedData {
                 movement_state: "idle".to_string(),
                 level: 1,
+                oxygen_level: 100.0,
+                inventory: Vec::new(),
+                equiped_tools: Vec::new(),
+                integrity: 3,
             },
             social_data: PlayerSocialData {
                 chat_bubble: None,

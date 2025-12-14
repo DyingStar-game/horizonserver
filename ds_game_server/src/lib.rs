@@ -23,6 +23,7 @@ enum GameServerMessage {
     PlayerPositions(Vec<(GorcObjectId, PlayerId, f64, f64, f64, f64, f64, f64)>),
     PropPosition(serde_json::Value),
     PropCreate(serde_json::Value),
+    PropDelete(serde_json::Value),
 }
 
 
@@ -127,6 +128,7 @@ impl SimplePlugin for DsGameServerPlugin {
             let url = url.clone();
             let websocket = Arc::clone(&websocket);
             let events2 = events1.clone();
+            let events_processor_sync = events2.clone();
             let _initial_event = event.clone();
             let runtime_handle = runtime_handle_clone.clone();
 
@@ -154,7 +156,7 @@ impl SimplePlugin for DsGameServerPlugin {
                         }
                         match msg {
                             GameServerMessage::PlayerPositions(position_updates) => {
-                                for (gorc_id, player_id, x, y, z, rx, ry, rz) in position_updates {
+                                for (gorc_id, player_id, x, y, z, rotx, roty, rotz) in position_updates {
                                     if let Err(e) = events_processor.emit_gorc_instance(
                                         gorc_id,
                                         0,
@@ -162,7 +164,7 @@ impl SimplePlugin for DsGameServerPlugin {
                                         &serde_json::json!({
                                             "player_id": player_id,
                                             "new_position": Vec3::new(x, y, z),
-                                            "new_rotation": Vec3::new(rx, ry, rz),
+                                            "new_rotation": Vec3::new(rotx, roty, rotz),
                                             "velocity": { "x": 0.0, "y": 0.0, "z": 0.0 },
                                             "movement_state": 1,
                                             "client_timestamp": chrono::Utc::now().to_rfc3339(),
@@ -206,6 +208,15 @@ impl SimplePlugin for DsGameServerPlugin {
                                             error!("Failed to send websocket message: {}", e);
                                         }
                                     }
+                                }
+                            }
+                            GameServerMessage::PropDelete(prop_data) => {
+                                if let Err(e) = events_processor.emit_plugin("genericprops", "delete_object", &serde_json::json!({
+                                    "object_type": prop_data["type"],
+                                    "object_uuid": prop_data["uuid"],
+                                    "object_data": prop_data,
+                                })).await {
+                                    error!("Failed to emit plugin event to propsplugin: {}", e);
                                 }
                             }
                         }
@@ -262,11 +273,41 @@ impl SimplePlugin for DsGameServerPlugin {
                                         }
                                     }
                                 } else if value["namespace"] == "props" && value["event"] == "create_object" {
-                                    println!("Props creation object received: {:?}", value);
+                                    debug!("Props creation object received: {:?}", value);
                                     for prop_data in value["data"].as_array().unwrap() {
                                         if let Err(e) = tx.send(GameServerMessage::PropCreate(prop_data.clone())) {
                                             error!("Failed to send prop create to processor: {}", e);
                                         }
+                                    }
+                                } else if value["namespace"] == "props" && value["event"] == "delete_object" {
+                                    debug!("Props delete object received: {:?}", value);
+                                    for prop_data in value["data"].as_array().unwrap() {
+                                        if let Err(e) = tx.send(GameServerMessage::PropDelete(prop_data.clone())) {
+                                            error!("Failed to send prop delete to processor: {}", e);
+                                        }
+                                    }
+                                } else if value["namespace"] == "players" && value["event"] == "update" {
+                                    // Get gorc_id from value["uuid"]
+                                    let gorc_id = if let Some(uuid_str) = value["uuid"].as_str() {
+                                        match GorcObjectId::from_str(uuid_str) {
+                                            Ok(id) => id,
+                                            Err(e) => {
+                                                error!("Invalid gorc_id format in update event: {:?}", e);
+                                                continue;
+                                            }
+                                        }
+                                    } else {
+                                        error!("Missing uuid in update event: {:?}", value);
+                                        continue;
+                                    };
+                                    if let Err(e) = runtime_handle.block_on(events_processor_sync.emit_gorc_instance(
+                                        gorc_id,
+                                        0,
+                                        "update",
+                                        &serde_json::json!(value["data"]),
+                                        Dest::Both
+                                    )) {
+                                        error!("Failed to update player position via EventSystem: {}", e);
                                     }
                                 }
                             } else {
@@ -327,7 +368,7 @@ impl SimplePlugin for DsGameServerPlugin {
 
         let websocket = Arc::clone(&self.websocket);
         events.on_plugin("gameserverplugin", "spawn_object", move |event: serde_json::Value| {
-            info!("🔧 DsGameServerPlugin: Adding prop with event {:?}", event);
+            debug!("🔧 DsGameServerPlugin: Adding prop with event {:?}", event);
             
             let message = json!({
                 "namespace": "server",
@@ -410,45 +451,45 @@ impl SimplePlugin for DsGameServerPlugin {
         .map_err(|e| PluginError::ExecutionError(e.to_string()))?;
 
 
-        // let websocket2 = Arc::clone(&self.websocket);
-        // events.on_client(
-        //     "actions",
-        //     "action_pressed",
-        //     move |wrapper: ClientEventWrapper<serde_json::Value>, _player_id: PlayerId, _connection: ClientConnectionRef| {
-        //         info!("📝 LoggerPlugin: 🦘 Client action from player {}", wrapper.player_id);
+        let websocket2 = Arc::clone(&self.websocket);
+        events.on_client(
+            "player",
+            "client_action",
+            move |wrapper: ClientEventWrapper<serde_json::Value>, _player_id: PlayerId, _connection: ClientConnectionRef| {
+                debug!("📝 LoggerPlugin: 🦘 Client action from player {}", wrapper.player_id);
  
-        //         let websocket = Arc::clone(&websocket2);
+                let websocket = Arc::clone(&websocket2);
 
-        //         std::thread::spawn(move || {
-        //             // Parse the movement data
-        //             let message = json!({
-        //                 "namespace": "player",
-        //                 "event": "action",
-        //                 "player_id": wrapper.player_id.to_string(),
-        //                 "data": wrapper.data.clone(),
-        //             });
-        //             debug!("[message][to][gamesever]: {:?}", message);
-        //             match websocket.lock() {
-        //                 Ok(mut guard) => {
-        //                     if let Some(w) = guard.as_mut() {
-        //                         if let Err(e) = w.send_message(&OwnedMessage::Text(message.to_string())) {
-        //                             error!("Failed to send websocket message: {}", e);
-        //                         }
-        //                     } else {
-        //                         error!("No websocket writer available to send action");
-        //                     }
-        //                 }
-        //                 Err(e) => {
-        //                     error!("Failed to lock websocket mutex: {}", e);
-        //                 }
-        //             }
-        //         });
+                std::thread::spawn(move || {
+                    // Parse the movement data
+                    let message = json!({
+                        "namespace": "player",
+                        "event": "action",
+                        "player_id": wrapper.player_id.to_string(),
+                        "data": wrapper.data.clone(),
+                    });
+                    debug!("[message][to][gamesever]: {:?}", message);
+                    match websocket.lock() {
+                        Ok(mut guard) => {
+                            if let Some(w) = guard.as_mut() {
+                                if let Err(e) = w.send_message(&OwnedMessage::Text(message.to_string())) {
+                                    error!("Failed to send websocket message: {}", e);
+                                }
+                            } else {
+                                error!("No websocket writer available to send action");
+                            }
+                        }
+                        Err(e) => {
+                            error!("Failed to lock websocket mutex: {}", e);
+                        }
+                    }
+                });
  
-        //         Ok(())
-        //     },
-        // )
-        // .await
-        // .map_err(|e| PluginError::ExecutionError(e.to_string()))?;
+                Ok(())
+            },
+        )
+        .await
+        .map_err(|e| PluginError::ExecutionError(e.to_string()))?;
 
         info!("🔧 DsGameServerPlugin: ✅ All handlers registered successfully!");
         Ok(())

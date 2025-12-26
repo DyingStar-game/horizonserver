@@ -1,0 +1,42 @@
+{
+	"channels": [
+		{
+			"zone": 0,
+			"distance": 50.0,
+			"frequency": 30.0,
+			"properties": [
+				"position",
+				"rotation",
+				"opened",
+				"parent_id"
+			]
+		},
+		{
+			"zone": 1,
+			"distance": 51.0,
+			"frequency": 15.0,
+			"properties": [
+				"led_state"
+			]
+		},
+		{
+			"zone": 3,
+			"distance": 52.0,
+			"frequency": 2.0,
+			"properties": [
+				"qrcode",
+				"symbol",
+				"parcel_number",
+				"weight"
+			]
+		},
+		{
+			"zone": 6,
+			"distance": 53.0,
+			"frequency": 3.0,
+			"properties": [
+				"scenename"
+			]
+		}
+	]
+}

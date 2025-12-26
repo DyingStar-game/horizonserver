@@ -1,0 +1,133 @@
+name: "Build & Deploy to Preprod"
+
+on:
+  push:
+    branches:
+      - develop
+    paths:
+      - "scripts/install.sh"
+      - "horizon.diff"
+      - "ds_*/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "plugins.toml"
+      - ".docker/**"
+
+env:
+  HARBOR_REGISTRY: harbor.dyingstar-game.space
+  SERVER_IMAGE: harbor.dyingstar-game.space/dyingstar/horizon
+  PLUGINS_IMAGE: harbor.dyingstar-game.space/dyingstar/horizon-plugins
+  IMAGE_TAG: develop
+  CHART_NAME: horizon
+
+jobs:
+  detect-changes:
+    name: Detect changed paths
+    runs-on: ubuntu-latest
+    outputs:
+      server: ${{ steps.filter.outputs.server }}
+      plugins: ${{ steps.filter.outputs.plugins }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check changed paths
+        uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            server:
+              - 'scripts/install.sh'
+              - 'horizon.diff'
+              - '.docker/Dockerfile.server'
+              - '.docker/entrypoint.sh'
+              - '.docker/production_config.toml'
+              - '.docker/plugins.toml'
+            plugins:
+              - 'ds_*/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'plugins.toml'
+              - '.docker/Dockerfile.plugins'
+
+  build-server:
+    name: Build server image
+    needs: detect-changes
+    if: needs.detect-changes.outputs.server == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Fetch Horizon source
+        run: scripts/install.sh
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Harbor
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.HARBOR_REGISTRY }}
+          username: ${{ secrets.HARBOR_USERNAME }}
+          password: ${{ secrets.HARBOR_PASSWORD }}
+
+      - name: Build and push server image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: .docker/Dockerfile.server
+          push: true
+          tags: ${{ env.SERVER_IMAGE }}:${{ env.IMAGE_TAG }}
+          cache-from: type=registry,ref=${{ env.SERVER_IMAGE }}:buildcache-preprod
+          cache-to: type=registry,ref=${{ env.SERVER_IMAGE }}:buildcache-preprod,mode=max
+
+  build-plugins:
+    name: Build plugins image
+    needs: detect-changes
+    if: needs.detect-changes.outputs.server == 'true' || needs.detect-changes.outputs.plugins == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Fetch Horizon source
+        run: scripts/install.sh
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Harbor
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.HARBOR_REGISTRY }}
+          username: ${{ secrets.HARBOR_USERNAME }}
+          password: ${{ secrets.HARBOR_PASSWORD }}
+
+      - name: Build and push plugins image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: .docker/Dockerfile.plugins
+          push: true
+          tags: ${{ env.PLUGINS_IMAGE }}:${{ env.IMAGE_TAG }}
+          cache-from: type=registry,ref=${{ env.PLUGINS_IMAGE }}:buildcache-preprod
+          cache-to: type=registry,ref=${{ env.PLUGINS_IMAGE }}:buildcache-preprod,mode=max
+
+  deploy:
+    name: Trigger preprod deployment
+    needs: [build-server, build-plugins]
+    if: >-
+      always() &&
+      (needs.build-server.result == 'success' || needs.build-plugins.result == 'success') &&
+      needs.build-server.result != 'failure' &&
+      needs.build-plugins.result != 'failure'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger preprod deployment
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.KUBERNETES_REPO_TOKEN }}
+          repository: ${{ github.repository_owner }}/kubernetes
+          event-type: deploy-preprod
+          client-payload: '{"chart": "${{ env.CHART_NAME }}"}'

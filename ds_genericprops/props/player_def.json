@@ -1,0 +1,18 @@
+{
+	"channels": [
+		{
+			"zone": 0,
+			"distance": 100.0,
+			"frequency": 30.0,
+			"properties": [
+				"position",
+				"rotation",
+				"velocity",
+				"action",
+				"scenename",
+				"name",
+				"parent_id"
+			]
+		}
+	]
+}

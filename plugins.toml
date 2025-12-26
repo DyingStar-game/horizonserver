@@ -3,9 +3,29 @@
 # ============================================================================
 #
 [ds_game_server]
+log_level = "debug"
+game_servers = ["ws://127.0.0.1:8980"]
 
-game_server_address = "127.0.0.1:8980"
+# Values posible for servers_mode:
+#  * "single" (only 1 server)
+#  * "development" (multiple servers, specific rules for spliting)
+#  * "production"
+servers_mode = "single"
 
-[dyingstar_services]
+# Split rule (ignored in single mode). Possible values:
+#  * "fps:20"    => split when last 10 fps (get by serverinfo) is under 20 in this example (prefer this for production)
+#  * "players:3" => split when more than 3 players are connected on a server
+split_rule = "fps:20"
 
+[ds_genericprops]
+log_level = "info"
+
+[ds_player_authentication]
+log_level = "info"
+
+[ds_props]
+log_level = "info"
+
+[ds_services]
+log_level = "info"
 resources_dynamic_address = "localhost:9200"

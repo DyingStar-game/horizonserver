@@ -1,0 +1,52 @@
+# --------------------------------------------------------- #
+# Dockerfile.server — Builds only the Horizon server binary #
+# Used by Skaffold for local dev (split build mode)         #
+# --------------------------------------------------------- #
+FROM rust:1.94.1-bookworm AS builder
+
+WORKDIR /build
+
+# Copy the Horizon workspace (server + internal crates)
+COPY Horizon/ Horizon/
+
+# Build the server binary with BuildKit cache for fast incremental rebuilds
+RUN --mount=type=cache,target=/build/Horizon/target \
+    --mount=type=cache,target=/usr/local/cargo/registry \
+    cd Horizon && cargo build --release && \
+    cp target/release/horizon /horizon
+
+# ---- Runtime ---- #
+FROM ubuntu:22.04
+
+ARG UID=1000
+ARG GID=1000
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    passwd \
+    dnsutils \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN groupadd --gid $GID appgroup \
+    && useradd --uid $UID --gid $GID -m appuser
+
+RUN mkdir -p /app /app/plugins
+
+# Config
+COPY .docker/production_config.toml /app/config.toml
+COPY .docker/plugins.toml /app/plugins.toml
+
+# Props data
+COPY ds_genericprops/props /app/props
+
+# Server binary
+COPY --from=builder /horizon /app/server
+
+# Entrypoint
+COPY .docker/entrypoint.sh /app/entrypoint.sh
+
+RUN chown -R appuser:appgroup /app && chmod +x /app/entrypoint.sh
+
+USER appuser
+EXPOSE 7040
+WORKDIR /app
+ENTRYPOINT [ "/app/entrypoint.sh" ]

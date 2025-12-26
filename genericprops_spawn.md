@@ -27,7 +27,7 @@
 
 ### Create the genericprops type
 
-In the folder *dyingstar_genericprops/props/*, create a JSON file (you can take example on *box50cm_def.json* file)
+In the folder *ds_genericprops/props/*, create a JSON file (you can take example on *box50cm_def.json* file)
 
 
 

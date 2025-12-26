@@ -1,0 +1,23 @@
+[package]
+name = "dyingstar_generic_props"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+horizon_event_system = { workspace = true }
+luminal_rt = "0.4.1"
+tokio = { version = "1.48", features = ["full"] }
+futures = "0.3"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0.143"
+thiserror = "2.0.12"
+tracing = "0.1.41"
+async-trait = "0.1"
+dashmap = "6.1.0"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1.0", features = ["v4"] }
+tracing-subscriber = "0.3"
+ds_common = { path = "../ds_common" }

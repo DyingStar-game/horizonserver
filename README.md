@@ -126,7 +126,7 @@ Horizon will give to the client the player spwan position
 Do the relation between Horizon and game server
 
 
-### dyingstar_props
+### ds_props
 
 Manage the props database
 

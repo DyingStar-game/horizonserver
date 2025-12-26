@@ -17,13 +17,14 @@ crate-type = ["cdylib"]
 # Event system (CLI will update this to horizon_event_system)
 horizon_event_system = { workspace = true }
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-tokio = { version = "1.0", features = ["full"] }
+serde_json = "1.0.143"
+tokio = { version = "1.48", features = ["full"] }
 async-trait = "0.1"
 tracing = { version = "0.1", features = ["log"] }
 reqwest = "0.12.23"
 futures = { version = "0.3" }
 tracing-subscriber = "0.3"
+ds_common = { path = "../ds_common" }
 
 # Optional: Additional commonly used dependencies
 uuid = { version = "1.0", features = ["v4"] }

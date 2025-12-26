@@ -1,0 +1,32 @@
+# ----------------------------------------------------------- #
+# Dockerfile.plugins — Builds only the ds_* plugin .so files  #
+# Used by Skaffold for local dev (split build mode)            #
+# ----------------------------------------------------------- #
+FROM rust:1.94.1-bookworm AS builder
+
+WORKDIR /build
+
+# Copy root workspace definition
+COPY Cargo.toml .
+
+# Copy plugin source crates
+COPY ds_common/ ds_common/
+COPY ds_game_server/ ds_game_server/
+COPY ds_player_authentication/ ds_player_authentication/
+COPY ds_genericprops/ ds_genericprops/
+COPY ds_props/ ds_props/
+COPY ds_services/ ds_services/
+
+# Copy Horizon workspace (needed for horizon_event_system dependency resolution)
+COPY Horizon/ Horizon/
+
+# Build all plugins and collect .so output files
+RUN --mount=type=cache,target=/build/target \
+    --mount=type=cache,target=/usr/local/cargo/registry \
+    RUSTFLAGS="" cargo build --release && \
+    mkdir -p /plugins && \
+    cp target/release/*.so /plugins/
+
+# Minimal runtime image for init container use
+FROM busybox:1.37
+COPY --from=builder /plugins/ /plugins/

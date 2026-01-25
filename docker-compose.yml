@@ -4,9 +4,9 @@ services:
       build: 
         context: ./.docker
       restart: always
-      user: "1000:1000"
+      userns_mode: "keep-id"
       volumes:
-        - .:/app/
+        - .:/app/:Z
       ports:
         - 7040:7040
         - 8980:8980

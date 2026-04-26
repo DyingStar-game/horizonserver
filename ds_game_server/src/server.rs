@@ -283,6 +283,44 @@ impl Server {
         }).await
         .map_err(|e| PluginError::ExecutionError(e.to_string()))?;
 
+        let managed_players_for_quit = Arc::clone(&self.managed_players);
+        let tokio_handle_player_quit = context.clone().tokio_handle();
+        let websocket_player_quit = Arc::clone(&self.websocket_sender);
+        events.on_plugin("gameserverplugin", "player_quit", move |event: serde_json::Value| {
+            info!("🔧 DsGameServerPlugin: Received player_quit event: {:?}", event);
+
+            // Check if the player uuid (object_uuid) is managed by this server
+            let object_uuid = event["item"]["object_uuid"].as_str().unwrap_or_default().to_string();
+            if !managed_players_for_quit.lock().unwrap().contains(&object_uuid) {
+                debug!("🔧 DsGameServerPlugin: Player {} is not on this server, skipping player_quit.", object_uuid);
+                return Ok(());
+            }
+
+            let websocket_player_quit = Arc::clone(&websocket_player_quit);
+            let managed_players_for_quit = Arc::clone(&managed_players_for_quit);
+            tokio_handle_player_quit.spawn(async move {
+                debug!("[PLAYER QUIT] player {} quit the game", object_uuid);
+                let result = spawn_player::handle_player_quit(
+                    event["item"].clone(),
+                    Arc::clone(&websocket_player_quit),
+                ).await;
+                if result.is_ok() {
+                    // remove player in server list
+                    let mut players = managed_players_for_quit.lock().unwrap();
+                    if let Some(pos) = players.iter().position(|x| x == &object_uuid) {
+                        players.remove(pos);
+                        info!("🔧 DsGameServerPlugin: Removed player {} from managed_players after quit", object_uuid);
+                    }
+                } else {
+                    error!("🔧 DsGameServerPlugin: Failed to spawn player {}, not adding to managed_players", object_uuid);
+                }
+                info!("🔧 DsGameServerPlugin: Player quit complete, for player {}", object_uuid);
+            });
+
+            Ok(())
+        }).await
+        .map_err(|e| PluginError::ExecutionError(e.to_string()))?;
+
         let server_uuid = self.uuid.clone();
         let zone_out_of_zone = Arc::clone(&self.zone);
         let managed_objects = Arc::clone(&self.managed_objects);

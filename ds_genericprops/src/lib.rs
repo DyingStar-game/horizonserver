@@ -449,11 +449,9 @@ impl GenericPropsPlugin {
                 // then return the list of objects found to the gameserver that requested it
                 events_core.emit_plugin(
                     "gameserverplugin",
-                    "player_out_of_zone",
+                    "player_quit",
                     &json!({
-                        "server_uuid": "1cb2dcf1-f8b8-4e17-9681-78492c49540f", // fake uuid server
                         "item": item,
-                        "global_position": Vec3::new(1000000000000.0, 1000000000000.0, 1000000000000.0),
                     }),
                 ).await.unwrap();
                 // End of the TODO block

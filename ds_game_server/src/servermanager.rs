@@ -224,7 +224,7 @@ impl ServerManager {
             // get serverinfo of servers
             while let Some(serverinfo) = srvinfo_rx.recv().await {
                 // info!("Received server info: UUID={}, FPS={}, Players={}", serverinfo.uuid, serverinfo.fps, serverinfo.players_number);
-                info!("Current split states: {:?}", split_states.clone());
+                // info!("Current split states: {:?}", split_states.clone());
 
                 // send servers info to clients
                 let server_zone = manage_servers.iter()
@@ -236,17 +236,16 @@ impl ServerManager {
                 // uuid = server uuid
                 // for players for example
                 if let Some(split_state) = split_states.get_mut(&serverinfo.uuid) {
-                    info!("PASS HERE 01");
                     if serverinfo.players_number > 2 {
                         split_state.number_times_failed += 1;
-                        info!("Failed++");
+                        // info!("Failed++");
                     } else {
                         split_state.number_times_failed = 0;
-                        info!("failed reset");
+                        // info!("failed reset");
                     }
                     split_state.fps = serverinfo.fps;
                     split_state.players = serverinfo.players_number;
-                    info!("number failed: {}", split_state.number_times_failed);
+                    // info!("number failed: {}", split_state.number_times_failed);
 
                     if split_state.number_times_failed >= 20 {
                         info!("Server {} has too heavy, split to another server.", serverinfo.uuid);

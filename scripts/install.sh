@@ -13,5 +13,5 @@ git fetch
 git checkout $REF
 git pull origin $REF
 
-git apply ../horizon.diff
+git apply --ignore-whitespace ../horizon.diff
 cp ../plugins.toml . 

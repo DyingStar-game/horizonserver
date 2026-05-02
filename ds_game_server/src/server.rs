@@ -638,7 +638,7 @@ impl Server {
                 // }
                 GameServerMessage::PropPosition(prop_data) => {
                     if prop_data["type"] == "serverinfo" {
-                        info!("🔧 DsGameServerPlugin: Updating server info: {:?}", prop_data);
+                        debug!("🔧 DsGameServerPlugin: Updating server info: {:?}", prop_data);
                         let data = ServerInfo {
                             uuid: self.uuid.clone(),
                             fps: prop_data["fps"].as_u64().unwrap_or_default() as u8,

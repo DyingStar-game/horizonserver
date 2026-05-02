@@ -29,3 +29,6 @@ log_level = "info"
 [ds_services]
 log_level = "info"
 resources_dynamic_address = "service-resourcesdynamic:9200"
+
+[ds_audio]
+log_level = "info"

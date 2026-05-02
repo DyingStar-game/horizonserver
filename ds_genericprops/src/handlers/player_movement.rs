@@ -36,7 +36,7 @@
 
 use std::sync::Arc;
 use horizon_event_system::{
-    EventSystem, PlayerId, GorcEvent, GorcObjectId, ClientConnectionRef, ObjectInstance,
+    EventSystem, PlayerId, GorcObjectId,
     EventError,
 };
 use tracing::{debug, info, warn, error};

@@ -25,7 +25,7 @@ COPY Horizon/ Horizon/
 # Build all plugins and collect .so output files
 RUN --mount=type=cache,target=/build/target \
     --mount=type=cache,target=/usr/local/cargo/registry \
-    RUSTFLAGS="" cargo build --locked --release && \
+    RUSTFLAGS="" cargo build --release && \
     mkdir -p /plugins && \
     cp target/release/*.so /plugins/
 

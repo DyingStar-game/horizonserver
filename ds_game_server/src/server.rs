@@ -1,5 +1,5 @@
 
-use crate::handlers::{spawn_player, spawn_prop, player_movement, player_action, initial_objects};
+use crate::handlers::{spawn_player, spawn_prop, player_movement, player_action, initial_objects, update_prop};
 
 use horizon_event_system::{
     ClientConnectionRef, ClientEventWrapper, EventError, EventSystem, GorcObjectId, PlayerId, PluginError, ServerContext, Vec3, events
@@ -25,6 +25,7 @@ enum GameServerMessage {
     PropPosition(serde_json::Value),
     PropCreate(serde_json::Value),
     PropDelete(serde_json::Value),
+    PropUpdate(serde_json::Value),
     // PlayerOutOfZone(serde_json::Value),
 }
 
@@ -99,14 +100,14 @@ impl Server {
         let events = context.clone().events();
         let zone = self.zone.read().unwrap().clone();
         let tokio_handle_spawnobj = context.clone().tokio_handle();
-        let gorc_instances = gorc_instances.clone();
+        let gorc_instances_new = gorc_instances.clone();
         events.on_plugin("gameserverplugin", "spawn_object", move |event: serde_json::Value| {
             debug!("🔧 DsGameServerPlugin: Adding prop with event: {:?}", event.clone());
 
             let websocket_sender = Arc::clone(&websocket_sender);
 
             let event_clone = event.clone();
-            let gorc_instances = gorc_instances.clone();
+            let gorc_instances = gorc_instances_new.clone();
             tokio_handle_spawnobj.spawn(async move {
                 if let Ok(parent_gorc_id) = GorcObjectId::from_str(event_clone["object_uuid"].as_str().unwrap_or_default()) {
                     if let Some(global_position) = gorc_instances.get_object_position(parent_gorc_id).await {
@@ -128,6 +129,48 @@ impl Server {
                 }
 
                 let _ = spawn_prop::handle_spawn_prop(
+                    event_clone,
+                    websocket_sender,
+                ).await;
+            });
+
+            Ok(())
+        }).await
+        .map_err(|e| PluginError::ExecutionError(e.to_string()))?;
+
+        let websocket_sender = Arc::clone(&self.websocket_sender);
+        let events = context.clone().events();
+        let zone = self.zone.read().unwrap().clone();
+        let tokio_handle_updateobj = context.clone().tokio_handle();
+        let gorc_instances_update = gorc_instances.clone();
+        events.on_plugin("gameserverplugin", "update_prop", move |event: serde_json::Value| {
+            debug!("🔧 DsGameServerPlugin: Updating prop with event: {:?}", event.clone());
+
+            let websocket_sender = Arc::clone(&websocket_sender);
+
+            let event_clone = event.clone();
+            let gorc_instances = gorc_instances_update.clone();
+            tokio_handle_updateobj.spawn(async move {
+                if let Ok(parent_gorc_id) = GorcObjectId::from_str(event_clone["object_uuid"].as_str().unwrap_or_default()) {
+                    if let Some(global_position) = gorc_instances.get_object_position(parent_gorc_id).await {
+                        debug!("🔧 DsGameServerPlugin: Prop global position: {:?}", global_position);
+                        // check if the position is in the Zone of the server
+                        if global_position.x < zone.min_x || global_position.x > zone.max_x ||
+                        global_position.y < zone.min_y || global_position.y > zone.max_y ||
+                        global_position.z < zone.min_z || global_position.z > zone.max_z {
+                            debug!("🔧 DsGameServerPlugin: Prop is outside of server zone, skipping update.");
+                            return;
+                        }
+                    } else {
+                        debug!("🔧 DsGameServerPlugin: Could not get global position of gorc object, skipping update.");
+                        return;
+                    }
+                } else {
+                    debug!("🔧 DsGameServerPlugin: Invalid gorc_id format: {}, skipping update.", event_clone["object_uuid"]);
+                    return;
+                }
+
+                let _ = update_prop::handle_update_prop(
                     event_clone,
                     websocket_sender,
                 ).await;
@@ -697,7 +740,15 @@ impl Server {
                         error!("Failed to emit plugin event to propsplugin: {}", e);
                     }
                 }
-                GameServerMessage::PropCreate(_) => error!("Received unexpected PropCreate message"),
+                GameServerMessage::PropUpdate(prop_data) => {
+                    if let Err(e) = events_processor.emit_plugin("genericprops", "update_object", &serde_json::json!({
+                        "object_type": prop_data["type"],
+                        "object_uuid": prop_data["uuid"],
+                        "object_data": prop_data,
+                    })).await {
+                        error!("Failed to emit plugin event to propsplugin: {}", e);
+                    }
+                }
                 // GameServerMessage::PlayerOutOfZone(player_data) => {
                 //     if let Err(e) = events_processor.emit_plugin("genericprops", "player_out_of_zone", &serde_json::json!({
                 //         "object_type": "player",

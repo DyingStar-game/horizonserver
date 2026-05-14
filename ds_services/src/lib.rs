@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use horizon_event_system::{
     create_simple_plugin, current_timestamp, EventSystem, LogLevel,
-    PluginError, ServerContext, SimplePlugin,
+    PluginError, RegionStartedEvent, ServerContext, SimplePlugin,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
@@ -52,6 +52,7 @@ pub struct DyingstarServicesPlugin {
     name: String,
     socket_url: String,
     websocket: Arc<Mutex<Option<Writer<TcpStream>>>>,
+    can_query_service: Arc<Mutex<bool>>,
 }
 
 impl DyingstarServicesPlugin {
@@ -70,6 +71,7 @@ impl DyingstarServicesPlugin {
             name: "ds_services".to_string(),
             socket_url,
             websocket: Arc::new(Mutex::new(None)),
+            can_query_service: Arc::new(Mutex::new(false)),
         }
     }
 
@@ -131,7 +133,6 @@ impl SimplePlugin for DyingstarServicesPlugin {
             move |event: serde_json::Value|
         {
             let url = url.clone();
-            let websocket = Arc::clone(&websocket);
             debug!("🔧 DyingstarServicesPlugin: Handling 'resourcesdynamic' event: {:?}", event);
             let message = serde_json::to_string(&event).unwrap_or_else(|e| {
                 error!("🔧 DyingstarServicesPlugin: ❌ Failed to serialize event to JSON string: {}", e);
@@ -154,6 +155,45 @@ impl SimplePlugin for DyingstarServicesPlugin {
             Ok(())
         }).await
         .map_err(|e| PluginError::ExecutionError(e.to_string()))?;
+
+        let can_query_service = Arc::new(Mutex::new(false));
+        let can_query_service_clone = Arc::clone(&can_query_service);
+
+        let websocket = Arc::clone(&self.websocket);
+        events.on_core("region_started", move |_event: RegionStartedEvent| {
+            // query to get planets
+            if let Ok(mut guard) = can_query_service_clone.lock() {
+                *guard = true;
+                debug!("🔧 DyingstarServicesPlugin: Region started, can now query external service");
+                // do request to external service to get planets
+                if let Ok(mut ws_guard) = websocket.lock() {
+                    if let Some(sender) = ws_guard.as_mut() {
+                        let request = serde_json::json!({
+                            "event_type": "init",
+                            "data": {
+                                "system_internal_name": "tarsis",
+                                "duration_s": "3",
+                                "frequency": "60",
+                                "from_timestamp": "0",
+                            }
+                        });
+                        let message = serde_json::to_string(&request).unwrap_or_else(|e| {
+                            error!("🔧 DyingstarServicesPlugin: ❌ Failed to serialize request to JSON string: {}", e);
+                            "{}".to_string()
+                        });
+                        debug!("🔧 DyingstarServicesPlugin: Sending get_planets request to external service: {}", message);
+                        match sender.send_message(&OwnedMessage::Text(message.clone())) {
+                            Ok(_) => debug!("🔧 DyingstarServicesPlugin: ✅ Sent get_planets request to external service"),
+                            Err(e) => error!("🔧 DyingstarServicesPlugin: ❌ Failed to send get_planets request: {}", e),
+                        }
+                    }
+                }
+            }
+            Ok(())
+        }).await
+        .map_err(|e| PluginError::ExecutionError(e.to_string()))?;
+
+        self.can_query_service = can_query_service;
         
         info!("🔧 DyingstarServicesPlugin: ✅ All handlers registered successfully!");
         Ok(())
@@ -187,6 +227,8 @@ impl SimplePlugin for DyingstarServicesPlugin {
         // Init websocket connection
         let url = self.socket_url.clone();
         let websocket = Arc::clone(&self.websocket);
+        let can_query_service = Arc::clone(&self.can_query_service);
+
         std::thread::spawn(move || {
             // Connect and store writer
             info!("Attempting to connect to external service at {}", url);
@@ -232,73 +274,85 @@ impl SimplePlugin for DyingstarServicesPlugin {
                             Ok(json) => {
                                 // Extract the data array
                                 if let Some(data_array) = json.get("data").and_then(|d| d.as_array()) {
-                                    debug!("Received {} objects from external service", data_array.len());
+                                    if let Ok(can_query) = can_query_service.lock() {
+                                        if *can_query {
+                                            debug!("Received {} objects from external service", data_array.len());
 
-                                    // Spawn async task to emit events
-                                    let context_clone = context.clone();
-                                    let data_array_clone = data_array.clone();
-                                    let _ = rt.block_on(async move {
-                                        // Loop through each object in the data array
-                                        for (index, obj) in data_array_clone.iter().enumerate() {
-                                            if let Some(object_type) = obj.get("object_type").and_then(|t| t.as_str()) {
-                                                let mut modified_obj = obj.clone();
-                                                if object_type == "planet" {
-                                                    debug!("Emitting planet object to genericprops...");
-                                                    if let Some(scenename) = modified_obj["object_data"]["scenename"].as_str() {
-                                                        modified_obj["object_data"]["scenename"] = scenename.replace("scenes/planet/", "scenes/systems/tarsis/").into();
-                                                    }
-                                                    modified_obj["object_data"]["parent_id"] = "".into();
+                                            // Spawn async task to emit events
+                                            let context_clone = context.clone();
+                                            let data_array_clone = data_array.clone();
+                                            let _ = rt.block_on(async {
+                                                // Loop through each object in the data array
+                                                for (index, obj) in data_array_clone.iter().enumerate() {
+                                                    if let Some(object_type) = obj.get("object_type").and_then(|t| t.as_str()) {
+                                                        let mut modified_obj = obj.clone();
+                                                        if object_type == "planet" {
+                                                            debug!("Emitting planet object to genericprops...");
+                                                            if let Some(scenename) = modified_obj["object_data"]["scenename"].as_str() {
+                                                                modified_obj["object_data"]["scenename"] = scenename.replace("scenes/planet/", "scenes/systems/tarsis/").into();
+                                                            }
+                                                            modified_obj["object_data"]["parent_id"] = "".into();
 
-// Round positions and rotations to 3 decimal places
-                                                    round_positions_rotations(&mut modified_obj);
+        // Round positions and rotations to 3 decimal places
+                                                            round_positions_rotations(&mut modified_obj);
 
-                                                    if let Err(e) = context_clone.events().emit_plugin("genericprops", "create_object", &modified_obj).await {
-                                                        error!("Failed to emit plugin event: {}", e);
-                                                    }
-                                                    if let Err(e) = context_clone.events().emit_plugin("props", "planet", &modified_obj).await {
-                                                        error!("Failed to emit plugin event to props: {}", e);
+                                                            if let Err(e) = context_clone.events().emit_plugin("genericprops", "create_object", &modified_obj).await {
+                                                                error!("Failed to emit plugin event: {}", e);
+                                                            }
+                                                            if let Err(e) = context_clone.events().emit_plugin("props", "planet", &modified_obj).await {
+                                                                error!("Failed to emit plugin event to props: {}", e);
+                                                            }
+                                                        }
+                                                        else if object_type == "moon" {
+                                                            debug!("Emitting moon object to genericprops...");
+                                                            modified_obj["object_type"] = "planet".into();
+                                                            if let Some(scenename) = modified_obj["object_data"]["scenename"].as_str() {
+                                                                modified_obj["object_data"]["scenename"] = scenename.replace("scenes/moon/", "scenes/systems/tarsis/").into();
+                                                            }
+
+                                                            // Round positions and rotations to 3 decimal places
+                                                            round_positions_rotations(&mut modified_obj);
+                                                            
+                                                            if let Err(e) = context_clone.events().emit_plugin("genericprops", "create_object", &modified_obj).await {
+                                                                error!("Failed to emit plugin event: {}", e);
+                                                            }
+                                                            if let Err(e) = context_clone.events().emit_plugin("props", "planet", &modified_obj).await {
+                                                                error!("Failed to emit plugin event to props: {}", e);
+                                                            }
+                                                        } else if object_type == "star" {
+                                                            debug!("Emitting star object to genericprops...");
+                                                            if let Some(scenename) = modified_obj["object_data"]["scenename"].as_str() {
+                                                                modified_obj["object_data"]["scenename"] = scenename.replace("scenes/systems/tarsis/tarsis.tscn", "scenes/star/star.tscn").into();
+                                                            }
+                                                            if let Some(parent_id) = modified_obj["object_data"]["parent_id"].as_str() {
+                                                                modified_obj["object_data"]["parent_id"] = "".into();
+                                                            }
+                                                            modified_obj["object_data"]["position"] = serde_json::json!({
+                                                                "x": 0.0,
+                                                                "y": 0.0,
+                                                                "z": 0.0
+                                                            });
+                                                            
+                                                            if let Err(e) = context_clone.events().emit_plugin("genericprops", "create_object", &modified_obj).await {
+                                                                error!("Failed to emit plugin event: {}", e);
+                                                            }
+                                                        } else {
+                                                            warn!("Unknown object_type '{}' at index {}", object_type, index);
+                                                            
+                                                        }
                                                     }
                                                 }
-                                                else if object_type == "moon" {
-                                                    debug!("Emitting moon object to genericprops...");
-                                                    modified_obj["object_type"] = "planet".into();
-                                                    if let Some(scenename) = modified_obj["object_data"]["scenename"].as_str() {
-                                                        modified_obj["object_data"]["scenename"] = scenename.replace("scenes/moon/", "scenes/systems/tarsis/").into();
-                                                    }
-
-                                                    // Round positions and rotations to 3 decimal places
-                                                    round_positions_rotations(&mut modified_obj);
-                                                    
-                                                    if let Err(e) = context_clone.events().emit_plugin("genericprops", "create_object", &modified_obj).await {
-                                                        error!("Failed to emit plugin event: {}", e);
-                                                    }
-                                                    if let Err(e) = context_clone.events().emit_plugin("props", "planet", &modified_obj).await {
-                                                        error!("Failed to emit plugin event to props: {}", e);
-                                                    }
-                                                } else if object_type == "star" {
-                                                    debug!("Emitting star object to genericprops...");
-                                                    if let Some(scenename) = modified_obj["object_data"]["scenename"].as_str() {
-                                                        modified_obj["object_data"]["scenename"] = scenename.replace("scenes/systems/tarsis/tarsis.tscn", "scenes/star/star.tscn").into();
-                                                    }
-                                                    if let Some(parent_id) = modified_obj["object_data"]["parent_id"].as_str() {
-                                                        modified_obj["object_data"]["parent_id"] = "".into();
-                                                    }
-                                                    modified_obj["object_data"]["position"] = serde_json::json!({
-                                                        "x": 0.0,
-                                                        "y": 0.0,
-                                                        "z": 0.0
-                                                    });
-                                                    
-                                                    if let Err(e) = context_clone.events().emit_plugin("genericprops", "create_object", &modified_obj).await {
-                                                        error!("Failed to emit plugin event: {}", e);
-                                                    }
-                                                } else {
-                                                    warn!("Unknown object_type '{}' at index {}", object_type, index);
-                                                    
+                                                // Send event for load persistence
+                                                if let Err(e) = context_clone.events().emit_plugin(
+                                                    "bridge_persistence",
+                                                    "get_all_items",
+                                                    &serde_json::json!({}),
+                                                ).await {
+                                                    error!("Failed to emit get_all_items event: {}", e);
                                                 }
-                                            }
+                                            });                                            
                                         }
-                                    });
+                                    }
                                 } else {
                                     warn!("No 'data' array found in message");
                                 }

@@ -8,6 +8,7 @@ WORKDIR /build
 
 # Copy root workspace definition
 COPY Cargo.toml .
+COPY Cargo.lock .
 
 # Copy plugin source crates
 COPY ds_common/ ds_common/
@@ -17,6 +18,7 @@ COPY ds_genericprops/ ds_genericprops/
 COPY ds_props/ ds_props/
 COPY ds_services/ ds_services/
 COPY ds_audio/ ds_audio/
+COPY ds_bridge/ ds_bridge/
 
 # Copy Horizon workspace (needed for horizon_event_system dependency resolution)
 COPY Horizon/ Horizon/
@@ -24,7 +26,7 @@ COPY Horizon/ Horizon/
 # Build all plugins and collect .so output files
 RUN --mount=type=cache,target=/build/target \
     --mount=type=cache,target=/usr/local/cargo/registry \
-    RUSTFLAGS="" cargo build --release && \
+    RUSTFLAGS="" cargo build --locked --release && \
     mkdir -p /plugins && \
     cp target/release/*.so /plugins/
 

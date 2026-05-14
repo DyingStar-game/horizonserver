@@ -38,6 +38,34 @@ pub struct GenericPropsPlugin {
 	definitions: Arc<DashMap<String, ObjectDefinition>>
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PersistenceItemsChunkPayloadEvent {
+    pub items: Vec<GenericPropsRequest>,
+    pub chunk_index: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PersistenceItemsChunkEvent {
+    pub event_type: String,
+    pub namespace: Option<String>,
+    pub name: String,
+    pub payload: PersistenceItemsChunkPayloadEvent,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PersistenceItemsEndPayloadEvent {
+    pub total_chunks: usize,
+    pub total_items: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PersistenceItemsEndEvent {
+    pub event_type: String,
+    pub namespace: Option<String>,
+    pub name: String,
+    pub payload: PersistenceItemsEndPayloadEvent,
+}
+
 impl GenericPropsPlugin {
     
     pub fn new() -> Self {
@@ -193,7 +221,8 @@ impl GenericPropsPlugin {
                                 props1.clone(),
                                 update_events1.clone(),
                                 event.clone(),
-                                handle1.clone()
+                                handle1.clone(),
+                                false,
                             )
                         {
                             error!("🎮 Failed to handle object update: {}", e);
@@ -201,6 +230,29 @@ impl GenericPropsPlugin {
         Ok(())
         }).await
         .map_err(|e| PluginError::ExecutionError(e.to_string()))?;
+
+        let definitions1a = Arc::clone(&self.definitions);
+        let props1a = Arc::clone(&self.props);
+        let update_events1a = events.clone();
+        let handle1a = luminal_handle.clone();
+        events.on_plugin("genericprops", "update_object_from_external", move |event: serde_json::Value| {
+            debug!("plugin genericprops (update from external): Receive object message {:?}", event);
+            if let Err(e) = update::handle_object_update(
+                                definitions1a.clone(),
+                                props1a.clone(),
+                                update_events1a.clone(),
+                                event.clone(),
+                                handle1a.clone(),
+                                true,
+                            )
+                        {
+                            error!("🎮 Failed to handle object update: {}", e);
+                        }
+        Ok(())
+        }).await
+        .map_err(|e| PluginError::ExecutionError(e.to_string()))?;
+
+
 
         // Clone for second handler
         let update_events2 = events.clone();
@@ -463,6 +515,168 @@ impl GenericPropsPlugin {
         }).await
         .map_err(|e| PluginError::ExecutionError(e.to_string()))?;
 
+        let handle_items_chunk = luminal_handle.clone();
+        let definitions_items_chunk = Arc::clone(&self.definitions);
+        let props_items_chunk = Arc::clone(&self.props);
+        let queue_objects_create_items_chunk = Arc::clone(&queue_objects_create);
+        let events_items_chunk = Arc::clone(&events);
+        events.on_plugin("genericprops", "items_chunk", move |event: PersistenceItemsChunkPayloadEvent| {
+            debug!("plugin genericprops (items_chunk): Receive items chunk message with {} items", event.items.len());
+
+            for item in event.items {
+                if matches!(item.object_type.as_str(), "planet" | "player" | "star") {
+                    debug!("plugin genericprops (items_chunk): skipping object_type '{}'", item.object_type);
+                    continue;
+                }
+
+                let item_value = match serde_json::to_value(&item) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        error!("plugin genericprops (items_chunk): failed to serialize item: {}", e);
+                        continue;
+                    }
+                };
+
+                if let Err(e) = create::handle_object_create(
+                    definitions_items_chunk.clone(),
+                    props_items_chunk.clone(),
+                    events_items_chunk.clone(),
+                    item_value,
+                    handle_items_chunk.clone(),
+                    true,
+                    queue_objects_create_items_chunk.clone(),
+                ) {
+                    error!("plugin genericprops (items_chunk): failed to create object: {}", e);
+                }
+            }
+
+            Ok(())
+        }).await
+        .map_err(|e| PluginError::ExecutionError(e.to_string()))?;
+
+        let handle_items_end = luminal_handle.clone();
+        let events_items_end = Arc::clone(&events);
+        let gorc_instances_items_end = context.events().get_gorc_instances().unwrap();
+        let definitions_items_end = Arc::clone(&self.definitions);
+        let props_items_end = Arc::clone(&self.props);
+        let queue_objects_create_items_end = Arc::clone(&queue_objects_create);
+        events.on_plugin("genericprops", "items_end", move |event: PersistenceItemsEndPayloadEvent| {
+            debug!("plugin genericprops (items_end): Receive items end message {:?}", event);
+
+            let events = Arc::clone(&events_items_end);
+            let gorc_instances = Arc::clone(&gorc_instances_items_end);
+            let definitions = Arc::clone(&definitions_items_end);
+            let props = Arc::clone(&props_items_end);
+            let queue_objects_create = Arc::clone(&queue_objects_create_items_end);
+            let handle_for_create = handle_items_end.clone();
+
+            handle_items_end.spawn(async move {
+                if event.total_items > 0 {
+                    // Items already loaded from persistence — nothing to do.
+                    return Ok::<(), PluginError>(());
+                }
+
+                info!("plugin genericprops (items_end): no persisted items, loading startup_items.json");
+
+                // Locate startup_items.json relative to the working directory.
+                let json_paths = ["ds_genericprops/startup_items.json", "startup_items.json"];
+                let raw = json_paths.iter()
+                    .find_map(|p| fs::read_to_string(p).ok());
+
+                let raw = match raw {
+                    Some(r) => r,
+                    None => {
+                        error!("plugin genericprops: startup_items.json not found");
+                        return Ok(());
+                    }
+                };
+
+                let items: Vec<serde_json::Value> = match serde_json::from_str(&raw) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        error!("plugin genericprops: failed to parse startup_items.json: {}", e);
+                        return Ok(());
+                    }
+                };
+
+                // Build planet name→uuid map from already-registered GORC objects (planets
+                // loaded from persistence in a previous run will be found here).
+                let mut planet_name_to_uuid: HashMap<String, String> = HashMap::new();
+                for gorc_id in gorc_instances.get_objects_by_type("planet").await {
+                    if let Some(mut instance) = gorc_instances.get_object(gorc_id).await {
+                        if let Some(gp) = instance.get_object_mut::<GenericProps>() {
+                            // The name field lives inside the channel-ordered data map.
+                            let name_opt = gp.data.values()
+                                .filter_map(|v| v.get("name").and_then(|n| n.as_str()))
+                                .next()
+                                .map(str::to_string);
+                            if let Some(name) = name_opt {
+                                planet_name_to_uuid.insert(name, gp.uuid.clone());
+                            }
+                        }
+                    }
+                }
+
+                // Second pass: resolve parent_id and emit create_object for each item.
+                for mut item in items {
+                    // Generate UUID if null or empty.
+                    if item["object_uuid"].is_null()
+                        || item["object_uuid"].as_str().map_or(true, str::is_empty)
+                    {
+                        item["object_uuid"] =
+                            serde_json::Value::String(uuid::Uuid::new_v4().to_string());
+                    }
+
+                    // Resolve _planet_<name> parent_id.
+                    // parent_id can be null, missing, or empty — skip all those cases.
+                    if let Some(parent_id) = item["object_data"]["parent_id"]
+                        .as_str()
+                        .filter(|s| !s.is_empty())
+                    {
+                        if let Some(planet_name) = parent_id.strip_prefix("_planet_") {
+                            match planet_name_to_uuid.get(planet_name) {
+                                Some(planet_uuid) => {
+                                    item["object_data"]["parent_id"] =
+                                        serde_json::Value::String(planet_uuid.clone());
+                                }
+                                None => {
+                                    warn!(
+                                        "plugin genericprops: could not resolve parent planet '{}' for item {:?}",
+                                        planet_name, item["object_data"]["name"]
+                                    );
+                                }
+                            }
+                        }
+                    }
+
+                    debug!(
+                        "plugin genericprops (items_end): creating object {:?}",
+                        item["object_uuid"]
+                    );
+                    if let Err(e) = create::handle_object_create(
+                        definitions.clone(),
+                        props.clone(),
+                        events.clone(),
+                        item,
+                        handle_for_create.clone(),
+                        false,
+                        queue_objects_create.clone(),
+                    ) {
+                        error!(
+                            "plugin genericprops (items_end): failed to create object: {}",
+                            e
+                        );
+                    }
+                }
+
+                Ok(())
+            });
+
+            Ok(())
+        }).await
+        .map_err(|e| PluginError::ExecutionError(e.to_string()))?;
+        
+
         // let gorc_instances = context.events().get_gorc_instances().unwrap();
         // let handle_out_of_zone = luminal_handle.clone();
         // let events_out_of_zone = Arc::clone(&events);
@@ -546,7 +760,7 @@ impl GenericPropsPlugin {
                         connection,
                         object_instance,
                         events_update.clone(),
-                        luminal_handle.clone()
+                        luminal_handle.clone(),
                     )
                 }
             ).await

@@ -7,6 +7,7 @@ WORKDIR /build
 
 # Copy the full source tree (both workspaces)
 COPY Cargo.toml Cargo.toml
+COPY Cargo.lock Cargo.lock
 COPY ds_common/ ds_common/
 COPY ds_game_server/ ds_game_server/
 COPY ds_player_authentication/ ds_player_authentication/
@@ -14,6 +15,7 @@ COPY ds_genericprops/ ds_genericprops/
 COPY ds_props/ ds_props/
 COPY ds_services/ ds_services/
 COPY ds_audio/ ds_audio/
+COPY ds_bridge/ ds_bridge/
 COPY Horizon/ Horizon/
 COPY scripts/ scripts/
 
@@ -53,6 +55,7 @@ COPY .docker/plugins.toml /app/plugins.toml
 
 # Copy props definition folder (genericprops)
 COPY ds_genericprops/props /app/props
+COPY ds_genericprops/startup_items.json /app/startup_items.json
 
 # Copy server binary
 COPY --from=builder /build/Horizon/target/release/horizon /app/server

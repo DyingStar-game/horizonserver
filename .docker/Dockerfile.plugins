@@ -8,7 +8,6 @@ WORKDIR /build
 
 # Copy root workspace definition
 COPY Cargo.toml .
-COPY Cargo.lock .
 
 # Copy plugin source crates
 COPY ds_common/ ds_common/

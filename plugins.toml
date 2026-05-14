@@ -10,12 +10,12 @@ game_servers = ["ws://127.0.0.1:8980", "ws://127.0.0.1:8981"]
 #  * "single" (only 1 server)
 #  * "development" (multiple servers, use game_servers list)
 #  * "production" (multiple servers, will use kubernetes to create and start servers on demand, so ignore game_servers list)
-servers_mode = "development"
+servers_mode = "single"
 
 # Split rule (ignored in single mode). Possible values:
 #  * "fps:20"    => split when last 10 fps (get by serverinfo) is under 20 in this example (prefer this for production)
 #  * "players:3" => split when more than 3 players are connected on a server
-split_rule = "players:1"
+split_rule = "fps:20"
 
 [ds_genericprops]
 log_level = "info"

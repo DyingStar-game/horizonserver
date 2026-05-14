@@ -44,7 +44,7 @@ log_level = "info"
 #   "plugin:<plugin_name>:<event>"  — subscribe to a plugin-to-plugin event
 # ============================================================================
 [ds_bridge]
-log_level = "debug"
+log_level = "info"
 
 # Example service: uncomment and configure as needed
 # [[ds_bridge.services]]

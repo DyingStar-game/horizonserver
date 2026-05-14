@@ -1,0 +1,43 @@
+[
+    {
+        "object_type": "box",
+        "object_uuid": null,
+        "object_data": {
+            "name": "box50cm_test1",
+            "parent_id": "_planet_SandBox",
+            "scenename": "scenes/props/testbox/box_50cm.tscn",
+            "position": {"x": -2122000.0, "y": 0.0, "z": 0.0},
+            "rotation": {"x": 0.0, "y": 0.0, "z": 0.0}
+        }
+    },
+    {
+        "object_type": "building",
+        "object_uuid": "0aae4c9b-1ad1-43ef-831a-464be950eac1",
+        "object_data": {
+            "name": "tarsis_4-0001",
+            "parent_id": "_planet_SandBox",
+            "scenename": "scenes/_universe/structures/buildings/spawn_building.tscn",
+            "position": {"x": 1351261.67, "y": -1520634.86, "z": -593469.87},
+            "rotation": {"x": 0.0, "y": 0.0, "z": 0.0},
+            "apartments": {
+                "total": 60,
+                "available": 60,
+                "side_number": 10,
+                "sides": 2,
+                "floors_number": 3,
+                "apartments": []
+            }
+        }
+    },
+    {
+        "object_type": "storagewarehouse",
+        "object_uuid": "563a2ce7-4be8-4696-bb5d-fadb3f75700f",
+        "object_data": {
+            "name": "storagewarehouse",
+            "parent_id": "_planet_P5_M1",
+            "scenename": "scenes/props/StorageBoxes/storagewarehouse.tscn",
+            "position": {"x": -881000.0, "y": 0.0, "z": 0.0},
+            "rotation": {"x": 0.0, "y": 0.0, "z": 1.5708}
+        }
+    }
+]

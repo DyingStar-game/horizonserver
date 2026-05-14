@@ -162,8 +162,8 @@ impl SimplePlugin for DyingstarPropsPlugin {
                 let (base_x, base_y, base_z, parent_uuid) = match spawn_point {
                     1 => (10500.0, 0.5, 10500.0, "ed20bda3-f6f3-4053-b9de-968f73ebc44c".to_string()), // Sandbox surface => city
                     // 2 => (-2422100.0, 100.0, 0.0, sandbox_uuid), // Sandbox
-                    2 => (2118765.0, -159.0, -77.0, sandbox_uuid), // Sandbox
-                    3 => (0.0, 5.0, -152.0, "b9d2e503-0adb-4add-919f-85aaff65be0f".to_string()), // moon 5_1 => storage warehouse 1
+                    2 => (0.0, 2000.5, 0.0, "0aae4c9b-1ad1-43ef-831a-464be950eac1".to_string()), // spawn building
+                    3 => (0.0, 5.0, -152.0, "563a2ce7-4be8-4696-bb5d-fadb3f75700f".to_string()), // moon 5_1 => storage warehouse 1
                     // 4 => (-1200100.0, 0.0, 0.0, planet51_uuid), // moon 5_1
                     4 => (-243722.93, 667380.49, -471517.80, planet51_uuid), // moon 5_1
                     5 => (66028.0, 1159480.0, -1577692.0, planet3_uuid), // planet 3 (Gaea)
@@ -379,100 +379,124 @@ impl SimplePlugin for DyingstarPropsPlugin {
                 ).await.map_err(|e| PluginError::ExecutionError(format!("failed to emit plugin event: {}", e)))?;
 
                 // wait 10 seconds, time to planets spawned
-                tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+                // tokio::time::sleep(std::time::Duration::from_secs(4)).await;
 
-                // spawn the city
-                let city_uuid = "ed20bda3-f6f3-4053-b9de-968f73ebc44c".to_string();
-                let sandbox_uuid = {
-                    let planets = planets_clone.read().await;
-                    planets.get("SandBox").cloned().unwrap_or_else(|| "".to_string())
-                };
-                let planet51_uuid = {
-                    let planets = planets_clone.read().await;
-                    planets.get("P5_M1").cloned().unwrap_or_else(|| "".to_string())
-                };
+                // let sandbox_uuid = {
+                //     let planets = planets_clone.read().await;
+                //     planets.get("SandBox").cloned().unwrap_or_else(|| "".to_string())
+                // };
+                // let planet51_uuid = {
+                //     let planets = planets_clone.read().await;
+                //     planets.get("P5_M1").cloned().unwrap_or_else(|| "".to_string())
+                // };
+
+                // // spawn the appartments (spawn building)
+                // let spawn0001_uuid = "1080b4d9-bbbc-4c81-9924-1590119fd7db".to_string();
+                // context.events().emit_plugin("genericprops", "create_object", &serde_json::json!({
+                // "object_type": "building",
+                // "object_uuid": spawn0001_uuid,
+                // "object_data": {
+                //     "name": "tarsis_4-0001",
+                //     "parent_id": sandbox_uuid,
+                //     "scenename": "scenes/_universe/structures/buildings/spawn_building.tscn",
+                //     "position": {"x": 1351261.67, "y": -1520634.86, "z": -593469.87},
+                //     "rotation": {"x": 0.0, "y": 0.0, "z": 0.0},
+                //     "apartments": {
+                //         "total": 60,
+                //         "available": 60,
+                //         "side_number": 10,
+                //         "sides": 2,
+                //         "floors_number": 3,
+                //         "apartments": [],
+                //     }
+                // }
+                // })).await.map_err(|e| PluginError::ExecutionError(format!("failed to emit plugin event: {}", e)))?;
+
+
+                // // spawn the city
+                // let city_uuid = "ed20bda3-f6f3-4053-b9de-968f73ebc44c".to_string();
                
-                let box50cm_uuid = "ace5cee8-4d59-44e6-8aa5-000000000001".to_string();
-                context.events().emit_plugin("genericprops", "create_object", &serde_json::json!({
-                "object_type": "box",
-                "object_uuid": box50cm_uuid,
-                "object_data": {
-                    "name": "box50cm_test1",
-                    "parent_id": city_uuid,
-                    "scenename": "scenes/props/testbox/box_50cm.tscn",
-                    "position": {"x": 10500.0, "y": 0.0, "z": 10510.0},
-                    "rotation": {"x": 0.0, "y": 0.0, "z": 0.0},
-                }
-                })).await.map_err(|e| PluginError::ExecutionError(format!("failed to emit plugin event: {}", e)))?;
+                // let box50cm_uuid = "ace5cee8-4d59-44e6-8aa5-000000000001".to_string();
+                // context.events().emit_plugin("genericprops", "create_object", &serde_json::json!({
+                // "object_type": "box",
+                // "object_uuid": box50cm_uuid,
+                // "object_data": {
+                //     "name": "box50cm_test1",
+                //     "parent_id": city_uuid,
+                //     "scenename": "scenes/props/testbox/box_50cm.tscn",
+                //     "position": {"x": 10500.0, "y": 0.0, "z": 10510.0},
+                //     "rotation": {"x": 0.0, "y": 0.0, "z": 0.0},
+                // }
+                // })).await.map_err(|e| PluginError::ExecutionError(format!("failed to emit plugin event: {}", e)))?;
 
 
-                context.events().emit_plugin("genericprops", "create_object", &serde_json::json!({
-                "object_type": "city",
-                "object_uuid": city_uuid,
-                "object_data": {
-                    "name": "city",
-                    "parent_id": sandbox_uuid,
-                    "scenename": "scenes/props/city/sandbox_capital.tscn",
-                    "position": {"x": -2122000.0, "y": 0.0, "z": 0.0},
-                    "rotation": {"x": 0.0, "y": 0.0, "z": 1.5708},
-                }
-                })).await.map_err(|e| PluginError::ExecutionError(format!("failed to emit plugin event: {}", e)))?;
+                // context.events().emit_plugin("genericprops", "create_object", &serde_json::json!({
+                // "object_type": "city",
+                // "object_uuid": city_uuid,
+                // "object_data": {
+                //     "name": "city",
+                //     "parent_id": sandbox_uuid,
+                //     "scenename": "scenes/props/city/sandbox_capital.tscn",
+                //     "position": {"x": -2122000.0, "y": 0.0, "z": 0.0},
+                //     "rotation": {"x": 0.0, "y": 0.0, "z": 1.5708},
+                // }
+                // })).await.map_err(|e| PluginError::ExecutionError(format!("failed to emit plugin event: {}", e)))?;
 
-                // Spawn a box50cm for testing
+                // // Spawn a box50cm for testing
 
-                let box50cm_uuid = "ace5cee8-4d59-44e6-8aa5-000000000002".to_string();
-                context.events().emit_plugin("genericprops", "create_object", &serde_json::json!({
-                "object_type": "box",
-                "object_uuid": box50cm_uuid,
-                "object_data": {
-                    "name": "box50cm_test2",
-                    "parent_id": city_uuid,
-                    "scenename": "scenes/props/testbox/box_50cm.tscn",
-                    "position": {"x": 10500.0, "y": 0.5, "z": 10510.0},
-                    "rotation": {"x": 0.0, "y": 0.0, "z": 0.0},
-                }
-                })).await.map_err(|e| PluginError::ExecutionError(format!("failed to emit plugin event: {}", e)))?;
+                // let box50cm_uuid = "ace5cee8-4d59-44e6-8aa5-000000000002".to_string();
+                // context.events().emit_plugin("genericprops", "create_object", &serde_json::json!({
+                // "object_type": "box",
+                // "object_uuid": box50cm_uuid,
+                // "object_data": {
+                //     "name": "box50cm_test2",
+                //     "parent_id": city_uuid,
+                //     "scenename": "scenes/props/testbox/box_50cm.tscn",
+                //     "position": {"x": 10500.0, "y": 0.5, "z": 10510.0},
+                //     "rotation": {"x": 0.0, "y": 0.0, "z": 0.0},
+                // }
+                // })).await.map_err(|e| PluginError::ExecutionError(format!("failed to emit plugin event: {}", e)))?;
 
-                let box50cm_uuid = "ace5cee8-4d59-44e6-8aa5-000000000003".to_string();
-                context.events().emit_plugin("genericprops", "create_object", &serde_json::json!({
-                "object_type": "box",
-                "object_uuid": box50cm_uuid,
-                "object_data": {
-                    "name": "box50cm_test3",
-                    "parent_id": city_uuid,
-                    "scenename": "scenes/props/testbox/box_50cm.tscn",
-                    "position": {"x": 10500.0, "y": 1.0, "z": 10510.0},
-                    "rotation": {"x": 0.0, "y": 0.0, "z": 0.0},
-                }
-                })).await.map_err(|e| PluginError::ExecutionError(format!("failed to emit plugin event: {}", e)))?;
-
-
-                let box50cm_uuid = "ace5cee8-4d59-44e6-8aa5-000000000004".to_string();
-                context.events().emit_plugin("genericprops", "create_object", &serde_json::json!({
-                "object_type": "box",
-                "object_uuid": box50cm_uuid,
-                "object_data": {
-                    "name": "box50cm_test4",
-                    "parent_id": city_uuid,
-                    "scenename": "scenes/props/testbox/box_50cm.tscn",
-                    "position": {"x": 10500.0, "y": 1.5, "z": 10510.0},
-                    "rotation": {"x": 0.0, "y": 0.0, "z": 0.0},
-                }
-                })).await.map_err(|e| PluginError::ExecutionError(format!("failed to emit plugin event: {}", e)))?;
+                // let box50cm_uuid = "ace5cee8-4d59-44e6-8aa5-000000000003".to_string();
+                // context.events().emit_plugin("genericprops", "create_object", &serde_json::json!({
+                // "object_type": "box",
+                // "object_uuid": box50cm_uuid,
+                // "object_data": {
+                //     "name": "box50cm_test3",
+                //     "parent_id": city_uuid,
+                //     "scenename": "scenes/props/testbox/box_50cm.tscn",
+                //     "position": {"x": 10500.0, "y": 1.0, "z": 10510.0},
+                //     "rotation": {"x": 0.0, "y": 0.0, "z": 0.0},
+                // }
+                // })).await.map_err(|e| PluginError::ExecutionError(format!("failed to emit plugin event: {}", e)))?;
 
 
-                let box50cm_uuid = "ace5cee8-4d59-44e6-8aa5-000000000005".to_string();
-                context.events().emit_plugin("genericprops", "create_object", &serde_json::json!({
-                "object_type": "box",
-                "object_uuid": box50cm_uuid,
-                "object_data": {
-                    "name": "box50cm_test5",
-                    "parent_id": city_uuid,
-                    "scenename": "scenes/props/testbox/box_50cm.tscn",
-                    "position": {"x": 10500.0, "y": 2.0, "z": 10510.0},
-                    "rotation": {"x": 0.0, "y": 0.0, "z": 0.0},
-                }
-                })).await.map_err(|e| PluginError::ExecutionError(format!("failed to emit plugin event: {}", e)))?;
+                // let box50cm_uuid = "ace5cee8-4d59-44e6-8aa5-000000000004".to_string();
+                // context.events().emit_plugin("genericprops", "create_object", &serde_json::json!({
+                // "object_type": "box",
+                // "object_uuid": box50cm_uuid,
+                // "object_data": {
+                //     "name": "box50cm_test4",
+                //     "parent_id": city_uuid,
+                //     "scenename": "scenes/props/testbox/box_50cm.tscn",
+                //     "position": {"x": 10500.0, "y": 1.5, "z": 10510.0},
+                //     "rotation": {"x": 0.0, "y": 0.0, "z": 0.0},
+                // }
+                // })).await.map_err(|e| PluginError::ExecutionError(format!("failed to emit plugin event: {}", e)))?;
+
+
+                // let box50cm_uuid = "ace5cee8-4d59-44e6-8aa5-000000000005".to_string();
+                // context.events().emit_plugin("genericprops", "create_object", &serde_json::json!({
+                // "object_type": "box",
+                // "object_uuid": box50cm_uuid,
+                // "object_data": {
+                //     "name": "box50cm_test5",
+                //     "parent_id": city_uuid,
+                //     "scenename": "scenes/props/testbox/box_50cm.tscn",
+                //     "position": {"x": 10500.0, "y": 2.0, "z": 10510.0},
+                //     "rotation": {"x": 0.0, "y": 0.0, "z": 0.0},
+                // }
+                // })).await.map_err(|e| PluginError::ExecutionError(format!("failed to emit plugin event: {}", e)))?;
 
 
 
@@ -481,108 +505,108 @@ impl SimplePlugin for DyingstarPropsPlugin {
                 /// Code for storagewarehouse object spawning
                 /////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-                // spawn the storagewarehouse
-                let storagewarehouse_uuid = "b9d2e503-0adb-4add-919f-85aaff65be0f".to_string();
-                context.events().emit_plugin("genericprops", "create_object", &serde_json::json!({
-                "object_type": "storagewarehouse",
-                "object_uuid": storagewarehouse_uuid,
-                "object_data": {
-                    "name": "storagewarehouse",
-                    "parent_id": planet51_uuid,
-                    "scenename": "scenes/props/StorageBoxes/storagewarehouse.tscn",
-                    "position": {"x": -881000.0, "y": 0.0, "z": 0.0},
-                    "rotation": {"x": 0.0, "y": 0.0, "z": 1.5708},
-                }
-                })).await.map_err(|e| PluginError::ExecutionError(format!("failed to emit plugin event: {}", e)))?;
+                // // spawn the storagewarehouse
+                // let storagewarehouse_uuid = "b9d2e503-0adb-4add-919f-85aaff65be0f".to_string();
+                // context.events().emit_plugin("genericprops", "create_object", &serde_json::json!({
+                // "object_type": "storagewarehouse",
+                // "object_uuid": storagewarehouse_uuid,
+                // "object_data": {
+                //     "name": "storagewarehouse",
+                //     "parent_id": planet51_uuid,
+                //     "scenename": "scenes/props/StorageBoxes/storagewarehouse.tscn",
+                //     "position": {"x": -881000.0, "y": 0.0, "z": 0.0},
+                //     "rotation": {"x": 0.0, "y": 0.0, "z": 1.5708},
+                // }
+                // })).await.map_err(|e| PluginError::ExecutionError(format!("failed to emit plugin event: {}", e)))?;
 
-                // spawn dynamic boxes inside the storagewarehouse
+                // // spawn dynamic boxes inside the storagewarehouse
 
-                // 15 rangees de containers, jusqu'a  4 de hauteur
+                // // 15 rangees de containers, jusqu'a  4 de hauteur
 
-                // 1 rangee de container = 3 palettes (largeur) jusqu'a 9 de hauteur. en longeur 10 palettes
+                // // 1 rangee de container = 3 palettes (largeur) jusqu'a 9 de hauteur. en longeur 10 palettes
 
-                // scenes/props/StorageBoxes/container_liquid_1200x240x240.tscn
-                // scenes/props/StorageBoxes/container_standard_a_1200x240x240.tscn
-                // scenes/props/StorageBoxes/container_standard_b_1200x240x240.tscn
-                // scenes/props/StorageBoxes/pallet_benne_120x80x100.tscn
-                // scenes/props/StorageBoxes/pallet_crate_120x80x100.tscn
-                // scenes/props/StorageBoxes/pallet_liquid_120x80x100.tscn
+                // // scenes/props/StorageBoxes/container_liquid_1200x240x240.tscn
+                // // scenes/props/StorageBoxes/container_standard_a_1200x240x240.tscn
+                // // scenes/props/StorageBoxes/container_standard_b_1200x240x240.tscn
+                // // scenes/props/StorageBoxes/pallet_benne_120x80x100.tscn
+                // // scenes/props/StorageBoxes/pallet_crate_120x80x100.tscn
+                // // scenes/props/StorageBoxes/pallet_liquid_120x80x100.tscn
 
-                // generate the boxes
-                let mut boxes_counter = 0;
-                for row in 0..17 {
-                    if row == 7 || row == 8 || row == 9 {
-                        continue;
-                    }
-                    let storage_config = randomize_storage_warehouse();
-                    let row_offset = row as f32 * 3.0;
+                // // generate the boxes
+                // let mut boxes_counter = 0;
+                // for row in 0..17 {
+                //     if row == 7 || row == 8 || row == 9 {
+                //         continue;
+                //     }
+                //     let storage_config = randomize_storage_warehouse();
+                //     let row_offset = row as f32 * 3.0;
 
-                    info!("🔧 DyingstarPropsPlugin: Generated storage configuration: {:?}", storage_config.storage_type);
-                    info!("🔧 DyingstarPropsPlugin: Number of items to spawn: {}", storage_config.items.len());
+                //     info!("🔧 DyingstarPropsPlugin: Generated storage configuration: {:?}", storage_config.storage_type);
+                //     info!("🔧 DyingstarPropsPlugin: Number of items to spawn: {}", storage_config.items.len());
                     
-                    // Base position for the storage warehouse
-                    let base_x = -16.675;
-                    let base_y = 0.0;
-                    let base_z = -26.06 + row_offset;
+                //     // Base position for the storage warehouse
+                //     let base_x = -16.675;
+                //     let base_y = 0.0;
+                //     let base_z = -26.06 + row_offset;
                     
-                    // Spawn each item in the storage configuration
-                    for item in storage_config.items {
-                        let item_uuid = Uuid::new_v4().to_string();
-                        let scene_path = get_item_scene_path(storage_config.storage_type, &item.item_type);
+                //     // Spawn each item in the storage configuration
+                //     for item in storage_config.items {
+                //         let item_uuid = Uuid::new_v4().to_string();
+                //         let scene_path = get_item_scene_path(storage_config.storage_type, &item.item_type);
                         
-                        // Calculate position based on storage type and item position
-                        let (pos_x, pos_y, pos_z) = match storage_config.storage_type {
-                            StorageType::Container => {
-                                // Linear positioning for containers
-                                // Spacing: 13 units between containers
-                                // size = 1200x240x240
-                                let y_offset = item.position.2 as f32 * 2.4;
-                                (6.0 + base_x, base_y + y_offset, 1.5 + base_z)
-                            }
-                            StorageType::Pallet => {
-                                // Grid positioning for pallets
-                                // line (depth), column (width), height
-                                // size = 120x80x100
-                                let line_spacing = 1.4; // 10 lines with spacing
-                                let column_spacing = 1.0; // 3 columns with spacing
-                                let height_spacing = 1.0; // vertical stacking
+                //         // Calculate position based on storage type and item position
+                //         let (pos_x, pos_y, pos_z) = match storage_config.storage_type {
+                //             StorageType::Container => {
+                //                 // Linear positioning for containers
+                //                 // Spacing: 13 units between containers
+                //                 // size = 1200x240x240
+                //                 let y_offset = item.position.2 as f32 * 2.4;
+                //                 (6.0 + base_x, base_y + y_offset, 1.5 + base_z)
+                //             }
+                //             StorageType::Pallet => {
+                //                 // Grid positioning for pallets
+                //                 // line (depth), column (width), height
+                //                 // size = 120x80x100
+                //                 let line_spacing = 1.4; // 10 lines with spacing
+                //                 let column_spacing = 1.0; // 3 columns with spacing
+                //                 let height_spacing = 1.0; // vertical stacking
 
-                                let x_offset = item.position.0 as f32 * line_spacing;
-                                let z_offset = item.position.1 as f32 * column_spacing;
-                                let y_offset = item.position.2 as f32 * height_spacing;
+                //                 let x_offset = item.position.0 as f32 * line_spacing;
+                //                 let z_offset = item.position.1 as f32 * column_spacing;
+                //                 let y_offset = item.position.2 as f32 * height_spacing;
                                 
-                                (0.6 + base_x + x_offset, base_y + y_offset, 0.5 + base_z + z_offset)
-                            }
-                        };
+                //                 (0.6 + base_x + x_offset, base_y + y_offset, 0.5 + base_z + z_offset)
+                //             }
+                //         };
                         
-                        // Spawn the item
-                        // TODO with gorc position problem, we not parent to storagewarehouse but to the planet directly
-                        let message = &serde_json::json!({
-                            "object_type": "box",
-                            "object_uuid": item_uuid,
-                            "object_data": {
-                                "name": format!("storage_{}_{}", 
-                                    match storage_config.storage_type {
-                                        StorageType::Container => "container",
-                                        StorageType::Pallet => "pallet",
-                                    },
-                                    item.item_type
-                                ),
-                                // "parent_id": storagewarehouse_uuid,
-                                "parent_id": storagewarehouse_uuid,
-                                "scenename": scene_path,
-                                "position": {"x": pos_x, "y": pos_y, "z": pos_z},
-                                "rotation": {"x": 0.0, "y": 0.0, "z": 0.0},
-                                "led_state": false,
-                                "weight": 10.0,
-                            }
-                        });
-                        boxes_counter += 1;
-                        context.events().emit_plugin("genericprops", "create_object", message).await.map_err(|e| PluginError::ExecutionError(format!("failed to emit plugin event: {}", e)))?;
-                    }
-                }
+                //         // Spawn the item
+                //         // TODO with gorc position problem, we not parent to storagewarehouse but to the planet directly
+                //         let message = &serde_json::json!({
+                //             "object_type": "box",
+                //             "object_uuid": item_uuid,
+                //             "object_data": {
+                //                 "name": format!("storage_{}_{}", 
+                //                     match storage_config.storage_type {
+                //                         StorageType::Container => "container",
+                //                         StorageType::Pallet => "pallet",
+                //                     },
+                //                     item.item_type
+                //                 ),
+                //                 // "parent_id": storagewarehouse_uuid,
+                //                 "parent_id": storagewarehouse_uuid,
+                //                 "scenename": scene_path,
+                //                 "position": {"x": pos_x, "y": pos_y, "z": pos_z},
+                //                 "rotation": {"x": 0.0, "y": 0.0, "z": 0.0},
+                //                 "led_state": false,
+                //                 "weight": 10.0,
+                //             }
+                //         });
+                //         boxes_counter += 1;
+                //         context.events().emit_plugin("genericprops", "create_object", message).await.map_err(|e| PluginError::ExecutionError(format!("failed to emit plugin event: {}", e)))?;
+                //     }
+                // }
                 
-                info!("🔧 DyingstarPropsPlugin: ✅ Storage warehouse items ({} boxes) spawned successfully!", boxes_counter);
+                // info!("🔧 DyingstarPropsPlugin: ✅ Storage warehouse items ({} boxes) spawned successfully!", boxes_counter);
 
                 Ok(())
             }.await;

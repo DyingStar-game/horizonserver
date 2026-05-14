@@ -37,6 +37,7 @@ COPY .docker/plugins.toml /app/plugins.toml
 
 # Props data
 COPY ds_genericprops/props /app/props
+COPY ds_genericprops/startup_items.json /app/startup_items.json
 
 # Server binary
 COPY --from=builder /horizon /app/server

@@ -32,3 +32,35 @@ resources_dynamic_address = "service-resourcesdynamic:9200"
 
 [ds_audio]
 log_level = "info"
+
+# ============================================================================
+# ds_bridge — WebSocket bridge to external services
+# Each service entry defines a WS server to connect to and which Horizon events
+# to subscribe and forward. Events received from the service are re-emitted
+# back into the Horizon event system.
+#
+# subscribe key format:
+#   "core:<event_name>"             — subscribe to a core Horizon event
+#   "plugin:<plugin_name>:<event>"  — subscribe to a plugin-to-plugin event
+# ============================================================================
+[ds_bridge]
+log_level = "debug"
+
+# Example service: uncomment and configure as needed
+# [[ds_bridge.services]]
+# name = "scoring"
+# url = "ws://scoring-service:8080"
+# subscribe = [
+#     "core:player_connected",
+#     "core:player_disconnected",
+#     "plugin:ds_player_authentication:player_authenticated",
+# ]
+
+[[ds_bridge.services]]
+name = "persistence"
+url = "ws://service-persistence:9100/ws"
+subscribe = [
+    "plugin:genericprops:create_object",
+    "plugin:genericprops:create_object_from_gameserver",
+    "plugin:bridge_persistence:get_all_items"
+]

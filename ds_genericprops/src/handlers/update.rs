@@ -132,7 +132,8 @@ pub fn handle_object_update(
 		props: Arc<DashMap<String, GorcObjectId>>,
 		events: Arc<EventSystem>,
 		event: serde_json::Value,
-		handle: luminal::Handle
+		handle: luminal::Handle,
+		send_to_server_godot: bool,
 	) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 		// Parse request first
 		debug!("🎮 GenericPropsPlugin: Handling object update event {:?}", event);
@@ -242,6 +243,14 @@ pub fn handle_object_update(
 			} else {
 				error!("🎮 GORC: ❌ Unknown props uuid in request (not in props map and not a valid GORC ID): {}", req_data.object_uuid);
 			}
+
+			if send_to_server_godot {
+				// Forward the update event to the game server plugin 
+				if let Err(e) = events.emit_plugin("gameserverplugin", "update_prop", &req_data).await {
+					error!("🎮 GORC: ❌ Failed to emit plugin event: {}", e);
+				}
+			}
 		});
+
 		Ok(())
 	}

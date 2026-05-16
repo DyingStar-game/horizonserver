@@ -571,13 +571,6 @@ impl GenericPropsPlugin {
             let handle_for_create = handle_items_end.clone();
 
             handle_items_end.spawn(async move {
-                if event.total_items > 0 {
-                    // Items already loaded from persistence — nothing to do.
-                    return Ok::<(), PluginError>(());
-                }
-
-                info!("plugin genericprops (items_end): no persisted items, loading startup_items.json");
-
                 // Locate startup_items.json relative to the working directory.
                 let json_paths = ["ds_genericprops/startup_items.json", "startup_items.json"];
                 let raw = json_paths.iter()
@@ -587,7 +580,7 @@ impl GenericPropsPlugin {
                     Some(r) => r,
                     None => {
                         error!("plugin genericprops: startup_items.json not found");
-                        return Ok(());
+                        return Ok::<(), PluginError>(());
                     }
                 };
 
@@ -595,9 +588,27 @@ impl GenericPropsPlugin {
                     Ok(v) => v,
                     Err(e) => {
                         error!("plugin genericprops: failed to parse startup_items.json: {}", e);
-                        return Ok(());
+                        return Ok::<(), PluginError>(());
                     }
                 };
+
+                // Check if startup items have already been imported by testing the first
+                // item that carries a non-null UUID against the live GORC instance registry.
+                if let Some(first_with_uuid) = items.iter().find(|item| {
+                    item["object_uuid"].as_str().map_or(false, |s| !s.is_empty())
+                }) {
+                    if let Some(uuid_str) = first_with_uuid["object_uuid"].as_str() {
+                        if let Ok(gorc_id) = GorcObjectId::from_str(uuid_str) {
+                            if gorc_instances.get_object(gorc_id).await.is_some() {
+                                debug!(
+                                    "plugin genericprops (items_end): startup items already imported (found UUID {}), skipping",
+                                    uuid_str
+                                );
+                                return Ok::<(), PluginError>(());
+                            }
+                        }
+                    }
+                }
 
                 // Build planet name→uuid map from already-registered GORC objects (planets
                 // loaded from persistence in a previous run will be found here).
@@ -653,20 +664,16 @@ impl GenericPropsPlugin {
                         "plugin genericprops (items_end): creating object {:?}",
                         item["object_uuid"]
                     );
-                    if let Err(e) = create::handle_object_create(
-                        definitions.clone(),
-                        props.clone(),
-                        events.clone(),
-                        item,
-                        handle_for_create.clone(),
-                        false,
-                        queue_objects_create.clone(),
-                    ) {
+                    events.emit_plugin(
+                        "genericprops",
+                        "create_object",
+                        &item,
+                    ).await.unwrap_or_else(|e| {
                         error!(
-                            "plugin genericprops (items_end): failed to create object: {}",
+                            "plugin genericprops (items_end): failed to emit create_object event: {}",
                             e
                         );
-                    }
+                    });
                 }
 
                 Ok(())

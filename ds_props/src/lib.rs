@@ -26,7 +26,6 @@ pub struct NewPlayerDataObjectData {
     pub name: String,
     pub position: Vec3,
     pub rotation: Vec3,
-    pub connection_id: PlayerId,
     pub spawn_point: i8,
 }
 
@@ -121,7 +120,7 @@ impl SimplePlugin for DyingstarPropsPlugin {
             let planets = planets_clone.clone();
             runtime.spawn(async move {
                 println!("PROP Receive new player: {:?}", event);
-                info!("🔧 DyingstarPropsPlugin: ✅ New player connected: {} ({})", event.object_data.name, event.object_data.connection_id);
+                info!("🔧 DyingstarPropsPlugin: ✅ New player connected: {} ({})", event.object_data.name, event.object_uuid);
 
                 // TODO get player from persistence service
                 
@@ -196,7 +195,6 @@ impl SimplePlugin for DyingstarPropsPlugin {
                             "name": player.name,
                             "position": player.position,
                             "rotation": player.rotation,
-                            "connection_id": event.object_data.connection_id,
                             "parent_id": parent_uuid,
                             // "parent_id": "65345350-5a40-4f44-a3c1-0ca5641cb97a", // Tarsis 5
                             // "parent_id": "c27c3d25-cdeb-4fef-a794-30f684fd8f67", // tarsis_5_2

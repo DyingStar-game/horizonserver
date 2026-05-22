@@ -1,32 +1,264 @@
 [
     {
+        "object_type": "city",
+        "object_uuid": "ed20bda3-f6f3-4053-b9de-968f73ebc44c",
+        "object_data": {
+            "name": "city",
+            "parent_id": "_planet_SandBox",
+            "scenename": "scenes/props/city/sandbox_capital.tscn",
+            "position": {"x": 0.0, "y": 2200667.0, "z": 0.0},
+            "rotation": {"x": 0.0, "y": 1.0, "z": 0.0}
+        }
+    },
+    {
         "object_type": "box",
         "object_uuid": null,
         "object_data": {
             "name": "box50cm_test1",
-            "parent_id": "_planet_SandBox",
+            "parent_id": "ed20bda3-f6f3-4053-b9de-968f73ebc44c",
             "scenename": "scenes/props/testbox/box_50cm.tscn",
-            "position": {"x": -2122000.0, "y": 0.0, "z": 0.0},
+            "position": {"x": -30.0, "y": 0.0, "z": 0.0},
             "rotation": {"x": 0.0, "y": 0.0, "z": 0.0}
         }
     },
     {
-        "object_type": "building",
+        "object_type": "spawnbuilding",
         "object_uuid": "0aae4c9b-1ad1-43ef-831a-464be950eac1",
         "object_data": {
-            "name": "tarsis_4-0001",
-            "parent_id": "_planet_SandBox",
+            "name": "tarsis_4-1001",
+            "parent_id": "ed20bda3-f6f3-4053-b9de-968f73ebc44c",
             "scenename": "scenes/_universe/structures/buildings/spawn_building.tscn",
-            "position": {"x": 1351261.67, "y": -1520634.86, "z": -593469.87},
+            "position": {"x": 0.0, "y": 0.0, "z": 0.0},
+            "rotation": {"x": 0.0, "y": -1.5708, "z": 0.0},
+            "x_spacing": -5.16,
+            "z_spacing": 3.16,
+            "y_spacing": 3.25,
+            "total": 12,
+            "available": 12,
+            "cols": 6,
+            "rows": 2,
+            "floors": 1,
+            "apartments": []
+        }
+    },
+    {
+        "object_type": "spawnbuilding",
+        "object_uuid": "00f45b10-e27b-4752-8437-726f68729ea7",
+        "object_data": {
+            "name": "tarsis_4-1002",
+            "parent_id": "ed20bda3-f6f3-4053-b9de-968f73ebc44c",
+            "scenename": "scenes/_universe/structures/buildings/spawn_building.tscn",
+            "position": {"x": 0.0, "y": 0.0, "z": -18.32},
+            "rotation": {"x": 0.0, "y": -1.5708, "z": 0.0},
+            "x_spacing": -5.16,
+            "z_spacing": 3.16,
+            "y_spacing": 3.25,
+            "total": 12,
+            "available": 12,
+            "cols": 6,
+            "rows": 2,
+            "floors": 1,
+            "apartments": []
+        }
+    },
+    {
+        "object_type": "spawnbuilding",
+        "object_uuid": "d5f61e79-c810-42dd-a850-cf33a674795d",
+        "object_data": {
+            "name": "tarsis_4-1003",
+            "parent_id": "ed20bda3-f6f3-4053-b9de-968f73ebc44c",
+            "scenename": "scenes/_universe/structures/buildings/spawn_building.tscn",
+            "position": {"x": 0.0, "y": 0.0, "z": -36.64},
+            "rotation": {"x": 0.0, "y": -1.5708, "z": 0.0},
+            "x_spacing": -5.16,
+            "z_spacing": 3.16,
+            "y_spacing": 3.25,
+            "total": 6,
+            "available": 6,
+            "cols": 6,
+            "rows": 1,
+            "floors": 1,
+            "apartments": []
+        }
+    },
+    {
+        "object_type": "spawnbuilding",
+        "object_uuid": "67c4879b-d140-4f91-8bb6-4352e1e64eac",
+        "object_data": {
+            "name": "tarsis_4-1004",
+            "parent_id": "ed20bda3-f6f3-4053-b9de-968f73ebc44c",
+            "scenename": "scenes/_universe/structures/buildings/spawn_building.tscn",
+            "position": {"x": 0.0, "y": 0.0, "z": 46.32},
+            "rotation": {"x": 0.0, "y": -1.5708, "z": 0.0},
+            "x_spacing": -5.16,
+            "z_spacing": 3.16,
+            "y_spacing": 3.25,
+            "total": 12,
+            "available": 12,
+            "cols": 6,
+            "rows": 2,
+            "floors": 1,
+            "apartments": []
+        }
+    },
+    {
+        "object_type": "spawnbuilding",
+        "object_uuid": "b5bf600a-3634-4069-9db0-c2de2ce3fbbd",
+        "object_data": {
+            "name": "tarsis_4-1005",
+            "parent_id": "ed20bda3-f6f3-4053-b9de-968f73ebc44c",
+            "scenename": "scenes/_universe/structures/buildings/spawn_building.tscn",
+            "position": {"x": 0.0, "y": 0.0, "z": 59.48},
+            "rotation": {"x": 0.0, "y": -1.5708, "z": 0.0},
+            "x_spacing": -5.16,
+            "z_spacing": 3.16,
+            "y_spacing": 3.25,
+            "total": 6,
+            "available": 6,
+            "cols": 6,
+            "rows": 1,
+            "floors": 1,
+            "apartments": []
+        }
+    },
+    {
+        "object_type": "spawnbuilding",
+        "object_uuid": "f845c6ae-3fc1-4892-9a92-4012de49775f",
+        "object_data": {
+            "name": "tarsis_4-1006",
+            "parent_id": "ed20bda3-f6f3-4053-b9de-968f73ebc44c",
+            "scenename": "scenes/_universe/structures/buildings/spawn_building.tscn",
+            "position": {"x": -26.96, "y": 0.0, "z": -10.32},
             "rotation": {"x": 0.0, "y": 0.0, "z": 0.0},
-            "apartments": {
-                "total": 60,
-                "available": 60,
-                "side_number": 10,
-                "sides": 2,
-                "floors_number": 3,
-                "apartments": []
-            }
+            "x_spacing": -5.16,
+            "z_spacing": 3.16,
+            "y_spacing": 3.25,
+            "total": 36,
+            "available": 36,
+            "cols": 18,
+            "rows": 2,
+            "floors": 1,
+            "apartments": []
+        }
+    },
+    {
+        "object_type": "spawnbuilding",
+        "object_uuid": "c266a55a-a704-4cbe-b402-84d49c05059d",
+        "object_data": {
+            "name": "tarsis_4-1007",
+            "parent_id": "ed20bda3-f6f3-4053-b9de-968f73ebc44c",
+            "scenename": "scenes/_universe/structures/buildings/spawn_building.tscn",
+            "position": {"x": -26.96, "y": 0.0, "z": -43.60},
+            "rotation": {"x": 0.0, "y": 0.0, "z": 0.0},
+            "x_spacing": -5.16,
+            "z_spacing": 3.16,
+            "y_spacing": 3.25,
+            "total": 16,
+            "available": 16,
+            "cols": 8,
+            "rows": 2,
+            "floors": 1,
+            "apartments": []
+        }
+    },
+    {
+        "object_type": "spawnbuilding",
+        "object_uuid": "663b6d8e-2874-4ad3-84a5-1b75e9a51624",
+        "object_data": {
+            "name": "tarsis_4-1008",
+            "parent_id": "ed20bda3-f6f3-4053-b9de-968f73ebc44c",
+            "scenename": "scenes/_universe/structures/buildings/spawn_building.tscn",
+            "position": {"x": 18.32, "y": 0.0, "z": 36.0},
+            "rotation": {"x": 0.0, "y": 0.0, "z": 0.0},
+            "x_spacing": -5.16,
+            "z_spacing": 3.16,
+            "y_spacing": 3.25,
+            "total": 16,
+            "available": 16,
+            "cols": 8,
+            "rows": 2,
+            "floors": 1,
+            "apartments": []
+        }
+    },
+    {
+        "object_type": "spawnbuilding",
+        "object_uuid": "447ad671-11af-4f97-bee0-5bb8b710c5b5",
+        "object_data": {
+            "name": "tarsis_4-1009",
+            "parent_id": "ed20bda3-f6f3-4053-b9de-968f73ebc44c",
+            "scenename": "scenes/_universe/structures/buildings/spawn_building.tscn",
+            "position": {"x": 18.32, "y": 0.0, "z": 9.04},
+            "rotation": {"x": 0.0, "y": 0.0, "z": 0.0},
+            "x_spacing": -5.16,
+            "z_spacing": 3.16,
+            "y_spacing": 3.25,
+            "total": 12,
+            "available": 12,
+            "cols": 6,
+            "rows": 2,
+            "floors": 1,
+            "apartments": []
+        }
+    },
+    {
+        "object_type": "spawnbuilding",
+        "object_uuid": "bb51e4d5-142d-4738-8a83-b3e7f9f564d0",
+        "object_data": {
+            "name": "tarsis_4-1010",
+            "parent_id": "ed20bda3-f6f3-4053-b9de-968f73ebc44c",
+            "scenename": "scenes/_universe/structures/buildings/spawn_building.tscn",
+            "position": {"x": 18.32, "y": 0.0, "z": -27.4},
+            "rotation": {"x": 0.0, "y": 0.0, "z": 0.0},
+            "x_spacing": -5.16,
+            "z_spacing": 3.16,
+            "y_spacing": 3.25,
+            "total": 18,
+            "available": 18,
+            "cols": 9,
+            "rows": 2,
+            "floors": 1,
+            "apartments": []
+        }
+    },
+    {
+        "object_type": "spawnbuilding",
+        "object_uuid": "c36aa9f8-9df5-4001-b6f7-6e03679fe550",
+        "object_data": {
+            "name": "tarsis_4-1011",
+            "parent_id": "ed20bda3-f6f3-4053-b9de-968f73ebc44c",
+            "scenename": "scenes/_universe/structures/buildings/spawn_building.tscn",
+            "position": {"x": 18.32, "y": 0.0, "z": -43.2},
+            "rotation": {"x": 0.0, "y": 0.0, "z": 0.0},
+            "x_spacing": -5.16,
+            "z_spacing": 3.16,
+            "y_spacing": 3.25,
+            "total": 4,
+            "available": 4,
+            "cols": 2,
+            "rows": 2,
+            "floors": 1,
+            "apartments": []
+        }
+    },
+    {
+        "object_type": "spawnbuilding",
+        "object_uuid": "5c45fad6-c9ae-42ee-aa7b-20dbdfc7b28d",
+        "object_data": {
+            "name": "tarsis_4-2001",
+            "parent_id": "ed20bda3-f6f3-4053-b9de-968f73ebc44c",
+            "scenename": "scenes/_universe/structures/buildings/spawn_building_002.tscn",
+            "position": {"x": 60.0, "y": 0.0, "z": 24.0},
+            "rotation": {"x": 0.0, "y": 0.49, "z": 0.0},
+            "x_spacing": -8.15,
+            "z_spacing": 11.41,
+            "y_spacing": 4.05,
+            "total": 5,
+            "available": 5,
+            "cols": 5,
+            "rows": 1,
+            "floors": 1,
+            "apartments": []
         }
     },
     {

@@ -4,6 +4,7 @@ use horizon_event_system::{
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::{info, debug};
 
 pub mod handlers;
@@ -62,6 +63,7 @@ pub struct PlayerSession {
 /// This design allows you to swap authentication providers without touching game logic
 pub struct DsPlayerAuthenticationPlugin {
     name: String,
+    server_state_ok: Arc<AtomicBool>,
     // event_system: Arc<EventSystem>,
     // auth_service: ExternalAuthService,
     // database_pool: sqlx::PgPool, // Your existing database connection    
@@ -72,6 +74,7 @@ impl DsPlayerAuthenticationPlugin {
         info!("🔧 DsPlayerAuthenticationPlugin: Creating new instance");
         Self {
             name: "ds_player_authentication".to_string(),
+            server_state_ok: Arc::new(AtomicBool::new(false)),
             // event_system: Arc<EventSystem>, 
             // auth_service: ExternalAuthService{base_url: "https://toto".to_string(), api_key: "xxxx".to_string(), client: reqwest::Client::new()},
             // database_pool: sqlx::PgPool
@@ -98,12 +101,15 @@ impl SimplePlugin for DsPlayerAuthenticationPlugin {
         
         let events_system = events.clone();
         let tokio_handle = context.tokio_handle();
+        let server_state_ok_init = Arc::clone(&self.server_state_ok);
+        let server_state_ok_ready = Arc::clone(&self.server_state_ok);
 
         events.on_client("player", "init", move |event: authentication::PlayerInit, player_id: PlayerId, connection: ClientConnectionRef| {
             debug!("plugin auth: Receive player init message {:?}", event);
 
             let events = events_system.clone();
             let event = event.clone();
+            let server_state_ok = Arc::clone(&server_state_ok_init);
 
             tokio_handle.spawn(async move {
                 let _ = authentication::handle_player_init(
@@ -111,6 +117,7 @@ impl SimplePlugin for DsPlayerAuthenticationPlugin {
                     player_id,
                     connection,
                     events,
+                    server_state_ok,
                 ).await;
             });
 
@@ -118,6 +125,14 @@ impl SimplePlugin for DsPlayerAuthenticationPlugin {
         }).await
         .map_err(|e| PluginError::ExecutionError(e.to_string()))?;
         
+        events.on_plugin("playerauthenticationPlugin", "server_ready", move |event: serde_json::Value| {
+            debug!("plugin auth: Receive server_ready message {:?}", event);
+            server_state_ok_ready.store(true, Ordering::Relaxed);
+            info!("🔧 DsPlayerAuthenticationPlugin: server is ready, accepting player connections");
+            Ok(())
+        }).await
+        .map_err(|e| PluginError::ExecutionError(e.to_string()))?;
+
         info!("🔧 DsPlayerAuthenticationPlugin: ✅ All handlers registered successfully!");
         Ok(())
     }

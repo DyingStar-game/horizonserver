@@ -11,7 +11,8 @@
 				"action",
 				"scenename",
 				"name",
-				"parent_id"
+				"parent_id",
+				"spawn_appartment_id"
 			]
 		}
 	]

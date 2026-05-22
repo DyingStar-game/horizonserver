@@ -62,5 +62,6 @@ url = "ws://service-persistence:9100/ws"
 subscribe = [
     "plugin:genericprops:create_object",
     "plugin:genericprops:create_object_from_gameserver",
-    "plugin:bridge_persistence:get_all_items"
+    "plugin:bridge_persistence:get_all_items",
+    "plugin:bridge_persistence:player_spawn",
 ]

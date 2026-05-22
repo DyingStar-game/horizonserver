@@ -527,6 +527,26 @@ impl Server {
         }).await
         .map_err(|e| PluginError::ExecutionError(e.to_string()))?;
 
+        let tokio_handle_check_started = context.clone().tokio_handle();
+        let events_check_started = events.clone();
+        let server_uuid_check_started = self.uuid.clone();
+        events.on_plugin("gameserverplugin", "check_server_started", move |event: serde_json::Value| {
+            // This event is triggered when persistence loaded; we check the server is connected
+            // and finished starting before opening connections to players.
+            let events = events_check_started.clone();
+            let server_uuid = server_uuid_check_started.clone();
+            tokio_handle_check_started.spawn(async move {
+                if let Err(e) = events.emit_plugin("playerauthenticationPlugin", "server_ready", &serde_json::json!({
+                    "server_uuid": server_uuid,
+                })).await {
+                    error!("check_server_started: failed to emit server_ready: {}", e);
+                }
+            });
+
+            Ok(())
+        }).await
+        .map_err(|e| PluginError::ExecutionError(e.to_string()))?;
+
         Ok(())
     }
 

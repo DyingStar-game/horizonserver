@@ -604,6 +604,11 @@ impl GenericPropsPlugin {
                                     "plugin genericprops (items_end): startup items already imported (found UUID {}), skipping",
                                     uuid_str
                                 );
+                                events.emit_plugin(
+                                    "gameserver",
+                                    "check_server_started",
+                                    &json!({}),
+                                ).await.unwrap();
                                 return Ok::<(), PluginError>(());
                             }
                         }
@@ -675,6 +680,11 @@ impl GenericPropsPlugin {
                         );
                     });
                 }
+                events.emit_plugin(
+                    "gameserver",
+                    "check_server_started",
+                    &json!({}),
+                ).await.unwrap();
 
                 Ok(())
             });
@@ -683,6 +693,20 @@ impl GenericPropsPlugin {
         }).await
         .map_err(|e| PluginError::ExecutionError(e.to_string()))?;
         
+        let events_new_player = Arc::clone(&events);
+        let handle_new_player = luminal_handle.clone();
+        events.on_plugin("genericprops", "new_player", move |event: serde_json::Value| {
+            debug!("plugin genericprops (new_player): Receive new player message {:?}", event);
+            let events = Arc::clone(&events_new_player);
+            handle_new_player.spawn(async move {
+                if let Err(e) = new_player::handle_new_player(event, events).await {
+                    error!("plugin genericprops (new_player): handler error: {}", e);
+                }
+                Ok::<(), PluginError>(())
+            });
+            Ok(())
+        }).await
+        .map_err(|e| PluginError::ExecutionError(e.to_string()))?;
 
         // let gorc_instances = context.events().get_gorc_instances().unwrap();
         // let handle_out_of_zone = luminal_handle.clone();

@@ -156,7 +156,7 @@ pub fn handle_object_create(
 						if let Err(e) = events.subscribe_player_to_existing_objects(player_id, global_position).await {
 							error!("🎮 GORC: ❌ Failed to subscribe player to existing objects: {}", e);
 						} else {
-							debug!("🎮 GORC: ✅ Player {} subscribed to existing objects successfully", event["object_data"]["connection_id"]);
+							debug!("🎮 GORC: ✅ Player {} subscribed to existing objects successfully", event["object_uuid"]);
 						}
 
 						// now send player data to the game server

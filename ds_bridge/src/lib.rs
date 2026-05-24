@@ -126,7 +126,6 @@ impl SimplePlugin for DyingstarBridgePlugin {
                     Some(s) => s.clone(),
                     None => continue,
                 };
-                let runtime = self.runtime.clone();
 
                 match parts.as_slice() {
                     ["core", event_name] => {
@@ -141,7 +140,7 @@ impl SimplePlugin for DyingstarBridgePlugin {
                                     name: event_name.clone(),
                                     payload,
                                 };
-                                if let Err(e) = runtime.block_on(sender.send(envelope)) {
+                                if let Err(e) = sender.try_send(envelope) {
                                     warn!(
                                         service = %service_name,
                                         "outgoing channel full or closed: {}",
@@ -168,7 +167,7 @@ impl SimplePlugin for DyingstarBridgePlugin {
                                     name: event_name.clone(),
                                     payload,
                                 };
-                                if let Err(e) = runtime.block_on(sender.send(envelope)) {
+                                if let Err(e) = sender.try_send(envelope) {
                                     warn!(
                                         service = %service_name,
                                         "outgoing channel full or closed: {}",
@@ -278,6 +277,7 @@ async fn run_service_connection(
                                     break;
                                 }
                                 Some(Ok(Message::Text(text))) => {
+                                    info!(service = %name, "← received message from service ({} bytes)", text.len());
                                     handle_incoming(&name, text.as_str(), &events).await;
                                 }
                                 Some(Ok(Message::Close(_))) => {
@@ -308,6 +308,12 @@ async fn run_service_connection(
                                 Some(env) => {
                                     match serde_json::to_string(&env) {
                                         Ok(text) => {
+                                            info!(
+                                                service = %name,
+                                                event = %env.name,
+                                                namespace = ?env.namespace,
+                                                "→ forwarding event to service"
+                                            );
                                             if let Err(e) = sink.send(Message::Text(text.into())).await {
                                                 error!(service = %name, "WebSocket write error: {}", e);
                                                 // Re-queue is not possible once sink is broken;
@@ -352,6 +358,14 @@ async fn handle_incoming(service_name: &str, text: &str, events: &Arc<EventSyste
         }
     };
 
+    info!(
+        service = %service_name,
+        event_type = %envelope.event_type,
+        namespace = ?envelope.namespace,
+        event = %envelope.name,
+        "← re-emitting event from service into Horizon"
+    );
+
     let result = match envelope.event_type.as_str() {
         "core" => {
             events.emit_core(&envelope.name, &envelope.payload).await
@@ -378,10 +392,10 @@ async fn handle_incoming(service_name: &str, text: &str, events: &Arc<EventSyste
             e
         );
     } else {
-        debug!(
+        info!(
             service = %service_name,
             event = %envelope.name,
-            "re-emitted incoming event"
+            "re-emitted incoming event successfully"
         );
     }
 }

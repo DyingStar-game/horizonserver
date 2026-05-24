@@ -527,26 +527,6 @@ impl Server {
         }).await
         .map_err(|e| PluginError::ExecutionError(e.to_string()))?;
 
-        let tokio_handle_check_started = context.clone().tokio_handle();
-        let events_check_started = events.clone();
-        let server_uuid_check_started = self.uuid.clone();
-        events.on_plugin("gameserverplugin", "check_server_started", move |event: serde_json::Value| {
-            // This event is triggered when persistence loaded; we check the server is connected
-            // and finished starting before opening connections to players.
-            let events = events_check_started.clone();
-            let server_uuid = server_uuid_check_started.clone();
-            tokio_handle_check_started.spawn(async move {
-                if let Err(e) = events.emit_plugin("playerauthenticationPlugin", "server_ready", &serde_json::json!({
-                    "server_uuid": server_uuid,
-                })).await {
-                    error!("check_server_started: failed to emit server_ready: {}", e);
-                }
-            });
-
-            Ok(())
-        }).await
-        .map_err(|e| PluginError::ExecutionError(e.to_string()))?;
-
         Ok(())
     }
 
@@ -559,17 +539,27 @@ impl Server {
         Ok(())
     }
 
-    pub fn disconnect(&mut self) {
+    pub fn disconnect(&mut self, context: Arc<dyn ServerContext>) {
         self.state = ServerState::Offline;
         let mut sender_lock = self.websocket_sender.lock().unwrap();
         let mut receiver_lock = self.websocket_receiver.lock().unwrap();
         *sender_lock = None;
         *receiver_lock = None;
+
+        let server_uuid = self.uuid.clone();
+        let events = context.events();
+        context.tokio_handle().spawn(async move {
+            if let Err(e) = events.emit_plugin("ds_game_server", "server_unregistered", &serde_json::json!({
+                "server_uuid": server_uuid,
+            })).await {
+                error!("disconnect: failed to emit server_unregistered: {}", e);
+            }
+        });
     }
 
 
     /// Start the server with zone and items
-    pub fn start(&mut self, zone: Zone) {
+    pub fn start(&mut self, zone: Zone, context: Arc<dyn ServerContext>) {
         self.state = ServerState::Starting;
         *self.zone.write().unwrap() = zone;
 
@@ -604,6 +594,15 @@ impl Server {
                 return;
             } else {
                 debug!("[send_zone] Message sent successfully");
+                let server_uuid = self.uuid.clone();
+                let events = context.events();
+                context.tokio_handle().spawn(async move {
+                    if let Err(e) = events.emit_plugin("ds_game_server", "server_registered", &serde_json::json!({
+                        "server_uuid": server_uuid,
+                    })).await {
+                        error!("start: failed to emit server_registered: {}", e);
+                    }
+                });
             }
         }
 

@@ -79,7 +79,7 @@ impl ServerManager {
         // get all properties stored in genericprops plugin (how??)
     
         // TODO add the zone + items
-        server.start(zone);
+        server.start(zone, context.clone());
     
         // the server is connected
     

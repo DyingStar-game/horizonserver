@@ -24,7 +24,8 @@
 			"distance": 10001.0,
 			"frequency": 3.0,
 			"properties": [
-				"scenename"
+				"scenename",
+				"name"
 			]
 		}
 	]

@@ -217,6 +217,12 @@ async fn run_service_connection(
     mut rx: mpsc::Receiver<BridgeEventEnvelope>,
     events: Arc<EventSystem>,
 ) {
+    // Only flips to true after the first *successful* connection completes.
+    // Failed connect_async attempts do not change it, so a service that is
+    // unreachable at Horizon startup still receives is_reconnection: false
+    // on its first real handshake.
+    let mut is_reconnection = false;
+
     loop {
         info!(service = %name, "connecting to {}", url);
         match connect_async(&url).await {
@@ -226,6 +232,34 @@ async fn run_service_connection(
             Ok((ws_stream, _)) => {
                 info!(service = %name, "connected");
                 let (mut sink, mut stream) = ws_stream.split();
+
+                // ── Handshake ─────────────────────────────────────────────────
+                // Tell the external service whether Horizon just started fresh
+                // (is_reconnection: false) or is recovering a lost session
+                // (is_reconnection: true). Sent before any event traffic.
+                let handshake = BridgeEventEnvelope {
+                    event_type: "bridge".to_string(),
+                    namespace: None,
+                    name: "connected".to_string(),
+                    payload: json!({ "is_reconnection": is_reconnection }),
+                };
+                match serde_json::to_string(&handshake) {
+                    Ok(text) => {
+                        if let Err(e) = sink.send(Message::Text(text.into())).await {
+                            error!(service = %name, "failed to send connection handshake: {}", e);
+                            tokio::time::sleep(RECONNECT_DELAY).await;
+                            continue;
+                        }
+                        debug!(service = %name, is_reconnection, "sent connection handshake");
+                    }
+                    Err(e) => {
+                        error!(service = %name, "failed to serialise connection handshake: {}", e);
+                    }
+                }
+                // All future connections for this service are reconnections.
+                is_reconnection = true;
+                // ─────────────────────────────────────────────────────────────
+
                 let mut closed = false;
 
                 loop {

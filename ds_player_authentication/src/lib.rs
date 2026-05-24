@@ -19,45 +19,6 @@ pub struct PlayerSession {
     pub player_id: PlayerId,
 }
 
-/// External authentication service client
-/// This represents integration with your existing account system
-// pub struct ExternalAuthService {
-//     base_url: String,
-//     api_key: String,
-//     client: reqwest::Client,
-// }
-
-// #[derive(Serialize)]
-// struct AuthValidationRequest {
-//     token: String,
-//     game_id: String,
-// }
-
-// #[derive(Debug, Clone, Serialize, Deserialize)]
-// struct LoginRequestEvent {
-//     pub username: String,
-//     pub password_hash: String,
-// }
-
-
-// #[derive(Deserialize)]
-// struct AuthValidationResponse {
-//     valid: bool,
-//     player_id: Option<String>,
-//     permissions: Vec<String>,
-//     expires_at: u64,
-// }
-
-// impl ExternalAuthService {
-//     pub fn new(base_url: String, api_key: String) -> Self {
-//         Self {
-//             base_url,
-//             api_key,
-//             client: reqwest::Client::new(),
-//         }
-//     }
-// }
-
 /// DsPlayerAuthentication Plugin
 /// Authentication plugin that handles integration with external services
 /// This design allows you to swap authentication providers without touching game logic
@@ -125,8 +86,8 @@ impl SimplePlugin for DsPlayerAuthenticationPlugin {
         }).await
         .map_err(|e| PluginError::ExecutionError(e.to_string()))?;
         
-        events.on_plugin("playerauthenticationPlugin", "server_ready", move |event: serde_json::Value| {
-            debug!("plugin auth: Receive server_ready message {:?}", event);
+        events.on_plugin("ds_game_server", "server_registered", move |event: serde_json::Value| {
+            debug!("plugin auth: Receive server_registered message {:?}", event);
             server_state_ok_ready.store(true, Ordering::Relaxed);
             info!("🔧 DsPlayerAuthenticationPlugin: server is ready, accepting player connections");
             Ok(())

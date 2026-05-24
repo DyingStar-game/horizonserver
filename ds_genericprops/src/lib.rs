@@ -604,11 +604,6 @@ impl GenericPropsPlugin {
                                     "plugin genericprops (items_end): startup items already imported (found UUID {}), skipping",
                                     uuid_str
                                 );
-                                events.emit_plugin(
-                                    "gameserver",
-                                    "check_server_started",
-                                    &json!({}),
-                                ).await.unwrap();
                                 return Ok::<(), PluginError>(());
                             }
                         }
@@ -680,12 +675,6 @@ impl GenericPropsPlugin {
                         );
                     });
                 }
-                events.emit_plugin(
-                    "gameserver",
-                    "check_server_started",
-                    &json!({}),
-                ).await.unwrap();
-
                 Ok(())
             });
 

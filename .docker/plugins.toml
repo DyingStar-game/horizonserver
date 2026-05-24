@@ -65,3 +65,17 @@ subscribe = [
     "plugin:bridge_persistence:get_all_items",
     "plugin:bridge_persistence:player_spawn",
 ]
+
+# ── Monitoring service ── forwards events used for Prometheus metrics
+[[ds_bridge.services]]
+name = "monitoring"
+url = "ws://service-monitoring:9300/ws"
+subscribe = [
+    "core:player_connected",
+    "core:player_disconnected",
+    "plugin:genericprops:create_object",
+    "plugin:genericprops:create_object_from_gameserver",
+    "plugin:ds_player_authentication:player_authenticated",
+    "plugin:ds_game_server:server_registered",
+    "plugin:ds_game_server:server_unregistered",
+]

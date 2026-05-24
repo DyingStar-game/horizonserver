@@ -57,19 +57,19 @@ pub async fn handle_player_init(
     server_state_ok: Arc<AtomicBool>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
-    // if !server_state_ok.load(Ordering::Relaxed) {
-    //     warn!("Player {:?} tried to init but server is not ready yet", player_id);
-    //     let payload = serde_json::to_vec(&serde_json::json!({
-    //         "type": "error",
-    //         "code": 1338,
-    //         "message": "Server not yet ready"
-    //     }))
-    //     .expect("failed to serialize error payload");
-    //     if let Err(e) = connection.respond(&payload).await {
-    //         error!("Failed to send server-not-ready error to client: {}", e);
-    //     }
-    //     return Ok(());
-    // }
+    if !server_state_ok.load(Ordering::Relaxed) {
+        warn!("Player {:?} tried to init but server is not ready yet", player_id);
+        let payload = serde_json::to_vec(&serde_json::json!({
+            "type": "error",
+            "code": 1338,
+            "message": "Server not yet ready"
+        }))
+        .expect("failed to serialize error payload");
+        if let Err(e) = connection.respond(&payload).await {
+            error!("Failed to send server-not-ready error to client: {}", e);
+        }
+        return Ok(());
+    }
 
     // Check if authentication bypass is enabled (development/testing only).
     let bypass_auth = std::env::var("BYPASS_AUTH")

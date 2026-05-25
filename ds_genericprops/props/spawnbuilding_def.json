@@ -16,6 +16,7 @@
 				"cols",
 				"rows",
 				"floors",
+				"spawn_point",
 				"apartments"
 			]
 		},

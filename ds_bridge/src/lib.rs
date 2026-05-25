@@ -308,7 +308,7 @@ async fn run_service_connection(
                                 Some(env) => {
                                     match serde_json::to_string(&env) {
                                         Ok(text) => {
-                                            info!(
+                                            debug!(
                                                 service = %name,
                                                 event = %env.name,
                                                 namespace = ?env.namespace,

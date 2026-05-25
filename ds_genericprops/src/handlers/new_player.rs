@@ -1,6 +1,6 @@
 use std::sync::Arc;
 use horizon_event_system::EventSystem;
-use tracing::{debug, error, warn};
+use tracing::{debug, error, warn, info};
 
 use crate::genericprops::GenericProps;
 
@@ -10,11 +10,9 @@ pub async fn handle_new_player(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let player_uuid = event["object_uuid"].as_str().unwrap_or_default().to_string();
     let player_name = event["object_data"]["name"].as_str().unwrap_or_default().to_string();
-    let spawn_point = event["object_data"]["spawn_point"].as_i64().unwrap_or(0);
-
     debug!(
-        "plugin genericprops (new_player): Handling new player uuid {:?} spawn_point {}",
-        player_uuid, spawn_point
+        "plugin genericprops (new_player): Handling new player uuid {:?}",
+        player_uuid
     );
 
     let Some(gorc_instances) = events.get_gorc_instances() else {
@@ -69,6 +67,19 @@ pub async fn handle_new_player(
                     .next()
                     .unwrap_or(5.0);
 
+                let spawn_point_x = building.data.values()
+                    .filter_map(|v| v.get("spawn_point").and_then(|s| s.get("x")).and_then(|x| x.as_f64()))
+                    .next()
+                    .unwrap_or(0.0);
+                let spawn_point_y = building.data.values()
+                    .filter_map(|v| v.get("spawn_point").and_then(|s| s.get("y")).and_then(|y| y.as_f64()))
+                    .next()
+                    .unwrap_or(0.0);
+                let spawn_point_z = building.data.values()
+                    .filter_map(|v| v.get("spawn_point").and_then(|s| s.get("z")).and_then(|z| z.as_f64()))
+                    .next()
+                    .unwrap_or(0.0);
+
                 // Collect occupied (floor, row, col) tuples from the apartments list.
                 // Each entry is an object: { floor, row, col, player_uuid, player_name }.
                 let occupied: Vec<(i64, i64, i64)> = building.data.values()
@@ -90,11 +101,16 @@ pub async fn handle_new_player(
                     .find(|slot| !occupied.contains(slot));
 println!("plugin genericprops (new_player): checking slot {:?} against occupied {:?}", free_slot, occupied);
                 if let Some((floor, row, col)) = free_slot {
+                    println!("plugin genericprops (new_player): found free slot (floor={}, row={}, col={}) in building {}", floor, row, col, building.uuid);
+                    println!("plugin genericprops (new_player): building spawn_point ({}, {}, {})", spawn_point_x, spawn_point_y, spawn_point_z);
+                    let x = if col == 0 { spawn_point_x } else { x_spacing - spawn_point_x };
+                    let z = if col == 0 { spawn_point_z } else { z_spacing - spawn_point_z };
                     spawn_position = horizon_event_system::Vec3::new(
-                         col as f64 * x_spacing,
-                         floor as f64 * y_spacing,
-                         row as f64 * z_spacing,
+                         x + (col as f64 * x_spacing),
+                         spawn_point_y + (floor as f64 * y_spacing),
+                         z + (row as f64 * z_spacing),
                     );
+                    println!("plugin genericprops (new_player): calculated spawn_position {:?} for slot (floor={}, row={}, col={})", spawn_position, floor, row, col);  
 
                     debug!(
                         "plugin genericprops (new_player): assigned slot (floor={}, row={}, col={}) in building {} → position {:?}",
@@ -116,6 +132,11 @@ println!("plugin genericprops (new_player): found free slot for player {} in bui
                         "player_uuid": player_uuid,
                         "player_name": player_name,
                     }));
+                    // info with the json of the apartments vector
+                    info!(
+                        "plugin genericprops (new_player): updated apartments for building {}: {:?}",
+                        building.uuid, apartments
+                    );
                     events.emit_plugin(
                         "genericprops",
                         "update_object_from_external",

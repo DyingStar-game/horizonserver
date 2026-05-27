@@ -6,7 +6,7 @@ use ds_common::events::DSErrorMessage;
 use horizon_event_system::{
     ClientConnectionRef, EventSystem, PlayerId, Vec3
 };
-use tracing::{debug, error, warn};
+use tracing::{debug, error, info, warn};
 use serde::{Deserialize, Serialize};
 
 
@@ -84,6 +84,8 @@ pub async fn handle_player_init(
     let (player_db_id, player_name) = if bypass_auth {
         let id = Uuid::new_v4().to_string();
         let name = format!("Player_{}", &id[..8]);
+        // id = "35941259-8205-4d46-b8a1-8837306d1587".to_string();
+        // name = "ddurieux".to_string();
         (id, name)
     } else {
         // Decode the JWT payload (no signature verification — we trust the token
@@ -143,24 +145,10 @@ pub async fn handle_player_init(
         error!("Failed to emit update_player_id event: {}", e);
     }
 
-    // TODO OLD SPAWN
-    // send to gorcplugin (player plugin) the new player event
-    // if let Err(e) = events.emit_plugin("propsplugin", "new_player", &serde_json::json!({
-    //     "object_type": "player",
-    //     "object_uuid": player_db_id,
-    //     "object_data": {
-    //         "name": player_name,
-    //         "position": Vec3::new(0.0, 0.0, 0.0),
-    //         "rotation": Vec3::new(0.0, 0.0, 0.0),
-    //         "connection_id": player_db_id,  // Use the new player_db_id here
-    //         "spawn_point": event.data.spawn_point,
-    //     }
-    // })).await
-    // {
-    //     error!("Failed to emit plugin event to gorcplugin: {}", e);
-    // }
-    // END OLD SPAWN
-
+    info!(
+        "auth (player_init): emitting bridge_persistence:player_spawn for player_uuid={} player_name={}",
+        player_db_id, player_name
+    );
     if let Err(e) = events.emit_plugin("bridge_persistence", "player_spawn", &serde_json::json!({
         "object_type": "player",
         "object_uuid": player_db_id,
@@ -170,6 +158,8 @@ pub async fn handle_player_init(
     })).await
     {
         error!("Failed to emit plugin event to gorcplugin: {}", e);
+    } else {
+        info!("auth (player_init): bridge_persistence:player_spawn emitted successfully");
     }
 
     Ok(())

@@ -1,7 +1,7 @@
 use horizon_event_system::{
     EventError,
 };
-use tracing::{debug};
+use tracing::{debug, info};
 use std::sync::{Arc, Mutex};
 use std::net::TcpStream;
 use websocket::sender::Writer;
@@ -12,6 +12,14 @@ pub async fn handle_spawn_player(
     event: serde_json::Value,
     websocket: Arc<Mutex<Option<Writer<TcpStream>>>>,
 ) -> Result<(), EventError> {
+    let player_uuid = event
+        .get("object_uuid")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    info!(
+        "[spawn_player] preparing add_prop for player_uuid={} to Godot server",
+        player_uuid
+    );
     
     let message = json!({
         "namespace": "server",
@@ -37,6 +45,10 @@ pub async fn handle_spawn_player(
             return Err(EventError::HandlerExecution(format!("Message blocked: {}", e)));
         } else {
             debug!("[spawn_player] Message sent successfully");
+            info!(
+                "[spawn_player] add_prop sent to Godot server for player_uuid={}",
+                player_uuid
+            );
         }
     }
     Ok(())

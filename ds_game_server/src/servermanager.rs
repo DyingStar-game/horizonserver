@@ -236,7 +236,7 @@ impl ServerManager {
                 // uuid = server uuid
                 // for players for example
                 if let Some(split_state) = split_states.get_mut(&serverinfo.uuid) {
-                    if serverinfo.players_number > 100 {
+                    if serverinfo.players_number > 20 {
                         split_state.number_times_failed += 1;
                         // info!("Failed++");
                     } else {

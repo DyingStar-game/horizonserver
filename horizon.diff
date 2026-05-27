@@ -547,7 +547,7 @@ diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=log
      /// This provides plugins with direct access to the GORC (Game Object Replication
 diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=logs' '--exclude=*.sock' a/crates/horizon_event_system/src/gorc/instance.rs b/crates/horizon_event_system/src/gorc/instance.rs
 --- a/crates/horizon_event_system/src/gorc/instance.rs	2026-04-25 00:31:25.642041898 +0200
-+++ b/crates/horizon_event_system/src/gorc/instance.rs	2026-05-27 13:28:59.302169494 +0200
++++ b/crates/horizon_event_system/src/gorc/instance.rs	2026-05-27 13:35:13.591681316 +0200
 @@ -14,7 +14,8 @@
  use std::collections::{HashMap, HashSet};
  use std::sync::Arc;

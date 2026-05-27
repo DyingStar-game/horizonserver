@@ -306,6 +306,17 @@ async fn run_service_connection(
                                     return;
                                 }
                                 Some(env) => {
+                                    if env.namespace.as_deref() == Some("bridge_persistence") && env.name == "player_spawn" {
+                                        let object_uuid = env.payload
+                                            .get("object_uuid")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("unknown");
+                                        info!(
+                                            service = %name,
+                                            player_uuid = %object_uuid,
+                                            "bridge outgoing: forwarding bridge_persistence:player_spawn to service"
+                                        );
+                                    }
                                     match serde_json::to_string(&env) {
                                         Ok(text) => {
                                             debug!(
@@ -365,6 +376,16 @@ async fn handle_incoming(service_name: &str, text: &str, events: &Arc<EventSyste
         event = %envelope.name,
         "← re-emitting event from service into Horizon"
     );
+
+    if envelope.namespace.as_deref() == Some("genericprops")
+        && (envelope.name == "items_chunk" || envelope.name == "items_end")
+    {
+        info!(
+            service = %service_name,
+            event = %envelope.name,
+            "bridge incoming: persistence payload routed to genericprops"
+        );
+    }
 
     let result = match envelope.event_type.as_str() {
         "core" => {

@@ -15,7 +15,7 @@ servers_mode = "development"
 # Split rule (ignored in single mode). Possible values:
 #  * "fps:20"    => split when last 10 fps (get by serverinfo) is under 20 in this example (prefer this for production)
 #  * "players:3" => split when more than 3 players are connected on a server
-split_rule = "players:1"
+split_rule = "players:20"
 
 [ds_genericprops]
 log_level = "info"

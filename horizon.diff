@@ -547,7 +547,7 @@ diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=log
      /// This provides plugins with direct access to the GORC (Game Object Replication
 diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=logs' '--exclude=*.sock' a/crates/horizon_event_system/src/gorc/instance.rs b/crates/horizon_event_system/src/gorc/instance.rs
 --- a/crates/horizon_event_system/src/gorc/instance.rs	2026-04-25 00:31:25.642041898 +0200
-+++ b/crates/horizon_event_system/src/gorc/instance.rs	2026-01-28 00:01:11.395415150 +0100
++++ b/crates/horizon_event_system/src/gorc/instance.rs	2026-05-27 13:28:59.302169494 +0200
 @@ -14,7 +14,8 @@
  use std::collections::{HashMap, HashSet};
  use std::sync::Arc;
@@ -931,19 +931,25 @@ diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=log
      /// Remove a player from all subscriptions
      pub async fn remove_player(&self, player_id: PlayerId) {
          {
-@@ -632,8 +671,9 @@
+@@ -632,9 +671,14 @@
              partition.remove_player(player_id).await;
          }
  
 -        let mut objects = self.objects.write().await;
 -        for instance in objects.values_mut() {
+-            for channel in 0..4 {
 +        // Use DashMap iter_mut for lock-free mutable iteration
 +        for mut entry in self.objects.iter_mut() {
 +            let instance = entry.value_mut();
-             for channel in 0..4 {
++            // Collect all channel keys first to avoid borrow issues, then remove player from each.
++            // Previously this only looped 0..4 which missed channel 6 and any other high-numbered
++            // channels, leaving stale subscriptions that prevented re-subscription on reconnect.
++            let channels: Vec<u8> = instance.subscribers.keys().cloned().collect();
++            for channel in channels {
                  instance.remove_subscriber(channel, player_id);
              }
-@@ -642,10 +682,19 @@
+         }
+@@ -642,10 +686,19 @@
  
      /// Get an object instance by ID
      pub async fn get_object(&self, object_id: GorcObjectId) -> Option<ObjectInstance> {
@@ -967,7 +973,7 @@ diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=log
      }
  
      /// Get all objects of a specific type
-@@ -659,8 +708,8 @@
+@@ -659,8 +712,8 @@
  
      /// Update an object instance (after handlers have modified it)
      pub async fn update_object(&self, object_id: GorcObjectId, instance: ObjectInstance) {
@@ -978,7 +984,7 @@ diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=log
      }
  
      /// Find a player's GORC object by player ID (for message routing)
-@@ -677,7 +726,6 @@
+@@ -677,7 +730,6 @@
      /// Get objects within range of a position using spatial index optimization
      pub async fn get_objects_in_range(&self, position: Vec3, range: f64) -> Vec<GorcObjectId> {
          let mut result_objects = Vec::new();
@@ -986,7 +992,7 @@ diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=log
  
          // Get largest zone radius for query optimization
          let query_radius = self.get_max_zone_radius().await.max(range);
-@@ -689,10 +737,13 @@
+@@ -689,10 +741,13 @@
              query_radius
          ).await;
  
@@ -1003,7 +1009,7 @@ diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=log
                      result_objects.push(object_id);
                  }
              }
-@@ -700,20 +751,21 @@
+@@ -700,20 +755,21 @@
  
          // Fallback to direct position checking if spatial index is empty
          if result_objects.is_empty() {
@@ -1031,7 +1037,7 @@ diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=log
      }
      
      /// Find all players within radius of a position (for event-driven GORC emission)
-@@ -722,12 +774,14 @@
+@@ -722,12 +778,14 @@
          debug!("🔍 GORC: Finding players within {}m of position {:?}", radius, position);
          debug!("🔍 GORC: Total tracked players: {}", player_positions.len());
          
@@ -1049,7 +1055,7 @@ diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=log
                      debug!("  ✅ Within range");
                      Some(player_id)
                  } else {
-@@ -744,8 +798,8 @@
+@@ -744,8 +802,8 @@
      
      /// Get current object state for a specific layer/channel
      pub async fn get_object_state_for_layer(&self, object_id: GorcObjectId, channel: u8) -> Option<Vec<u8>> {
@@ -1060,7 +1066,7 @@ diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=log
              let layers = instance.object.get_layers();
              if let Some(layer) = layers.iter().find(|l| l.channel == channel) {
                  // Serialize only the properties defined for this layer
-@@ -769,8 +823,8 @@
+@@ -769,8 +827,8 @@
              return false;
          };
  
@@ -1071,7 +1077,7 @@ diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=log
              return false;
          };
  
-@@ -779,14 +833,13 @@
+@@ -779,14 +837,13 @@
  
      /// Recalculate subscriptions for a player
      async fn recalculate_player_subscriptions(&self, player_id: PlayerId, player_position: Vec3) {
@@ -1091,7 +1097,7 @@ diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=log
                  for channel in 0..4 {
                      let should_sub = instance.zone_manager.is_in_zone(player_position, channel);
                      let is_subbed = instance.is_subscribed(channel, player_id);
-@@ -823,8 +876,8 @@
+@@ -823,8 +880,8 @@
              player_positions.iter().map(|(&id, &pos)| (id, pos)).collect()
          };
  
@@ -1102,7 +1108,7 @@ diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=log
              let layers = instance.object.get_layers();
  
              for (player_id, player_pos) in player_positions {
-@@ -845,8 +898,9 @@
+@@ -845,8 +902,9 @@
                          }
                      }
  
@@ -1114,7 +1120,7 @@ diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=log
                      let is_subbed = instance.is_subscribed(channel, player_id);
  
                      if is_in_zone && layer.radius == smallest_radius {
-@@ -908,9 +962,9 @@
+@@ -908,9 +966,9 @@
  
      /// Get the maximum zone radius across all objects for spatial query optimization
      async fn get_max_zone_radius(&self) -> f64 {
@@ -1127,7 +1133,7 @@ diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=log
              .map(|layer| layer.radius)
              .max_by(|a, b| a.partial_cmp(b).unwrap())
              .unwrap_or(100.0) // Default reasonable radius
-@@ -920,20 +974,17 @@
+@@ -920,20 +978,17 @@
      pub async fn notify_existing_players_for_new_object(&self, object_id: GorcObjectId) -> Vec<(PlayerId, u8)> {
          let mut zone_entries = Vec::new();
  
@@ -1159,7 +1165,7 @@ diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=log
          };
  
          let player_positions = {
-@@ -941,15 +992,16 @@
+@@ -941,15 +996,16 @@
              player_positions.iter().map(|(&id, &pos)| (id, pos)).collect::<Vec<_>>()
          };
  
@@ -1180,7 +1186,7 @@ diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=log
                          instance.add_subscriber(channel, player_id);
                          zone_entries.push((player_id, channel));
                          debug!("🆕 GORC New Object: Player {} automatically entered zone {} of new object {}", player_id, channel, object_id);
-@@ -963,16 +1015,17 @@
+@@ -963,16 +1019,17 @@
  
      /// Analyzes virtualization opportunities and applies recommendations
      pub async fn process_virtualization(&self) -> Result<(), Box<dyn std::error::Error>> {
@@ -1207,7 +1213,7 @@ diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=log
              info
 diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=logs' '--exclude=*.sock' a/crates/horizon_event_system/src/system/emitters.rs b/crates/horizon_event_system/src/system/emitters.rs
 --- a/crates/horizon_event_system/src/system/emitters.rs	2026-04-25 00:31:25.648288666 +0200
-+++ b/crates/horizon_event_system/src/system/emitters.rs	2026-05-02 10:05:22.555569213 +0200
++++ b/crates/horizon_event_system/src/system/emitters.rs	2026-05-26 20:15:00.386222188 +0200
 @@ -151,8 +151,19 @@
                  if dest == Dest::Server || dest == Dest::Both {
                      let instance_key = CompactString::new_inline("gorc_instance:") + object_type + ":" + &channel.to_string() + ":" + event_name;

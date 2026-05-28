@@ -176,7 +176,32 @@ pub fn handle_object_update(
 			};
 			
 			if let Some(gorc_id) = gorc_id_opt {
-				if let Some(mut object_instance) = gorc_instances.get_object(gorc_id).await {
+				let broadcast_only = req_data.broadcast_only.unwrap_or(false);
+
+				if broadcast_only {
+					// The caller has already committed the authoritative GORC state via a
+					// direct update_object call.  Our job here is only to replicate the
+					// current (fresh) state to nearby clients — do NOT call update_object,
+					// which would overwrite the authoritative state with a stale snapshot.
+					if let Some(object_instance) = gorc_instances.get_object(gorc_id).await {
+						if let Some(props) = object_instance.get_object::<GenericProps>() {
+							for layer in props.get_layers().iter() {
+								let layer_data = props.get_data_for_layer(layer).unwrap_or(serde_json::Value::Null);
+								if let Err(e) = events.emit_gorc_instance(
+									gorc_id,
+									layer.channel,
+									"update_property",
+									&layer_data,
+									horizon_event_system::Dest::Client,
+								).await {
+									error!("🚀 GORC: ❌ Failed to broadcast channel update (broadcast_only): {}", e);
+								} else {
+									debug!("🚀 GORC: ✅ Broadcasted channel update (broadcast_only) for object {}", gorc_id);
+								}
+							}
+						}
+					}
+				} else if let Some(mut object_instance) = gorc_instances.get_object(gorc_id).await {
 					// Update the GenericProps on the object instance. Clone object_data to avoid reuse/move issues.
 					let zone_set = object_instance.get_object_mut::<GenericProps>().expect("Object must exists").update(req_data.object_data.clone());
 					for zone in zone_set {

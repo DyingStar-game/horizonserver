@@ -370,6 +370,7 @@ impl GenericPropsPlugin {
                             object_type: object_type,
                             object_uuid: prop_uuid.to_string(),
                             object_data: serde_json::to_value(&prop_properties).unwrap_or(Value::Null),
+                            broadcast_only: None,
                         }
                     );
                 }
@@ -495,6 +496,7 @@ impl GenericPropsPlugin {
                     object_type: "player".to_string(),
                     object_uuid: event.player_id.to_string(),
                     object_data: serde_json::to_value(&prop_properties).unwrap_or(Value::Null),
+                    broadcast_only: None,
                 };
 
                 // loop on all props and check if zone match

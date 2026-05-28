@@ -326,6 +326,7 @@ pub fn handle_movement_request_sync(
                                 object_type: "player".to_string(),
                                 object_uuid: event["object_uuid"].as_str().unwrap_or_default().to_string(),
                                 object_data: serde_json::to_value(&prop_properties).unwrap_or(Value::Null),
+                                broadcast_only: None,
                             };
 
                             // loop on all props and check if zone match

@@ -21,4 +21,5 @@ pub struct PlayerMoveRequest {
     pub position: Vec3,
     pub rotation: Vec3,
     pub out_of_zone: Option<String>,
+    pub parent_id: Option<String>,
 }

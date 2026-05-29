@@ -86,9 +86,9 @@ pub async fn handle_new_player(
                     let x = if col == 0 { spawn_point_x } else { x_spacing - spawn_point_x };
                     let z = if col == 0 { spawn_point_z } else { z_spacing - spawn_point_z };
                     spawn_position = horizon_event_system::Vec3::new(
-                        x + (col as f64 * x_spacing),
+                        x + (row as f64 * x_spacing),
                         spawn_point_y + (floor as f64 * y_spacing),
-                        z + (row as f64 * z_spacing),
+                        z + (col as f64 * z_spacing),
                     );
                     found = true;
                     building_uuid = building.uuid.clone();
@@ -286,7 +286,7 @@ println!("plugin genericprops (new_player): final spawn position for player {} i
             "object_data": {
                 "name": player_name,
                 "position": { "x": spawn_position.x, "y": spawn_position.y, "z": spawn_position.z },
-                "rotation": { "x": 0.0, "y": 0.0, "z": 0.0 },
+                "rotation": { "x": 0.0, "y": 1.708, "z": 0.0 },
                 "parent_id": building_uuid,
                 "spawn_appartment_id": building_uuid,
             }

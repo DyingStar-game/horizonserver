@@ -21,7 +21,7 @@ use fake::{Fake, faker::lorem::en::Word, faker::number::en::NumberWithFormat};
 
 #[derive(Debug)]
 enum GameServerMessage {
-    PlayerPositions(Vec<(GorcObjectId, PlayerId, f64, f64, f64, f64, f64, f64, Option<String>)>),
+    PlayerPositions(Vec<(GorcObjectId, PlayerId, f64, f64, f64, f64, f64, f64, Option<String>, Option<String>)>),
     PropPosition(serde_json::Value),
     PropCreate(serde_json::Value),
     PropDelete(serde_json::Value),
@@ -661,7 +661,7 @@ impl Server {
             debug!("🔧 DsGameServerPlugin: Processing message: {:?}", msg);
             match msg {
                 GameServerMessage::PlayerPositions(position_updates) => {
-                    for (gorc_id, player_id, x, y, z, rotx, roty, rotz, out_of_zone) in position_updates {
+                    for (gorc_id, player_id, x, y, z, rotx, roty, rotz, out_of_zone, parent_id) in position_updates {
                         if let Err(e) = events_processor.emit_plugin("genericprops", "playermove", &serde_json::json!({
                             "object_type": "player",
                             "object_uuid": player_id.clone().to_string(),
@@ -670,6 +670,7 @@ impl Server {
                                 "position": Vec3::new(x, y, z),
                                 "rotation": Vec3::new(rotx, roty, rotz),
                                 "out_of_zone": out_of_zone,
+                                "parent_id": parent_id,
                             }),
                         })).await {
                             error!("Failed to emit plugin event to propsplugin: {}", e);
@@ -794,7 +795,7 @@ impl Server {
                         debug!("[message][from][gamesever]: {}", s);
                         if let Ok(value) = serde_json::from_str::<serde_json::Value>(&s) {
                             if value["namespace"] == "players" && value["event"] == "position" {
-                                let mut position_updates: Vec<(GorcObjectId, PlayerId, f64, f64, f64, f64, f64, f64, Option<String>)> = Vec::new();
+                                let mut position_updates: Vec<(GorcObjectId, PlayerId, f64, f64, f64, f64, f64, f64, Option<String>, Option<String>)> = Vec::new();
                                 
                                 for player_data in value["data"].as_array().unwrap() {
                                     if let Some(uuid_str) = player_data["player_id"].as_str() {
@@ -813,7 +814,10 @@ impl Server {
                                                 let out_of_zone = player_data.get("out_of_zone")
                                                     .and_then(|v| v.as_str())
                                                     .map(|s| s.to_string());
-                                                position_updates.push((gorc_id, player_id, x, y, z, rx, ry, rz, out_of_zone));
+                                                let parent_id = player_data.get("parent_id")
+                                                    .and_then(|v| v.as_str())
+                                                    .map(|s| s.to_string());
+                                                position_updates.push((gorc_id, player_id, x, y, z, rx, ry, rz, out_of_zone, parent_id));
                                             } else {
                                                 error!("Invalid position coordinates in player data: {:?}", player_data["pos"]);
                                             }
@@ -885,7 +889,7 @@ impl Server {
                             debug!("[message][from][gamesever] (binary->text): {}", s);
                             if let Ok(value) = serde_json::from_str::<serde_json::Value>(&s) {
                                 if value["namespace"] == "players" && value["event"] == "position" {
-                                    let mut position_updates: Vec<(GorcObjectId, PlayerId, f64, f64, f64, f64, f64, f64, Option<String>)> = Vec::new();
+                                    let mut position_updates: Vec<(GorcObjectId, PlayerId, f64, f64, f64, f64, f64, f64, Option<String>, Option<String>)> = Vec::new();
                                     
                                     for player_data in value["data"].as_array().unwrap() {
                                         if let Some(uuid_str) = player_data["player_id"].as_str() {
@@ -904,7 +908,10 @@ impl Server {
                                                     let out_of_zone = player_data.get("out_of_zone")
                                                         .and_then(|v| v.as_str())
                                                         .map(|s| s.to_string());
-                                                    position_updates.push((gorc_id, player_id, x, y, z, rx, ry, rz, out_of_zone));
+                                                    let parent_id = player_data.get("parent_id")
+                                                        .and_then(|v| v.as_str())
+                                                        .map(|s| s.to_string());
+                                                    position_updates.push((gorc_id, player_id, x, y, z, rx, ry, rz, out_of_zone, parent_id));
                                                 }
                                             }
                                         }

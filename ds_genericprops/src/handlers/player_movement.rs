@@ -244,7 +244,7 @@ pub fn handle_movement_request_sync(
                 // let object_id_str = gorc_event.object_id.clone();
                 // debug!("🚀 STEP 9: Using object ID: {}", object_id_str);
 
-                let position_update = serde_json::json!({
+                let mut position_update = serde_json::json!({
                     "player_id": move_data.player_id,
                     "position": move_data.position,
                     "rotation": move_data.rotation,
@@ -252,6 +252,9 @@ pub fn handle_movement_request_sync(
                     // "movement_state": move_data.movement_state,
                     // "client_timestamp": chrono::Utc::now()
                 });
+                if let Some(ref parent_id) = move_data.parent_id {
+                    position_update["parent_id"] = serde_json::json!(parent_id);
+                }
                 debug!("🚀 STEP 10: Created position update payload: {}", position_update);
                 
                 // CRITICAL: We need to update player position synchronously for zone detection.

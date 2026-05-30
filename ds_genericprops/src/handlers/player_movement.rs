@@ -210,6 +210,15 @@ pub fn handle_movement_request_sync(
                                     gorc_id, final_position);
                             }
                             
+                            // If the movement carries a new parent_id, persist it into the
+                            // GenericProps data before writing back to GORC so that subsequent
+                            // reads (e.g. global-position calculation) see the updated value.
+                            if let Some(ref parent_id) = move_data.parent_id {
+                                object_instance.get_object_mut::<GenericProps>()
+                                    .expect("Object must exists")
+                                    .update(serde_json::json!({ "parent_id": parent_id }));
+                            }
+
                             // Now update the full object instance (properties, needs_update flags, etc.)
                             gorc_instances.update_object(gorc_id, object_instance).await;
                         } else {

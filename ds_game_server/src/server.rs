@@ -26,6 +26,7 @@ enum GameServerMessage {
     PropCreate(serde_json::Value),
     PropDelete(serde_json::Value),
     PropUpdate(serde_json::Value),
+    PlayerUpdate(serde_json::Value),
     // PlayerOutOfZone(serde_json::Value),
 }
 
@@ -678,6 +679,24 @@ impl Server {
                     }
                 }
 
+                GameServerMessage::PlayerUpdate(value) => {
+                    // Generic player property replication (equipped tool, camera "head", ...):
+                    // route to the genericprops update_object handler, which merges the
+                    // properties into the player's GORC object and broadcasts them
+                    // ("update_property") to nearby clients.
+                    if let Some(uuid_str) = value["uuid"].as_str() {
+                        if let Err(e) = events_processor.emit_plugin("genericprops", "update_object", &serde_json::json!({
+                            "object_type": "player",
+                            "object_uuid": uuid_str,
+                            "object_data": value["data"].clone(),
+                        })).await {
+                            error!("Failed to emit player update to genericprops: {}", e);
+                        }
+                    } else {
+                        error!("Missing uuid in player update event: {:?}", value);
+                    }
+                }
+
                 // GameServerMessage::PlayerPositions(position_updates) => {
                 //     <for (gorc_id, player_id, x, y, z, rotx, roty, rotz) in position_updates {>
                 //         if let Err(e) = events_processor.emit_gorc_instance(
@@ -857,28 +876,17 @@ impl Server {
                                     }
                                 }
                             } else if value["namespace"] == "players" && value["event"] == "update" {
-                                // Get gorc_id from value["uuid"]
-                                let _ = if let Some(uuid_str) = value["uuid"].as_str() {
-                                    match GorcObjectId::from_str(uuid_str) {
-                                        Ok(id) => id,
-                                        Err(e) => {
-                                            error!("Invalid gorc_id format in update event: {:?}", e);
-                                            continue;
-                                        }
+                                // Generic player property replication (e.g. equipped tool,
+                                // camera "head"): forward to the async processor, which routes
+                                // it to the genericprops update_object handler -> merges the
+                                // properties and broadcasts "update_property" to nearby clients.
+                                if value["uuid"].as_str().is_some() {
+                                    if let Err(e) = tx.send(GameServerMessage::PlayerUpdate(value.clone())) {
+                                        error!("Failed to send player update to processor: {}", e);
                                     }
                                 } else {
-                                    error!("Missing uuid in update event: {:?}", value);
-                                    continue;
-                                };
-                                // TODO review this code for updates
-                                // if let Err(e) = events_processor.emit_plugin("pluginplayer", "update", &serde_json::json!(value["data"])).await {
-                                //     error!("Failed to update player position via EventSystem: {}", e);
-                                // }
-                            // } else if value["namespace"] == "players" && value["event"] == "out_of_zone" {
-                            //     info!("Player out of zone received: {:?}", value);
-                            //     if let Err(e) = tx.send(GameServerMessage::PlayerOutOfZone(value["data"].clone())) {
-                            //         error!("Failed to send prop delete to processor: {}", e);
-                            //     }
+                                    error!("Missing uuid in player update event: {:?}", value);
+                                }
                             }
                         } else {
                             debug!("Failed to parse incoming JSON: {}", s);

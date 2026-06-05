@@ -293,7 +293,11 @@ impl GenericPropsPlugin {
                                 update_events3.clone(),
                                 event.clone(),
                                 handle3.clone(),
-                                false,
+                                // Spawn the game-server-requested object in the game server too: it
+                                // does not exist there yet (e.g. a mining rock side2). Without this
+                                // it is only registered in GORC + sent to clients, so the game
+                                // server can neither simulate nor re-cut it.
+                                true,
                                 queue_objects_create3.clone(),
                             )
                         {

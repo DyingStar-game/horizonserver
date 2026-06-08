@@ -8,7 +8,8 @@
 				"position",
 				"rotation",
 				"scenename",
-				"parent_id"
+				"parent_id",
+				"ore_seed"
 			]
 		},
 		{
@@ -18,7 +19,8 @@
 			"properties": [
 				"scenename",
 				"weight",
-				"blocs"
+				"blocs",
+				"ore_seed"
 			]
 		}
 	]

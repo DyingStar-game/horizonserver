@@ -64,6 +64,7 @@ subscribe = [
     "plugin:genericprops:create_object_from_gameserver",
     "plugin:genericprops:update_object",
     "plugin:genericprops:update_object_from_external",
+    "plugin:genericprops:delete_object",
     "plugin:bridge_persistence:get_all_items",
     "plugin:bridge_persistence:player_spawn",
 ]

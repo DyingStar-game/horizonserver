@@ -8,8 +8,7 @@
 				"position",
 				"rotation",
 				"scenename",
-				"parent_id",
-				"ore_seed"
+				"parent_id"
 			]
 		},
 		{

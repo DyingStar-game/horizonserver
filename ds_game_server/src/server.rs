@@ -25,8 +25,9 @@ enum GameServerMessage {
     PropPosition(serde_json::Value),
     PropCreate(serde_json::Value),
     PropDelete(serde_json::Value),
-    PropUpdate(serde_json::Value),
-    PlayerUpdate(serde_json::Value),
+    // Unified property replication for any object (player or prop): the game
+    // server now sends a single "props/update_object" event for both.
+    ObjectUpdate(serde_json::Value),
     // PlayerOutOfZone(serde_json::Value),
 }
 
@@ -679,23 +680,6 @@ impl Server {
                     }
                 }
 
-                GameServerMessage::PlayerUpdate(value) => {
-                    // Generic player property replication (equipped tool, camera "head", ...):
-                    // route to the genericprops update_object handler, which merges the
-                    // properties into the player's GORC object and broadcasts them
-                    // ("update_property") to nearby clients.
-                    if let Some(uuid_str) = value["uuid"].as_str() {
-                        if let Err(e) = events_processor.emit_plugin("genericprops", "update_object", &serde_json::json!({
-                            "object_type": "player",
-                            "object_uuid": uuid_str,
-                            "object_data": value["data"].clone(),
-                        })).await {
-                            error!("Failed to emit player update to genericprops: {}", e);
-                        }
-                    } else {
-                        error!("Missing uuid in player update event: {:?}", value);
-                    }
-                }
 
                 // GameServerMessage::PlayerPositions(position_updates) => {
                 //     <for (gorc_id, player_id, x, y, z, rotx, roty, rotz) in position_updates {>
@@ -779,13 +763,17 @@ impl Server {
                         error!("Failed to emit plugin event to propsplugin: {}", e);
                     }
                 }
-                GameServerMessage::PropUpdate(prop_data) => {
+                // Unified property replication: every object (player or prop) sent by
+                // the game server on "props/update_object" lands here. The genericprops
+                // update_object handler merges the whitelisted properties into the
+                // object's GORC instance and broadcasts "update_property" to nearby clients.
+                GameServerMessage::ObjectUpdate(object_data) => {
                     if let Err(e) = events_processor.emit_plugin("genericprops", "update_object", &serde_json::json!({
-                        "object_type": prop_data["type"],
-                        "object_uuid": prop_data["uuid"],
-                        "object_data": prop_data,
+                        "object_type": object_data["type"],
+                        "object_uuid": object_data["uuid"],
+                        "object_data": object_data,
                     })).await {
-                        error!("Failed to emit plugin event to propsplugin: {}", e);
+                        error!("Failed to emit object update to genericprops: {}", e);
                     }
                 }
                 // GameServerMessage::PlayerOutOfZone(player_data) => {
@@ -875,17 +863,15 @@ impl Server {
                                         error!("Failed to send prop delete to processor: {}", e);
                                     }
                                 }
-                            } else if value["namespace"] == "players" && value["event"] == "update" {
-                                // Generic player property replication (e.g. equipped tool,
-                                // camera "head"): forward to the async processor, which routes
-                                // it to the genericprops update_object handler -> merges the
+                            } else if value["namespace"] == "props" && value["event"] == "update_object" {
+                                // Unified property replication for any object (player or prop):
+                                // each entry carries {type, uuid, <properties>}. Routed to the
+                                // genericprops update_object handler, which merges the whitelisted
                                 // properties and broadcasts "update_property" to nearby clients.
-                                if value["uuid"].as_str().is_some() {
-                                    if let Err(e) = tx.send(GameServerMessage::PlayerUpdate(value.clone())) {
-                                        error!("Failed to send player update to processor: {}", e);
+                                for object_data in value["data"].as_array().unwrap() {
+                                    if let Err(e) = tx.send(GameServerMessage::ObjectUpdate(object_data.clone())) {
+                                        error!("Failed to send object update to processor: {}", e);
                                     }
-                                } else {
-                                    error!("Missing uuid in player update event: {:?}", value);
                                 }
                             }
                         } else {

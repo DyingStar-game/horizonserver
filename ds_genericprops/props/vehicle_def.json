@@ -12,6 +12,14 @@
 				"pilot_uuid",
 				"steering"
 			]
+		},
+		{
+			"zone": 6,
+			"distance": 200.0,
+			"frequency": 3.0,
+			"properties": [
+				"scenename"
+			]
 		}
 	]
 }

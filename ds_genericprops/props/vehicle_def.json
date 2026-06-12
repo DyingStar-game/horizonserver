@@ -10,7 +10,8 @@
 				"scenename",
 				"parent_id",
 				"pilot_uuid",
-				"steering"
+				"steering",
+				"speed"
 			]
 		},
 		{

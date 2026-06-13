@@ -12,6 +12,16 @@ on:
       - "Cargo.lock"
       - "plugins.toml"
       - ".docker/**"
+  workflow_dispatch:
+    inputs:
+      build_server:
+        description: "Build and push the horizon server image"
+        type: boolean
+        default: true
+      build_plugins:
+        description: "Build and push the horizon plugins image"
+        type: boolean
+        default: true
 
 env:
   HARBOR_REGISTRY: harbor.dyingstar-game.space
@@ -25,8 +35,8 @@ jobs:
     name: Detect changed paths
     runs-on: ubuntu-latest
     outputs:
-      server: ${{ steps.filter.outputs.server }}
-      plugins: ${{ steps.filter.outputs.plugins }}
+      server: ${{ steps.result.outputs.server }}
+      plugins: ${{ steps.result.outputs.plugins }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -34,6 +44,7 @@ jobs:
       - name: Check changed paths
         uses: dorny/paths-filter@v3
         id: filter
+        if: github.event_name == 'push'
         with:
           filters: |
             server:
@@ -49,6 +60,17 @@ jobs:
               - 'Cargo.lock'
               - 'plugins.toml'
               - '.docker/Dockerfile.plugins'
+
+      - name: Resolve build targets
+        id: result
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "server=${{ inputs.build_server }}" >> $GITHUB_OUTPUT
+            echo "plugins=${{ inputs.build_plugins }}" >> $GITHUB_OUTPUT
+          else
+            echo "server=${{ steps.filter.outputs.server }}" >> $GITHUB_OUTPUT
+            echo "plugins=${{ steps.filter.outputs.plugins }}" >> $GITHUB_OUTPUT
+          fi
 
   build-server:
     name: Build server image

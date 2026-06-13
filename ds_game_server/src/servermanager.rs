@@ -125,7 +125,7 @@ impl ServerManager {
         
         // Spawn a task to drain the serverinfo channel in single mode
         // This prevents the channel from filling up and blocking the message processor
-        let tokio_handle = context.tokio_handle();
+        let tokio_handle = crate::plugin_rt();
         tokio_handle.spawn(async move {
             while let Some(serverinfo) = srvinfo_rx.recv().await {
                 debug!("Single mode: Received server info: UUID={}, FPS={}, Players={}", 
@@ -551,7 +551,7 @@ impl ServerManager {
             "timestamp": utils::current_timestamp()
         });
 
-        let handler = context.tokio_handle();
+        let handler = crate::plugin_rt();
         let serverinfo = serverinfo.clone();
 
         // Collect player IDs before spawning the async task to avoid holding the MutexGuard across await

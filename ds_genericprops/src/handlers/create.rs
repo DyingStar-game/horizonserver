@@ -171,6 +171,8 @@ pub fn handle_object_create(
 							}
 						}
 
+						info!("🎮 genericprops: EMIT plugingameserver:new_player uuid={:?} global_position=({}, {}, {})",
+							event["object_uuid"], global_position.x, global_position.y, global_position.z);
 						if let Err(e) = events
 							.emit_plugin("plugingameserver", "new_player", &event_with_position)
 							.await

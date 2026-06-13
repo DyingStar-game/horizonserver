@@ -20,7 +20,10 @@
 				"scenename",
 				"name",
 				"parent_id",
-				"spawn_appartment_id"
+				"spawn_appartment_id",
+				"is_npc",
+				"conversation",
+				"npc_arrived"
 			]
 		}
 	]

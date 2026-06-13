@@ -19,6 +19,8 @@ pub struct PlayerInit {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlayerInitData {
     pub token: String,
+    #[serde(default)]
+    pub is_npc: bool,
 }
 
 /// JWT claims decoded from the token (without signature verification).
@@ -56,7 +58,7 @@ pub async fn handle_player_init(
     events: Arc<EventSystem>,
     server_state_ok: Arc<AtomicBool>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-
+    info!("auth (player_init): START handle_player_init player data: {:?}", event.data);
     if !server_state_ok.load(Ordering::Relaxed) {
         warn!("Player {:?} tried to init but server is not ready yet", player_id);
         let payload = serde_json::to_vec(&serde_json::json!({
@@ -154,6 +156,7 @@ pub async fn handle_player_init(
         "object_uuid": player_db_id,
         "object_data": {
             "name": player_name,
+            "is_npc": event.data.is_npc,
         }
     })).await
     {

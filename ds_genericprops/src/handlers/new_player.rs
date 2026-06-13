@@ -20,6 +20,7 @@ pub async fn handle_new_player(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let player_uuid = event["object_uuid"].as_str().unwrap_or_default().to_string();
     let player_name = event["object_data"]["name"].as_str().unwrap_or_default().to_string();
+    let is_npc = event["object_data"]["is_npc"].as_bool().unwrap_or(false);
     info!(
         "plugin genericprops (new_player): received new_player event for player_uuid={} player_name={}",
         player_uuid, player_name
@@ -303,6 +304,7 @@ println!("plugin genericprops (new_player): final spawn position for player {} i
                 "rotation": { "x": 0.0, "y": 1.708, "z": 0.0 },
                 "parent_id": building_uuid,
                 "spawn_appartment_id": building_uuid,
+                "is_npc": is_npc,
             }
         }),
     ).await {
@@ -311,5 +313,3 @@ println!("plugin genericprops (new_player): final spawn position for player {} i
 
     Ok(())
 }
-
-

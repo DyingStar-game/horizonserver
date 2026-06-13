@@ -101,7 +101,7 @@ impl Server {
         let websocket_sender = Arc::clone(&self.websocket_sender);
         let events = context.clone().events();
         let zone = self.zone.read().unwrap().clone();
-        let tokio_handle_spawnobj = context.clone().tokio_handle();
+        let tokio_handle_spawnobj = crate::plugin_rt();
         let gorc_instances_new = gorc_instances.clone();
         events.on_plugin("gameserverplugin", "spawn_object", move |event: serde_json::Value| {
             debug!("🔧 DsGameServerPlugin: Adding prop with event: {:?}", event.clone());
@@ -143,7 +143,7 @@ impl Server {
         let websocket_sender = Arc::clone(&self.websocket_sender);
         let events = context.clone().events();
         let zone = self.zone.read().unwrap().clone();
-        let tokio_handle_updateobj = context.clone().tokio_handle();
+        let tokio_handle_updateobj = crate::plugin_rt();
         let gorc_instances_update = gorc_instances.clone();
         events.on_plugin("gameserverplugin", "update_prop", move |event: serde_json::Value| {
             debug!("🔧 DsGameServerPlugin: Updating prop with event: {:?}", event.clone());
@@ -184,9 +184,10 @@ impl Server {
 
         let websocket_sender = Arc::clone(&self.websocket_sender);
         let managed_players = Arc::clone(&self.managed_players);
-        let tokio_handle_newplayer = context.clone().tokio_handle();
+        let tokio_handle_newplayer = crate::plugin_rt();
         let zone_for_new_player = Arc::clone(&self.zone);
         events.on_plugin("plugingameserver", "new_player", move |event: serde_json::Value| {
+            info!("🔧 DsGameServerPlugin: new_player handler FIRED uuid={:?}", event.get("object_uuid"));
 
             // Check if player position is within this server's zone
             if let Some(object_data) = event.get("object_data") {
@@ -199,7 +200,8 @@ impl Server {
                     if x < zone.min_x || x > zone.max_x ||
                        y < zone.min_y || y > zone.max_y ||
                        z < zone.min_z || z > zone.max_z {
-                        debug!("🔧 DsGameServerPlugin: Player position ({}, {}, {}) is outside server zone, skipping", x, y, z);
+                        info!("🔧 DsGameServerPlugin: Player position ({}, {}, {}) is OUTSIDE server zone [x {}..{}, y {}..{}, z {}..{}], skipping",
+                            x, y, z, zone.min_x, zone.max_x, zone.min_y, zone.max_y, zone.min_z, zone.max_z);
                         return Ok(());
                     }
                 }
@@ -224,7 +226,7 @@ impl Server {
         // Handler when the client moves, we transmit to the server
         let websocket_sender = Arc::clone(&self.websocket_sender);
         let managed_players_movement = Arc::clone(&self.managed_players);
-        let tokio_handle_updatevelocity = context.clone().tokio_handle();
+        let tokio_handle_updatevelocity = crate::plugin_rt();
         events.on_client("movement", "update_velocity", move |event: ClientEventWrapper<serde_json::Value>, _player_id: PlayerId, _connection: ClientConnectionRef| {
             debug!("📝 LoggerPlugin: 🦘 Client movement from player {}", event.player_id);
 
@@ -249,7 +251,7 @@ impl Server {
         // Handler when the client do action (jump, press...), we transmit to the server
         let websocket_sender = Arc::clone(&self.websocket_sender);
         let managed_players_action = Arc::clone(&self.managed_players);
-        let tokio_handle_clientaction = context.clone().tokio_handle();
+        let tokio_handle_clientaction = crate::plugin_rt();
         events.on_client("player", "client_action", move |event: ClientEventWrapper<serde_json::Value>, _player_id: PlayerId, _connection: ClientConnectionRef| {
 
             // Check if this player is managed by this server
@@ -277,7 +279,7 @@ impl Server {
         let managed_objects = Arc::clone(&self.managed_objects);
         let managed_players = Arc::clone(&self.managed_players);
         let websocket_sender = Arc::clone(&self.websocket_sender);
-        let tokio_handle_initialobjs = context.clone().tokio_handle();
+        let tokio_handle_initialobjs = crate::plugin_rt();
         let zone_for_initial = Arc::clone(&self.zone);
         events.on_plugin("gameserver", "initial_objects_on_zone", move |event: serde_json::Value| {
             info!("🔧 DsGameServerPlugin: Received initial_objects_on_zone event uuid: {:?} for my server uuid: {:?}", event["server_uuid"], server_uuid.clone());
@@ -329,7 +331,7 @@ impl Server {
         .map_err(|e| PluginError::ExecutionError(e.to_string()))?;
 
         let managed_players_for_quit = Arc::clone(&self.managed_players);
-        let tokio_handle_player_quit = context.clone().tokio_handle();
+        let tokio_handle_player_quit = crate::plugin_rt();
         let websocket_player_quit = Arc::clone(&self.websocket_sender);
         events.on_plugin("gameserverplugin", "player_quit", move |event: serde_json::Value| {
             info!("🔧 DsGameServerPlugin: Received player_quit event: {:?}", event);
@@ -372,7 +374,7 @@ impl Server {
         let managed_players = Arc::clone(&self.managed_players);
         let websocket_sender = Arc::clone(&self.websocket_sender);
         let transferring_players = Arc::clone(&self.transferring_players);
-        let tokio_handle_out_of_zone = context.clone().tokio_handle();
+        let tokio_handle_out_of_zone = crate::plugin_rt();
         events.on_plugin("gameserverplugin", "player_out_of_zone", move |event: serde_json::Value| {
             let object_uuid = event["item"]["object_uuid"].as_str().unwrap_or_default().to_string();
             info!("🔧 DsGameServerPlugin: Received player_out_of_zone event uuid: {:?} for my server uuid: {:?}", event["server_uuid"], server_uuid.clone());
@@ -550,7 +552,7 @@ impl Server {
 
         let server_uuid = self.uuid.clone();
         let events = context.events();
-        context.tokio_handle().spawn(async move {
+        crate::plugin_rt().spawn(async move {
             if let Err(e) = events.emit_plugin("ds_game_server", "server_unregistered", &serde_json::json!({
                 "server_uuid": server_uuid,
             })).await {
@@ -598,7 +600,7 @@ impl Server {
                 debug!("[send_zone] Message sent successfully");
                 let server_uuid = self.uuid.clone();
                 let events = context.events();
-                context.tokio_handle().spawn(async move {
+                crate::plugin_rt().spawn(async move {
                     if let Err(e) = events.emit_plugin("ds_game_server", "server_registered", &serde_json::json!({
                         "server_uuid": server_uuid,
                     })).await {
@@ -940,8 +942,8 @@ impl Server {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<GameServerMessage>();
 
         let events = context.clone().events();
-        let tokio_handle_queue = context.clone().tokio_handle();
-        let tokio_handle_ws = context.clone().tokio_handle();
+        let tokio_handle_queue = crate::plugin_rt();
+        let tokio_handle_ws = crate::plugin_rt();
         let mut server = self.clone();
         tokio_handle_queue.spawn(async move {
             server.received_queue_processing(rx, events, srvinfo_tx).await;

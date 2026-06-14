@@ -80,6 +80,7 @@ async fn update_children_positions(
     parent_position: horizon_event_system::Vec3,
     props: Arc<DashMap<String, GorcObjectId>>,
     gorc_instances: &horizon_event_system::GorcInstanceManager,
+    events: Arc<EventSystem>,
 ) {
     let parent_id_str = parent_gorc_id.to_string();
     
@@ -103,8 +104,14 @@ async fn update_children_positions(
                     });
                 
                 if has_matching_parent {
-                    // Get the child's local position
-                    let child_local_position = child_props.position();
+                    // Get the child's local position from zone data (NOT global_position,
+                    // which would produce parent_new_pos + child_global_pos instead of
+                    // parent_new_pos + child_local_pos).
+                    let child_local_position = child_props.data.values()
+                        .filter_map(|zone_data| zone_data.get("position"))
+                        .filter_map(|v| serde_json::from_value::<horizon_event_system::Vec3>(v.clone()).ok())
+                        .next()
+                        .unwrap_or(horizon_event_system::Vec3::zero());
                     
                     // Calculate the new global position
                     let new_global_position = horizon_event_system::Vec3 {
@@ -119,8 +126,11 @@ async fn update_children_positions(
                         new_global_position
                     );
                     
-                    // Update the child's position in the GORC system
-                    gorc_instances.update_object_position(child_gorc_id, new_global_position).await;
+                    // Update the child's position in the GORC system and send zone
+                    // entry/exit messages so nearby players get subscribed/unsubscribed.
+                    if let Err(e) = events.update_object_position(child_gorc_id, new_global_position).await {
+                        error!("🚀 GORC: ❌ Failed to update child object position with zone events: {}", e);
+                    }
                 }
             }
         }
@@ -238,10 +248,16 @@ pub fn handle_object_update(
 								// Update the object_instance global_position property
 								object_instance.get_object_mut::<GenericProps>().expect("Object must exists").global_position = final_position;
 								
-								gorc_instances.update_object_position(gorc_id, final_position).await;
+								// Use events.update_object_position to update position AND send zone
+								// entry/exit messages to players. Using gorc_instances.update_object_position
+								// directly would compute zone changes but discard them, so players near
+								// the new position would never receive zone entry messages.
+								if let Err(e) = events.update_object_position(gorc_id, final_position).await {
+									error!("🚀 GORC: ❌ Failed to update object position with zone events: {}", e);
+								}
 
 								// Update children objects' global positions
-								update_children_positions(gorc_id, final_position, Arc::clone(&props_clone), &gorc_instances).await;
+								update_children_positions(gorc_id, final_position, Arc::clone(&props_clone), &gorc_instances, Arc::clone(&events)).await;
 							}
 						}
 

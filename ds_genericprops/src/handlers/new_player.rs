@@ -225,6 +225,20 @@ println!("plugin genericprops (new_player): found free slot for player {} in bui
                                     "apartments": apartments.clone(),
                                 }));
 
+                                // Wee need to send to update_object_from_external to broadcast the new occupancy to nearby clients and persistance, not needed to send to server godot
+                                events.emit_plugin(
+                                    "genericprops",
+                                    "update_object_from_external",
+                                    &serde_json::json!({
+                                        "object_type": "spawnbuilding",
+                                        "object_uuid": building.uuid,
+                                        "object_data": {
+                                            "available": available - 1,
+                                            "apartments": apartments.clone(),
+                                        },
+                                    }),
+                                ).await?;
+
                                 Some((slot_spawn_position, building.uuid.clone(), apartments))
                             } else {
                                 None

@@ -11,7 +11,10 @@
 				"parent_id",
 				"pilot_uuid",
 				"steering",
-				"speed"
+				"speed",
+				"cargo_mass",
+				"handbrake",
+				"mass"
 			]
 		},
 		{

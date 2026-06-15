@@ -14,7 +14,8 @@
 				"speed",
 				"cargo_mass",
 				"handbrake",
-				"mass"
+				"mass",
+				"headlights"
 			]
 		},
 		{

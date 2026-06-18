@@ -2,7 +2,7 @@
 	"channels": [
 		{
 			"zone": 0,
-			"distance": 30.0,
+			"distance": 150.0,
 			"frequency": 30.0,
 			"properties": [
 				"position",
@@ -13,7 +13,7 @@
 		},
 		{
 			"zone": 6,
-			"distance": 30.0,
+			"distance": 150.0,
 			"frequency": 3.0,
 			"properties": [
 				"scenename",

@@ -19,7 +19,8 @@
 				"scenename",
 				"weight",
 				"blocs",
-				"ore_seed"
+				"ore_seed",
+				"mineral_id"
 			]
 		}
 	]

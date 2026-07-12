@@ -16,6 +16,9 @@
 				"handbrake",
 				"mass",
 				"headlights",
+				"engine",
+				"horn",
+				"horn_special",
 				"doors"
 			]
 		},

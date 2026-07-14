@@ -6,8 +6,9 @@ FROM rust:1.94.1-bookworm AS builder
 
 WORKDIR /build
 
-# Copy root workspace definition
+# Copy root workspace definition (lock pins a compatible libwebrtc/webrtc-sys pair)
 COPY Cargo.toml .
+COPY Cargo.lock .
 
 # Copy plugin source crates
 COPY ds_common/ ds_common/
@@ -25,7 +26,7 @@ COPY Horizon/ Horizon/
 # Build all plugins and collect .so output files
 RUN --mount=type=cache,target=/build/target \
     --mount=type=cache,target=/usr/local/cargo/registry \
-    RUSTFLAGS="" cargo build --release && \
+    RUSTFLAGS="" cargo build --locked --release && \
     mkdir -p /plugins && \
     cp target/release/*.so /plugins/
 

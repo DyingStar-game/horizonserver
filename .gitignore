@@ -8,5 +8,6 @@ target/
 RecipeSmith/
 
 /.cargo
-Cargo.lock
+# Cargo.lock is intentionally committed: this workspace builds binaries/plugins
+# and the lock pins a compatible libwebrtc/webrtc-sys pair (drift breaks the FFI).
 /tests/node_modules

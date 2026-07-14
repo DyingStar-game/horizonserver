@@ -199,17 +199,6 @@ pub fn handle_movement_request_sync(
                                 computed_position = final_position;
                             }
                             
-                            // CRITICAL: Update object position for zone change detection BEFORE
-                            // update_object, because update_object replaces the entire object
-                            // and we need the old position for zone change comparison
-                            debug!("🚀 STEP 11.3: About to update GORC object position for {:?} to {:?}", gorc_id, final_position);
-                            if let Err(e) = events.update_object_position(gorc_id, final_position).await {
-                                error!("🚀 STEP 11.3: ❌ Failed to update GORC object tracking: {}", e);
-                            } else {
-                                debug!("🚀 STEP 11.3: ✅ Updated GORC object tracking for {:?} at {:?}",
-                                    gorc_id, final_position);
-                            }
-                            
                             // If the movement carries a new parent_id, persist it into the
                             // GenericProps data before writing back to GORC so that subsequent
                             // reads (e.g. global-position calculation) see the updated value.
@@ -219,8 +208,28 @@ pub fn handle_movement_request_sync(
                                     .update(serde_json::json!({ "parent_id": parent_id }));
                             }
 
-                            // Now update the full object instance (properties, needs_update flags, etc.)
+                            // Write the updated GenericProps snapshot back to GORC FIRST.
+                            // update_object performs a blind insert that REPLACES the entire
+                            // ObjectInstance — including its zone_manager center and subscriber
+                            // lists — with this snapshot (captured above, before the position
+                            // moved). It must therefore run BEFORE update_object_position;
+                            // otherwise it clobbers the fresh zone center and subscription
+                            // changes that update_object_position produces. On a teleport/reparent
+                            // that clobber leaves the player unsubscribed from its own object
+                            // (move -> 0 subscribers, so the client stops receiving positions).
                             gorc_instances.update_object(gorc_id, object_instance).await;
+
+                            // Now update the tracked object position LAST. This refreshes the
+                            // zone_manager center on the live instance and recalculates zone
+                            // subscriptions against the new position, and must be the final
+                            // authoritative write so nothing overwrites it.
+                            debug!("🚀 STEP 11.3: About to update GORC object position for {:?} to {:?}", gorc_id, final_position);
+                            if let Err(e) = events.update_object_position(gorc_id, final_position).await {
+                                error!("🚀 STEP 11.3: ❌ Failed to update GORC object tracking: {}", e);
+                            } else {
+                                debug!("🚀 STEP 11.3: ✅ Updated GORC object tracking for {:?} at {:?}",
+                                    gorc_id, final_position);
+                            }
                         } else {
                             error!("🎮 GORC: ❌ Object instance not found in GORC for uuid: {}", move_data.player_id);
                         }

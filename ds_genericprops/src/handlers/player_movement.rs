@@ -67,6 +67,63 @@ fn pending_out_of_zone_players() -> &'static DashMap<String, Instant> {
     MAP.get_or_init(DashMap::new)
 }
 
+/// Minimum time (in seconds) between two reactions to movement packets from an
+/// unknown player. Within the window packets are dropped silently; when it
+/// expires we log once and re-send player_quit so the game server can stop
+/// streaming that player.
+const UNKNOWN_PLAYER_NOTIFY_COOLDOWN_SECS: f64 = 30.0;
+
+/// Tracks unknown player UUIDs (e.g. a game server still streaming movement
+/// after a disconnect) and when they were last logged/re-notified.
+fn unknown_player_notify_times() -> &'static DashMap<String, Instant> {
+    static MAP: OnceLock<DashMap<String, Instant>> = OnceLock::new();
+    MAP.get_or_init(DashMap::new)
+}
+
+/// Handle a movement packet for a player that is not in the props map.
+///
+/// This happens when a Godot server keeps streaming movement for a player that
+/// already disconnected from Horizon. Packets are dropped silently during the
+/// cooldown; once per cooldown window we log a warning and re-emit player_quit
+/// to the game server plugin (same payload as the disconnect path in lib.rs) so
+/// the Godot server gets another chance to despawn the player.
+fn notify_unknown_player(object_uuid: &str, events: &Arc<EventSystem>, handle: &luminal::Handle) {
+    let map = unknown_player_notify_times();
+    if let Some(entry) = map.get(object_uuid) {
+        if entry.value().elapsed().as_secs_f64() < UNKNOWN_PLAYER_NOTIFY_COOLDOWN_SECS {
+            return;
+        }
+    }
+    map.insert(object_uuid.to_string(), Instant::now());
+
+    warn!(
+        "🎮 GORC: Movement received for unknown player {} (already disconnected?) - re-sending player_quit to game server (next notice in {}s)",
+        object_uuid, UNKNOWN_PLAYER_NOTIFY_COOLDOWN_SECS
+    );
+
+    let mut prop_properties = HashMap::new();
+    prop_properties.insert(
+        "_global_position".to_string(),
+        serde_json::to_value(horizon_event_system::Vec3::new(1000000000000.0, 1000000000000.0, 1000000000000.0)).unwrap_or(Value::Null),
+    );
+    let item = GenericPropsRequest {
+        object_type: "player".to_string(),
+        object_uuid: object_uuid.to_string(),
+        object_data: serde_json::to_value(&prop_properties).unwrap_or(Value::Null),
+        broadcast_only: None,
+    };
+
+    let events = Arc::clone(events);
+    handle.spawn(async move {
+        if let Err(e) = events
+            .emit_plugin("gameserverplugin", "player_quit", &json!({ "item": item }))
+            .await
+        {
+            warn!("🎮 GORC: Failed to re-emit player_quit for unknown player: {}", e);
+        }
+    });
+}
+
 /// Synchronous wrapper for movement request handling that works with GORC client handlers.
 ///
 /// This function provides the same functionality as `handle_movement_request` but in
@@ -86,6 +143,23 @@ pub fn handle_movement_request_sync(
     let handler_id = HANDLER_COUNTER.fetch_add(1, Ordering::Relaxed);
     let player_uuid = event["object_uuid"].as_str().unwrap_or("unknown").to_string();
     debug!("🚀 HANDLER #{}: Starting for player {}", handler_id, player_uuid);
+
+    // Resolve the GORC object id BEFORE cloning the event or spawning a task,
+    // so packets for unknown players (e.g. a game server still streaming
+    // movement after a disconnect) cost a single map lookup and nothing else.
+    let gorc_id = match event["object_uuid"].as_str() {
+        Some(object_uuid) => match props.get(object_uuid) {
+            Some(gorc_ref) => *gorc_ref,
+            None => {
+                notify_unknown_player(object_uuid, &events, &handle);
+                return Ok(());
+            }
+        },
+        None => {
+            error!("🎮 GORC: ❌ object_uuid is not a string: {:?}", event["object_uuid"]);
+            return Ok(());
+        }
+    };
 
     // Ensure we have access to the gorc instances manager
     let Some(gorc_instances) = events.get_gorc_instances() else {
@@ -137,19 +211,9 @@ pub fn handle_movement_request_sync(
         // }
         // debug!("🚀 STEP 6: ✅ Player ownership validated");
 
-        let gorc_id = if let Some(object_uuid) = event["object_uuid"].as_str() {
-            if let Some(gorc_ref) = props.get(object_uuid) {
-                Some(*gorc_ref)
-            } else {
-                error!("🎮 GORC: ❌ Object UUID not found in props map: {}", object_uuid);
-                None
-            }
-        } else {
-            error!("🎮 GORC: ❌ object_uuid is not a string: {:?}", event["object_uuid"]);
-            None
-        };
-
-        if let Some(gorc_id) = gorc_id {
+        // gorc_id was already resolved (and the unknown-player case rejected)
+        // before this task was spawned.
+        {
             if let Some(mut object_instance) = gorc_instances.get_object(gorc_id).await {
 
                 let mut final_position = move_data.position;

@@ -10,7 +10,7 @@ diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=log
  horizon_sockets = { git = "https://github.com/Far-Beyond-Dev/Horizon-Sockets", rev = "aa0badb262e1344a8aceaaf5caf55012dc7fa89a" }
  luminal_rt = "0.4.1"
 -tokio = { version = "1.46.1", features = ["full"] }
-+tokio = { version = "1.48", features = ["full"] }
++tokio = { version = "=1.52.1", features = ["full"] }
  tokio-tungstenite = "0.27.0"
 +# tokio-metrics = { version = "0.4.6", features = ["metrics-rs-integration"] }
 +metrics = "0.24"
@@ -1584,7 +1584,7 @@ diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=log
  serde = { version = "1.0", features = ["derive"] }
  serde_json = "1.0"
 -tokio = { version = "1.0", features = ["full"] }
-+tokio = { version = "1.48", features = ["full"] }
++tokio = { version = "=1.52.1", features = ["full"] }
  async-trait = "0.1"
  chrono = { version = "0.4.41", features = ["serde"]}
  futures = { workspace = true }
@@ -1761,7 +1761,7 @@ diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=log
  # Core dependencies
  async-trait = "0.1"
 -tokio = { version = "1.0", features = ["full"] }
-+tokio = { version = "1.48", features = ["full"] }
++tokio = { version = "=1.52.1", features = ["full"] }
  serde = { version = "1.0", features = ["derive"] }
  serde_json = "1.0"
  thiserror = "1.0"

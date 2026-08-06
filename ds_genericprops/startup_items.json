@@ -5,7 +5,7 @@
         "object_data": {
             "name": "city",
             "parent_id": "_planet_SandBox",
-            "scenename": "scenes/props/city/sandbox_capital.tscn",
+            "scenename": "scenes/_universe/structures/urban/cities/sandbox_capital.tscn",
             "position": {"x": 4450755.253, "y": 2672707.115, "z": -3676666.489},
             "rotation": {"x": -0.7819075, "y": 0.2129302, "z": -0.9372418}
         }
@@ -268,7 +268,7 @@
         "object_data": {
             "name": "storagewarehouse",
             "parent_id": "_planet_P5_M1",
-            "scenename": "scenes/props/StorageBoxes/storagewarehouse.tscn",
+            "scenename": "scenes/_universe/props/containers/storagewarehouse.tscn",
             "position": {"x": -881000.0, "y": 0.0, "z": 0.0},
             "rotation": {"x": 0.0, "y": 0.0, "z": 1.5708}
         }
@@ -279,7 +279,7 @@
         "object_data": {
             "name": "storagewarehouse_sandbox",
             "parent_id": "ed20bda3-f6f3-4053-b9de-968f73ebc44c",
-            "scenename": "scenes/props/StorageBoxes/storagewarehouse.tscn",
+            "scenename": "scenes/_universe/props/containers/storagewarehouse.tscn",
             "position": {"x": 1.999, "y": 0.01, "z": 1090.122},
             "rotation": {"x": 0.0, "y": 3.14159, "z": 0.0}
         }

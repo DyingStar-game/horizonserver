@@ -216,13 +216,16 @@ diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=log
 diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=logs' '--exclude=*.sock' a/crates/game_server/src/server/core.rs b/crates/game_server/src/server/core.rs
 --- a/crates/game_server/src/server/core.rs	2026-04-25 00:31:25.636627972 +0200
 +++ b/crates/game_server/src/server/core.rs	2025-12-22 09:27:42.428258303 +0100
-@@ -547,6 +547,44 @@
+@@ -547,6 +547,51 @@
              .await
              .map_err(|e| ServerError::Internal(e.to_string()))?;
  
 +        // Register handler to update player_id in connection manager
 +        // This allows plugins to replace the temporary connection-level player_id
 +        // with a permanent database player_id after authentication
++        // Capture the runtime handle HERE: register_core_handlers is async, so this line always runs
++        // inside the host runtime, while the handler below is invoked from a plugin's own thread.
++        let rt_handle = tokio::runtime::Handle::current();
 +        let connection_manager_for_update = self.connection_manager.clone();
 +        self.horizon_event_system
 +            .on_core_async("update_player_id", move |event: serde_json::Value| {
@@ -235,9 +238,13 @@ diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=log
 +                let new_player_id = serde_json::from_value::<horizon_event_system::PlayerId>(event["new_player_id"].clone());
 +
 +                if let (Ok(old_player_id), Ok(new_player_id)) = (old_player_id, new_player_id) {
-+                    // Spawn a dedicated thread with its own runtime to handle the async work
-+                    // This is necessary because on_core_async handlers don't have a guaranteed tokio runtime context
-+                    tokio::spawn(async move {
++                    // Spawn through the CAPTURED handle, never tokio::spawn: this closure runs on the
++                    // emitting plugin's thread, which has no runtime in its thread-local, so
++                    // tokio::spawn panics with "there is no reactor running" and aborts the whole
++                    // process. Handle::spawn is callable from any thread and schedules onto the host
++                    // runtime. (Sibling handlers use Handle::try_current(), which merely skips the
++                    // work when it is absent — silent, so not a model to copy here.)
++                    rt_handle.spawn(async move {
 +                        // Get the connection_id for this player
 +                        if let Some(connection_id) = conn_mgr.get_connection_id_by_player(old_player_id).await {
 +                            // Update the player_id stored in the connection

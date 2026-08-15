@@ -565,67 +565,7 @@ diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=log
  use tokio::time::Instant;
  use uuid::Uuid;
  use tracing::{debug, info, warn};
-@@ -112,6 +113,13 @@
-     pub stats: ObjectStats,
-     /// Whether this object needs a replication update
-     pub needs_update: HashMap<u8, bool>,
-+    /// Replication layers cached at registration.
-+    ///
-+    /// `GorcObject::get_layers()` implementations typically rebuild a fresh Vec
-+    /// on every call, and zone sweeps consult layers for every object on every
-+    /// player movement packet — use this cache in hot paths instead. Layers are
-+    /// derived from the object definition and never change after registration.
-+    pub cached_layers: Vec<ReplicationLayer>,
- }
- 
- impl ObjectInstance {
-@@ -120,13 +128,14 @@
-         let type_name = object.type_name().to_string();
-         let position = object.position();
-         let layers = object.get_layers();
--        
-+        let cached_layers = layers.clone();
-+
-         // Notify object of registration
-         object.on_register(object_id);
--        
-+
-         // Create zone manager with the object's layers
-         let zone_manager = ZoneManager::new(position, layers);
--        
-+
-         Self {
-             object_id,
-             type_name,
-@@ -136,6 +145,7 @@
-             last_updates: HashMap::new(),
-             stats: ObjectStats::default(),
-             needs_update: HashMap::new(),
-+            cached_layers,
-         }
-     }
- 
-@@ -143,9 +153,9 @@
-     pub fn update_position(&mut self, new_position: Vec3) {
-         self.object.update_position(new_position);
-         self.zone_manager.update_position(new_position);
--        
-+
-         // Mark all channels as needing updates due to position change
--        for layer in self.object.get_layers() {
-+        for layer in &self.cached_layers {
-             self.needs_update.insert(layer.channel, true);
-         }
-     }
-@@ -234,6 +244,7 @@
-             last_updates: self.last_updates.clone(),
-             stats: self.stats.clone(),
-             needs_update: self.needs_update.clone(),
-+            cached_layers: self.cached_layers.clone(),
-         }
-     }
- }
-@@ -256,14 +267,14 @@
+@@ -256,14 +257,14 @@
  /// Manager for all GORC object instances
  #[derive(Debug)]
  pub struct GorcInstanceManager {
@@ -644,7 +584,7 @@ diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=log
      /// Player positions for subscription management
      player_positions: Arc<RwLock<HashMap<PlayerId, Vec3>>>,
      /// Zone size warnings tracking (object_id -> largest_zone_radius)
-@@ -286,10 +297,10 @@
+@@ -286,10 +287,10 @@
          let virtualization_manager = Arc::new(VirtualizationManager::new(virtualization_config));
  
          let manager = Self {
@@ -657,7 +597,7 @@ diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=log
              player_positions: Arc::new(RwLock::new(HashMap::new())),
              zone_size_warnings: Arc::new(RwLock::new(HashMap::new())),
              virtualization_manager,
-@@ -320,92 +331,90 @@
+@@ -320,92 +321,90 @@
      }
  
      /// Registers a new object instance (optionally provide UUID)
@@ -703,13 +643,13 @@ diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=log
 +            }
          }
 +        debug!("🔧 REGISTER[{}]: Phase 1 - subscriptions calculated", object_id);
-+        
+         
 +        // === PHASE 2: Critical section - each lock is independent ===
 +        // Insert into objects map (lock-free with DashMap)
 +        debug!("🔧 REGISTER[{}]: Phase 2 - inserting into objects (DashMap)", object_id);
 +        self.objects.insert(object_id, instance);
 +        debug!("🔧 REGISTER[{}]: Phase 2 - objects inserted", object_id);
-         
++        
 +        debug!("🔧 REGISTER[{}]: Phase 2 - acquiring type_registry write lock", object_id);
 +        // Update type registry
          {
@@ -803,7 +743,7 @@ diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=log
          };
  
          if let Some(type_name) = type_name {
-@@ -419,10 +428,8 @@
+@@ -419,10 +418,8 @@
                  }
              }
              
@@ -816,7 +756,7 @@ diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=log
  
              {
                  let mut zone_warnings = self.zone_size_warnings.write().await;
-@@ -443,22 +450,18 @@
+@@ -443,22 +440,18 @@
  
      /// Update an object's position and return zone membership changes for zone events
      pub async fn update_object_position(&self, object_id: GorcObjectId, new_position: Vec3) -> Option<(Vec3, Vec3, Vec<(PlayerId, u8, bool)>)> {
@@ -849,40 +789,7 @@ diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=log
  
          // Check for virtual zone splits due to object movement
          let virtual_zones_to_split = self.virtualization_manager
-@@ -478,11 +481,31 @@
-         Some((old_position, new_position, zone_changes))
-     }
- 
-+    /// Minimum squared movement (0.5m * 0.5m) before the full zone sweep re-runs
-+    /// for a player. Zone radii are measured in tens of meters, so a half-meter
-+    /// hysteresis is imperceptible — but movement packets arrive at up to 60Hz,
-+    /// so skipping sub-threshold moves cuts the per-packet O(objects) sweep by
-+    /// an order of magnitude for walking players and entirely for idle ones.
-+    const MIN_ZONE_SWEEP_MOVEMENT_SQ: f64 = 0.25;
-+
-     /// Update a player's position and return zone membership changes
-     pub async fn update_player_position(&self, player_id: PlayerId, new_position: Vec3) -> (Vec<(GorcObjectId, u8)>, Vec<(GorcObjectId, u8)>) {
-         let mut zone_entries = Vec::new();
-         let mut zone_exits = Vec::new();
--        
-+
-+        // Early-out on sub-threshold movement. The stored position is
-+        // intentionally NOT updated on skip, so boundary crossings are always
-+        // detected against the last swept position and can never be missed by
-+        // accumulating many tiny moves.
-+        {
-+            let player_positions = self.player_positions.read().await;
-+            if let Some(old) = player_positions.get(&player_id) {
-+                if old.distance_squared(new_position) < Self::MIN_ZONE_SWEEP_MOVEMENT_SQ {
-+                    return (zone_entries, zone_exits);
-+                }
-+            }
-+        }
-+
-         // Get old position and update to new position
-         let old_position = {
-             let mut player_positions = self.player_positions.write().await;
-@@ -500,28 +523,30 @@
+@@ -500,64 +493,80 @@
          }
  
  
@@ -894,11 +801,26 @@ diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=log
 -            // CRITICAL: Get object position from tracking HashMap (single source of truth)
 -            let object_position = match object_positions_map.get(object_id) {
 -                Some(&pos) => pos,
-+        // Check all objects for zone membership changes (lock-free iteration over DashMap)
++        // Decide first, mutate after: `objects.iter()` holds shard read locks, so taking `get_mut` on the
++        // same map inside the loop would deadlock.
++        //
++        // "Was the player in this zone" is answered by the SUBSCRIPTION TABLE, not by geometry. The old
++        // test compared the player's PREVIOUS position against the object's CURRENT one — two different
++        // instants — and that is wrong the moment the object has moved too. A player who walks away from
++        // a vehicle and comes back while someone drives it has "old player position" and "new vehicle
++        // position" land within the radius: was_in_zone and is_in_zone both read true, no transition is
++        // emitted, and the client never gets the object back. It had been deleted on the way out, so it
++        // stays gone for the rest of the session.
++        //
++        // The table records what the CLIENT has actually been told, which is the only thing an entry or
++        // exit should be derived from, and it costs no extra state — it was already there, merely unused
++        // here and maintained behind this function's back.
++        let mut entering: Vec<(GorcObjectId, u8)> = Vec::new();
++        let mut leaving: Vec<(GorcObjectId, u8)> = Vec::new();
 +        for entry in self.objects.iter() {
 +            let object_id = entry.key();
 +            let instance = entry.value();
-+            
++
 +            // CRITICAL: Get object position from DashMap (lock-free, single source of truth)
 +            let object_position = match self.object_positions.get(object_id) {
 +                Some(pos) => *pos,
@@ -907,48 +829,86 @@ diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=log
                      continue;
                  }
              };
-             
--            let layers = instance.object.get_layers();
 -            
--            for layer in layers {
++
+             let layers = instance.object.get_layers();
+-            
++
+             for layer in layers {
 -                let distance_to_object = new_position.distance(object_position);
 -                let was_in_zone = old_position.map_or(false, |pos| pos.distance(object_position) <= layer.radius);
 -                let is_in_zone = distance_to_object <= layer.radius;
 -                
 -                
-+            // Distances are per-object, not per-layer: compute them once here
-+            // instead of inside the layer loop.
-+            let new_distance_sq = new_position.distance_squared(object_position);
-+            let old_distance_sq = old_position.map(|pos| pos.distance_squared(object_position));
-+
-+            for layer in &instance.cached_layers {
+-                match (was_in_zone, is_in_zone) {
 +                let radius_sq = layer.radius * layer.radius;
-+                let was_in_zone = old_distance_sq.map_or(false, |d| d <= radius_sq);
-+                let is_in_zone = new_distance_sq <= radius_sq;
++                let is_in_zone = new_position.distance_squared(object_position) <= radius_sq;
++                // A player who has just appeared holds nothing yet, whatever the table says: registration
++                // may already have subscribed them, and without this they would receive the world's
++                // opening snapshot for no object at all.
++                let holds_it = old_position.is_some() && instance.is_subscribed(layer.channel, player_id);
 +
-                 match (was_in_zone, is_in_zone) {
++                match (holds_it, is_in_zone) {
                      (false, true) => {
                          debug!("🎮 GORC: Zone entry - player {} enters object {} channel {}", player_id, object_id, layer.channel);
-@@ -545,16 +570,10 @@
+-                        zone_entries.push((*object_id, layer.channel));
++                        entering.push((*object_id, layer.channel));
+                     },
+                     (true, false) => {
+                         debug!("🎮 GORC: Zone exit - player {} leaves object {} channel {}", player_id, object_id, layer.channel);
+-                        zone_exits.push((*object_id, layer.channel));
++                        leaving.push((*object_id, layer.channel));
+                     },
+-                    _ => {
+-                        // Special case: if this is a first spawn (old_position is None) and player is in range,
+-                        // force zone entry even if the logic above didn't catch it
+-                        if old_position.is_none() && is_in_zone {
+-                            debug!("🎮 GORC: First spawn entry - player {} enters object {} channel {}", player_id, object_id, layer.channel);
+-                            zone_entries.push((*object_id, layer.channel));
+-                        }
+-                    }
++                    _ => {}
+                 }
+             }
+         }
  
++        // Record what we are about to tell the client, so the table and the client agree by construction.
++        for (object_id, channel) in entering {
++            if let Some(mut instance) = self.objects.get_mut(&object_id) {
++                instance.add_subscriber(channel, player_id);
++            }
++            zone_entries.push((object_id, channel));
++        }
++        for (object_id, channel) in leaving {
++            if let Some(mut instance) = self.objects.get_mut(&object_id) {
++                instance.remove_subscriber(channel, player_id);
++            }
++            zone_exits.push((object_id, channel));
++        }
++
          debug!("🎮 GORC: Zone changes for player {} - {} entries, {} exits", player_id, zone_entries.len(), zone_exits.len());
  
--
++        // NOT calling recalculate_player_subscriptions here any more. It edited the same table WITHOUT
++        // emitting anything, so it could subscribe a player to a channel the client was never sent, or
++        // drop one it still holds — which is exactly the disagreement this function now avoids. The one
++        // place that decides is the one place that both mutates and emits.
+ 
 -        // If this is a new player or they moved significantly, recalculate subscriptions
 -        //
 -        // N.B. `recalculate_player_subscriptions` tries to acquire a write lock to `objects`,
 -        // which will deadlock. release the read lock now
 -        drop(objects);
 -        
-         // If this is a new player or they moved significantly, recalculate subscriptions
-+        const MOVEMENT_THRESHOLD_SQ: f64 = 25.0; // 5.0 * 5.0
-         if old_position.is_none() || 
+-        // If this is a new player or they moved significantly, recalculate subscriptions
+-        if old_position.is_none() || 
 -           old_position.map(|old| old.distance(new_position) > 5.0).unwrap_or(true) {
-+           old_position.map(|old| old.distance_squared(new_position) > MOVEMENT_THRESHOLD_SQ).unwrap_or(true) {
-             self.recalculate_player_subscriptions(player_id, new_position).await;
-         }
-         
-@@ -587,13 +606,17 @@
+-            self.recalculate_player_subscriptions(player_id, new_position).await;
+-        }
+-        
+         (zone_entries, zone_exits)
+     }
+ 
+@@ -587,13 +596,17 @@
      }
  
      /// Add a player to the position tracking system
@@ -970,7 +930,7 @@ diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=log
          
          {
              let spatial_position: Position = position.into();
-@@ -603,11 +626,6 @@
+@@ -603,11 +616,6 @@
                  .await;
          }
          
@@ -982,7 +942,7 @@ diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=log
          // Update statistics
          let mut stats = self.stats.write().await;
          stats.total_subscriptions += 1;
-@@ -620,6 +638,59 @@
+@@ -620,6 +628,58 @@
          );
      }
      
@@ -1004,10 +964,9 @@ diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=log
 +        // Use DashMap get_mut for lock-free mutable access
 +        for (object_id, object_position) in object_ids_and_positions {
 +            if let Some(mut instance) = self.objects.get_mut(&object_id) {
-+                // Clone the cached layers so the instance can be mutated below
-+                let layers = instance.cached_layers.clone();
++                let layers = instance.object.get_layers();
 +                let object_type = instance.type_name.clone();
-+
++                
 +                for layer in layers {
 +                    let radius_sq = layer.radius * layer.radius;
 +                    let distance_sq = player_position.distance_squared(object_position);
@@ -1042,7 +1001,7 @@ diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=log
      /// Remove a player from all subscriptions
      pub async fn remove_player(&self, player_id: PlayerId) {
          {
-@@ -632,9 +703,14 @@
+@@ -632,9 +692,14 @@
              partition.remove_player(player_id).await;
          }
  
@@ -1060,7 +1019,7 @@ diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=log
                  instance.remove_subscriber(channel, player_id);
              }
          }
-@@ -642,10 +718,19 @@
+@@ -642,10 +707,19 @@
  
      /// Get an object instance by ID
      pub async fn get_object(&self, object_id: GorcObjectId) -> Option<ObjectInstance> {
@@ -1084,37 +1043,18 @@ diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=log
      }
  
      /// Get all objects of a specific type
-@@ -658,9 +743,26 @@
-     }
+@@ -659,8 +733,8 @@
  
      /// Update an object instance (after handlers have modified it)
--    pub async fn update_object(&self, object_id: GorcObjectId, instance: ObjectInstance) {
+     pub async fn update_object(&self, object_id: GorcObjectId, instance: ObjectInstance) {
 -        let mut objects = self.objects.write().await;
 -        objects.insert(object_id, instance);
-+    ///
-+    /// Update-only: if the object was unregistered since the caller fetched its
-+    /// snapshot (e.g. player disconnect racing an in-flight movement handler),
-+    /// the stale instance is dropped instead of being resurrected into `objects`
-+    /// without a matching `object_positions` entry.
-+    ///
-+    /// Returns `true` if the object existed and was updated, `false` if it was
-+    /// no longer registered and the update was discarded.
-+    pub async fn update_object(&self, object_id: GorcObjectId, instance: ObjectInstance) -> bool {
-+        // get_mut locks the entry, making the existence check and the write atomic
-+        match self.objects.get_mut(&object_id) {
-+            Some(mut entry) => {
-+                *entry = instance;
-+                true
-+            }
-+            None => {
-+                debug!("🗑️ Dropped stale update for unregistered object {}", object_id);
-+                false
-+            }
-+        }
++        // Use DashMap insert for lock-free write access
++        self.objects.insert(object_id, instance);
      }
  
      /// Find a player's GORC object by player ID (for message routing)
-@@ -677,7 +779,6 @@
+@@ -677,7 +751,6 @@
      /// Get objects within range of a position using spatial index optimization
      pub async fn get_objects_in_range(&self, position: Vec3, range: f64) -> Vec<GorcObjectId> {
          let mut result_objects = Vec::new();
@@ -1122,7 +1062,7 @@ diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=log
  
          // Get largest zone radius for query optimization
          let query_radius = self.get_max_zone_radius().await.max(range);
-@@ -689,10 +790,13 @@
+@@ -689,10 +762,13 @@
              query_radius
          ).await;
  
@@ -1139,7 +1079,7 @@ diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=log
                      result_objects.push(object_id);
                  }
              }
-@@ -700,20 +804,21 @@
+@@ -700,20 +776,21 @@
  
          // Fallback to direct position checking if spatial index is empty
          if result_objects.is_empty() {
@@ -1167,7 +1107,7 @@ diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=log
      }
      
      /// Find all players within radius of a position (for event-driven GORC emission)
-@@ -722,12 +827,14 @@
+@@ -722,12 +799,14 @@
          debug!("🔍 GORC: Finding players within {}m of position {:?}", radius, position);
          debug!("🔍 GORC: Total tracked players: {}", player_positions.len());
          
@@ -1185,21 +1125,18 @@ diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=log
                      debug!("  ✅ Within range");
                      Some(player_id)
                  } else {
-@@ -744,10 +851,9 @@
+@@ -744,8 +823,8 @@
      
      /// Get current object state for a specific layer/channel
      pub async fn get_object_state_for_layer(&self, object_id: GorcObjectId, channel: u8) -> Option<Vec<u8>> {
 -        let objects = self.objects.read().await;
 -        if let Some(instance) = objects.get(&object_id) {
--            let layers = instance.object.get_layers();
--            if let Some(layer) = layers.iter().find(|l| l.channel == channel) {
 +        // Use DashMap get for lock-free read access
 +        if let Some(instance) = self.objects.get(&object_id) {
-+            if let Some(layer) = instance.cached_layers.iter().find(|l| l.channel == channel) {
+             let layers = instance.object.get_layers();
+             if let Some(layer) = layers.iter().find(|l| l.channel == channel) {
                  // Serialize only the properties defined for this layer
-                 if let Ok(data) = instance.object.serialize_for_layer(layer) {
-                     return Some(data);
-@@ -769,8 +875,8 @@
+@@ -769,25 +848,37 @@
              return false;
          };
  
@@ -1210,9 +1147,17 @@ diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=log
              return false;
          };
  
-@@ -779,14 +885,13 @@
+         instance.zone_manager.is_in_zone(player_pos, channel)
+     }
  
-     /// Recalculate subscriptions for a player
+-    /// Recalculate subscriptions for a player
++    /// Recalculate subscriptions for a player.
++    ///
++    /// No longer called: it rewrote the subscription table WITHOUT emitting the matching zone entries
++    /// and exits, so the table and what the client actually held drifted apart. `update_player_position`
++    /// now maintains the table itself, as it emits. Kept for reference until the GORC changes are
++    /// reviewed upstream.
++    #[allow(dead_code)]
      async fn recalculate_player_subscriptions(&self, player_id: PlayerId, player_position: Vec3) {
 -        let object_ids: Vec<GorcObjectId> = {
 -            let object_positions = self.object_positions.read().await;
@@ -1226,35 +1171,31 @@ diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=log
 +        // Use DashMap get_mut for lock-free mutable access
          for object_id in object_ids {
 -            if let Some(instance) = objects.get_mut(&object_id) {
+-                for channel in 0..4 {
 +            if let Some(mut instance) = self.objects.get_mut(&object_id) {
-                 for channel in 0..4 {
++                // The channels come from the object's OWN definition, never from a fixed range. A
++                // hardcoded 0..4 silently skipped every channel above 3, so a player who walked away
++                // from an object stayed subscribed to those forever. That stale subscription then made
++                // the object-movement path (which trusts this table, unlike the player-movement path
++                // which reads geometry) believe the client already had the zone, and it stopped
++                // sending zone entries for it — leaving objects the client could never rebuild.
++                let channels: Vec<u8> = instance.object.get_layers().iter().map(|l| l.channel).collect();
++                for channel in channels {
                      let should_sub = instance.zone_manager.is_in_zone(player_position, channel);
                      let is_subbed = instance.is_subscribed(channel, player_id);
-@@ -823,17 +928,16 @@
+ 
+@@ -823,8 +914,8 @@
              player_positions.iter().map(|(&id, &pos)| (id, pos)).collect()
          };
  
 -        let mut objects = self.objects.write().await;
 -        if let Some(instance) = objects.get_mut(&object_id) {
--            let layers = instance.object.get_layers();
 +        // Use DashMap get_mut for lock-free mutable access
 +        if let Some(mut instance) = self.objects.get_mut(&object_id) {
-+            // Sort once per call, not once per player
-+            let mut sorted_layers = instance.cached_layers.clone();
-+            sorted_layers.sort_by(|a, b| a.radius.partial_cmp(&b.radius).unwrap());
-+            let smallest_radius = sorted_layers.get(0).map(|l| l.radius).unwrap_or(0.0);
+             let layers = instance.object.get_layers();
  
              for (player_id, player_pos) in player_positions {
-                 // Use inner zone optimization - check smallest zones first
-                 let mut player_in_inner_zone = false;
--                let mut sorted_layers = layers.clone();
--                sorted_layers.sort_by(|a, b| a.radius.partial_cmp(&b.radius).unwrap());
--
--                let smallest_radius = sorted_layers.get(0).map(|l| l.radius).unwrap_or(0.0);
-                 for layer in &sorted_layers {
-                     let channel = layer.channel;
- 
-@@ -845,8 +949,9 @@
+@@ -845,8 +936,9 @@
                          }
                      }
  
@@ -1266,25 +1207,20 @@ diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=log
                      let is_subbed = instance.is_subscribed(channel, player_id);
  
                      if is_in_zone && layer.radius == smallest_radius {
-@@ -908,10 +1013,13 @@
+@@ -908,9 +1000,9 @@
  
      /// Get the maximum zone radius across all objects for spatial query optimization
      async fn get_max_zone_radius(&self) -> f64 {
 -        let objects = self.objects.read().await;
 -        objects.values()
 -            .flat_map(|instance| instance.object.get_layers())
--            .map(|layer| layer.radius)
 +        // Use DashMap iter for lock-free read access
 +        self.objects.iter()
-+            .filter_map(|entry| {
-+                entry.value().cached_layers.iter()
-+                    .map(|layer| layer.radius)
-+                    .max_by(|a, b| a.partial_cmp(b).unwrap())
-+            })
++            .flat_map(|entry| entry.value().object.get_layers())
+             .map(|layer| layer.radius)
              .max_by(|a, b| a.partial_cmp(b).unwrap())
              .unwrap_or(100.0) // Default reasonable radius
-     }
-@@ -920,20 +1028,17 @@
+@@ -920,20 +1012,17 @@
      pub async fn notify_existing_players_for_new_object(&self, object_id: GorcObjectId) -> Vec<(PlayerId, u8)> {
          let mut zone_entries = Vec::new();
  
@@ -1316,7 +1252,7 @@ diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=log
          };
  
          let player_positions = {
-@@ -941,15 +1046,16 @@
+@@ -941,15 +1030,16 @@
              player_positions.iter().map(|(&id, &pos)| (id, pos)).collect::<Vec<_>>()
          };
  
@@ -1337,7 +1273,7 @@ diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=log
                          instance.add_subscriber(channel, player_id);
                          zone_entries.push((player_id, channel));
                          debug!("🆕 GORC New Object: Player {} automatically entered zone {} of new object {}", player_id, channel, object_id);
-@@ -963,16 +1069,17 @@
+@@ -963,16 +1053,17 @@
  
      /// Analyzes virtualization opportunities and applies recommendations
      pub async fn process_virtualization(&self) -> Result<(), Box<dyn std::error::Error>> {
@@ -1350,15 +1286,14 @@ diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=log
              let mut info = HashMap::new();
 -            for (object_id, instance) in objects.iter() {
 -                if let Some(&position) = object_positions.get(object_id) {
--                    let layers = instance.object.get_layers();
--                    info.insert(*object_id, (position, layers));
 +            for entry in self.objects.iter() {
 +                let object_id = *entry.key();
 +                let instance = entry.value();
 +                // Get position from DashMap (lock-free)
 +                if let Some(position_entry) = self.object_positions.get(&object_id) {
 +                    let position = *position_entry;
-+                    let layers = instance.cached_layers.clone();
+                     let layers = instance.object.get_layers();
+-                    info.insert(*object_id, (position, layers));
 +                    info.insert(object_id, (position, layers));
                  }
              }

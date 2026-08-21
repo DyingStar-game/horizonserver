@@ -138,13 +138,23 @@ pub async fn handle_player_init(
 
     // Update the player_id stored in the connection manager
     // This replaces the temporary connection-level player_id with the database player_id
+    //
+    // ORDERING CONTRACT: emit_core awaits its handlers, and the core update_player_id
+    // handler applies the remap before returning. player_spawn below must only be emitted
+    // once this call has returned, so that everything triggered by the spawn (persistence
+    // reply -> GORC registration -> send-to-player) can already address this connection by
+    // player_db_id. Emitting player_spawn without that guarantee drops the client's own
+    // spawn message on reconnection (client error 7002).
     if let Err(e) = events.emit_core("update_player_id", &serde_json::json!({
         "old_player_id": player_id,
         "new_player_id": player_db_id,
         "connection_id": player_id,  // The connection_id is currently the old player_id
     })).await
     {
-        error!("Failed to emit update_player_id event: {}", e);
+        // Without the remap the spawn pipeline cannot reach this client; abort the
+        // handshake instead of spawning a player the connection will never see.
+        error!("Failed to emit update_player_id event, aborting player init: {}", e);
+        return Err(format!("update_player_id failed for player {}: {}", player_db_id, e).into());
     }
 
     info!(

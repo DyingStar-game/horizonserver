@@ -1,10 +1,6 @@
-File a/0.0.0.0:9000 is a socket while file b/0.0.0.0:9000 is a socket
-File a/0.0.0.0:9090 is a socket while file b/0.0.0.0:9090 is a socket
-File a/192.168.20.158:9090 is a socket while file b/192.168.20.158:9090 is a socket
-File a/192.168.20.174:9090 is a socket while file b/192.168.20.174:9090 is a socket
-diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=logs' '--exclude=*.sock' a/Cargo.toml b/Cargo.toml
---- a/Cargo.toml	2026-04-25 00:31:59.748581962 +0200
-+++ b/Cargo.toml	2026-01-10 15:24:56.775131616 +0100
+diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=logs' '--exclude=*.sock' '--exclude=Cargo.lock' a/Cargo.toml b/Cargo.toml
+--- a/Cargo.toml	2026-08-21 10:19:52.203202689 +0200
++++ b/Cargo.toml	2026-08-21 10:14:20.623945949 +0200
 @@ -11,8 +11,12 @@
  futures = "0.3"
  horizon_sockets = { git = "https://github.com/Far-Beyond-Dev/Horizon-Sockets", rev = "aa0badb262e1344a8aceaaf5caf55012dc7fa89a" }
@@ -19,9 +15,9 @@ diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=log
  
  # === CLI & Configuration ===
  clap = { version = "4.0", features = ["derive"] }
-diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=logs' '--exclude=*.sock' a/crates/game_server/src/connection/manager.rs b/crates/game_server/src/connection/manager.rs
---- a/crates/game_server/src/connection/manager.rs	2026-04-25 00:31:25.635217138 +0200
-+++ b/crates/game_server/src/connection/manager.rs	2025-12-22 09:34:05.229960294 +0100
+diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=logs' '--exclude=*.sock' '--exclude=Cargo.lock' a/crates/game_server/src/connection/manager.rs b/crates/game_server/src/connection/manager.rs
+--- a/crates/game_server/src/connection/manager.rs	2026-08-21 10:19:52.206644772 +0200
++++ b/crates/game_server/src/connection/manager.rs	2026-08-21 10:14:20.623945949 +0200
 @@ -3,12 +3,14 @@
  //! This module provides the central management system for all client connections,
  //! handling connection lifecycle, player ID assignment, and message broadcasting.
@@ -213,19 +209,30 @@ diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=log
      }
  
      /// Finds the connection ID associated with a player.
-diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=logs' '--exclude=*.sock' a/crates/game_server/src/server/core.rs b/crates/game_server/src/server/core.rs
---- a/crates/game_server/src/server/core.rs	2026-04-25 00:31:25.636627972 +0200
-+++ b/crates/game_server/src/server/core.rs	2025-12-22 09:27:42.428258303 +0100
-@@ -547,6 +547,51 @@
+diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=logs' '--exclude=*.sock' '--exclude=Cargo.lock' a/crates/game_server/src/server/core.rs b/crates/game_server/src/server/core.rs
+--- a/crates/game_server/src/server/core.rs	2026-08-21 10:19:52.207899060 +0200
++++ b/crates/game_server/src/server/core.rs	2026-08-21 10:17:10.554418078 +0200
+@@ -547,6 +547,56 @@
              .await
              .map_err(|e| ServerError::Internal(e.to_string()))?;
  
 +        // Register handler to update player_id in connection manager
 +        // This allows plugins to replace the temporary connection-level player_id
 +        // with a permanent database player_id after authentication
-+        // Capture the runtime handle HERE: register_core_handlers is async, so this line always runs
-+        // inside the host runtime, while the handler below is invoked from a plugin's own thread.
-+        let rt_handle = tokio::runtime::Handle::current();
++        //
++        // The mapping MUST be applied before this handler returns: emit_core() awaits its
++        // handlers, and the auth plugin relies on that to guarantee the connection is
++        // addressable by its database player_id before it emits player_spawn. Spawning the
++        // update as a task instead leaves a window where the spawn pipeline (persistence
++        // reply -> GORC registration -> send-to-player) races the remap and the client's
++        // own spawn message is dropped ("Player not found or not connected"), which the
++        // client experiences as error 7002 on reconnection (persistence answers from a hot
++        // cache in ~2 ms and always wins that race).
++        //
++        // futures::executor::block_on (not Handle::block_on, which panics on runtime
++        // threads; not spawn, which is fire-and-forget) is safe here: this closure runs on
++        // the emitting plugin's thread, which has no tokio reactor, the awaited lock is
++        // runtime-agnostic, and it is only held for brief map operations.
 +        let connection_manager_for_update = self.connection_manager.clone();
 +        self.horizon_event_system
 +            .on_core_async("update_player_id", move |event: serde_json::Value| {
@@ -238,13 +245,7 @@ diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=log
 +                let new_player_id = serde_json::from_value::<horizon_event_system::PlayerId>(event["new_player_id"].clone());
 +
 +                if let (Ok(old_player_id), Ok(new_player_id)) = (old_player_id, new_player_id) {
-+                    // Spawn through the CAPTURED handle, never tokio::spawn: this closure runs on the
-+                    // emitting plugin's thread, which has no runtime in its thread-local, so
-+                    // tokio::spawn panics with "there is no reactor running" and aborts the whole
-+                    // process. Handle::spawn is callable from any thread and schedules onto the host
-+                    // runtime. (Sibling handlers use Handle::try_current(), which merely skips the
-+                    // work when it is absent — silent, so not a model to copy here.)
-+                    rt_handle.spawn(async move {
++                    futures::executor::block_on(async move {
 +                        // Get the connection_id for this player
 +                        if let Some(connection_id) = conn_mgr.get_connection_id_by_player(old_player_id).await {
 +                            // Update the player_id stored in the connection
@@ -268,9 +269,9 @@ diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=log
  
          // Register a simple ping handler for testing validity of the client connection
          self.horizon_event_system
-diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=logs' '--exclude=*.sock' a/crates/game_server/src/server/handlers.rs b/crates/game_server/src/server/handlers.rs
---- a/crates/game_server/src/server/handlers.rs	2026-04-25 00:31:25.637056282 +0200
-+++ b/crates/game_server/src/server/handlers.rs	2025-12-11 12:41:24.810405885 +0100
+diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=logs' '--exclude=*.sock' '--exclude=Cargo.lock' a/crates/game_server/src/server/handlers.rs b/crates/game_server/src/server/handlers.rs
+--- a/crates/game_server/src/server/handlers.rs	2026-08-21 10:19:52.208283517 +0200
++++ b/crates/game_server/src/server/handlers.rs	2026-08-21 10:14:20.624887479 +0200
 @@ -92,7 +92,8 @@
          .await
          .map_err(|e| ServerError::Internal(e.to_string()))?;
@@ -324,9 +325,9 @@ diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=log
      Ok(())
  }
 \ No newline at end of file
-diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=logs' '--exclude=*.sock' a/crates/horizon/Cargo.toml b/crates/horizon/Cargo.toml
---- a/crates/horizon/Cargo.toml	2026-04-25 00:31:59.749581978 +0200
-+++ b/crates/horizon/Cargo.toml	2026-01-10 23:22:35.412116456 +0100
+diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=logs' '--exclude=*.sock' '--exclude=Cargo.lock' a/crates/horizon/Cargo.toml b/crates/horizon/Cargo.toml
+--- a/crates/horizon/Cargo.toml	2026-08-21 10:19:52.208283517 +0200
++++ b/crates/horizon/Cargo.toml	2026-08-21 10:14:20.624887479 +0200
 @@ -23,5 +23,11 @@
  clap = { workspace = true }
  toml = { workspace = true }
@@ -340,9 +341,9 @@ diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=log
  [dev-dependencies]
  tempfile = { workspace = true }
 \ No newline at end of file
-diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=logs' '--exclude=*.sock' a/crates/horizon/src/lib.rs b/crates/horizon/src/lib.rs
---- a/crates/horizon/src/lib.rs	2026-04-25 00:31:25.638041835 +0200
-+++ b/crates/horizon/src/lib.rs	2026-01-10 01:20:50.105272095 +0100
+diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=logs' '--exclude=*.sock' '--exclude=Cargo.lock' a/crates/horizon/src/lib.rs b/crates/horizon/src/lib.rs
+--- a/crates/horizon/src/lib.rs	2026-08-21 10:19:52.208849987 +0200
++++ b/crates/horizon/src/lib.rs	2026-08-21 10:14:20.624887479 +0200
 @@ -50,6 +50,7 @@
  use cli::CliArgs;
  use config::AppConfig;
@@ -369,9 +370,9 @@ diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=log
      // Parse CLI arguments first
      let args = CliArgs::parse();
  
-diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=logs' '--exclude=*.sock' a/crates/horizon/src/logging.rs b/crates/horizon/src/logging.rs
---- a/crates/horizon/src/logging.rs	2026-04-25 00:31:25.638041835 +0200
-+++ b/crates/horizon/src/logging.rs	2025-12-27 01:10:34.086767633 +0100
+diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=logs' '--exclude=*.sock' '--exclude=Cargo.lock' a/crates/horizon/src/logging.rs b/crates/horizon/src/logging.rs
+--- a/crates/horizon/src/logging.rs	2026-08-21 10:19:52.208849987 +0200
++++ b/crates/horizon/src/logging.rs	2026-08-21 10:14:20.625031357 +0200
 @@ -6,6 +6,8 @@
  use crate::config::LoggingSettings;
  use tracing::info;
@@ -393,9 +394,9 @@ diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=log
  
      if json_format || config.json_format {
          // JSON formatting with thread info for structured logging
-diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=logs' '--exclude=*.sock' a/crates/horizon_event_system/benches/distance_benchmark.rs b/crates/horizon_event_system/benches/distance_benchmark.rs
+diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=logs' '--exclude=*.sock' '--exclude=Cargo.lock' a/crates/horizon_event_system/benches/distance_benchmark.rs b/crates/horizon_event_system/benches/distance_benchmark.rs
 --- a/crates/horizon_event_system/benches/distance_benchmark.rs	1970-01-01 01:00:00.000000000 +0100
-+++ b/crates/horizon_event_system/benches/distance_benchmark.rs	2025-12-11 17:06:04.266463798 +0100
++++ b/crates/horizon_event_system/benches/distance_benchmark.rs	2026-08-21 10:14:20.625031357 +0200
 @@ -0,0 +1,109 @@
 +// Benchmark comparing distance() vs distance_squared() performance
 +// 
@@ -506,9 +507,9 @@ diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=log
 +
 +criterion_group!(benches, benchmark_distance_methods);
 +criterion_main!(benches);
-diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=logs' '--exclude=*.sock' a/crates/horizon_event_system/Cargo.toml b/crates/horizon_event_system/Cargo.toml
---- a/crates/horizon_event_system/Cargo.toml	2026-04-25 00:31:59.750581994 +0200
-+++ b/crates/horizon_event_system/Cargo.toml	2025-12-11 17:06:04.266463798 +0100
+diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=logs' '--exclude=*.sock' '--exclude=Cargo.lock' a/crates/horizon_event_system/Cargo.toml b/crates/horizon_event_system/Cargo.toml
+--- a/crates/horizon_event_system/Cargo.toml	2026-08-21 10:19:52.209651764 +0200
++++ b/crates/horizon_event_system/Cargo.toml	2026-08-21 10:14:20.625189403 +0200
 @@ -23,9 +23,17 @@
  base64 = { workspace = true }
  const_format = { workspace = true }
@@ -527,9 +528,9 @@ diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=log
 +[[bench]]
 +name = "distance_benchmark"
 +harness = false
-diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=logs' '--exclude=*.sock' a/crates/horizon_event_system/src/context.rs b/crates/horizon_event_system/src/context.rs
---- a/crates/horizon_event_system/src/context.rs	2026-04-25 00:31:25.640179451 +0200
-+++ b/crates/horizon_event_system/src/context.rs	2025-12-11 17:06:04.267192452 +0100
+diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=logs' '--exclude=*.sock' '--exclude=Cargo.lock' a/crates/horizon_event_system/src/context.rs b/crates/horizon_event_system/src/context.rs
+--- a/crates/horizon_event_system/src/context.rs	2026-08-21 10:19:52.210474292 +0200
++++ b/crates/horizon_event_system/src/context.rs	2026-08-21 10:14:20.625189403 +0200
 @@ -150,6 +150,21 @@
      /// Returns the luminal runtime handle for cross-DLL async execution.
      fn luminal_handle(&self) -> luminal::Handle;
@@ -552,9 +553,9 @@ diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=log
      /// Returns access to the GORC instance manager for object replication.
      /// 
      /// This provides plugins with direct access to the GORC (Game Object Replication
-diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=logs' '--exclude=*.sock' a/crates/horizon_event_system/src/gorc/instance.rs b/crates/horizon_event_system/src/gorc/instance.rs
---- a/crates/horizon_event_system/src/gorc/instance.rs	2026-04-25 00:31:25.642041898 +0200
-+++ b/crates/horizon_event_system/src/gorc/instance.rs	2026-07-15 20:57:39.092326758 +0200
+diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=logs' '--exclude=*.sock' '--exclude=Cargo.lock' a/crates/horizon_event_system/src/gorc/instance.rs b/crates/horizon_event_system/src/gorc/instance.rs
+--- a/crates/horizon_event_system/src/gorc/instance.rs	2026-08-21 10:19:52.211318967 +0200
++++ b/crates/horizon_event_system/src/gorc/instance.rs	2026-08-21 10:14:20.625189403 +0200
 @@ -14,7 +14,8 @@
  use std::collections::{HashMap, HashSet};
  use std::sync::Arc;
@@ -1363,9 +1364,9 @@ diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=log
                  }
              }
              info
-diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=logs' '--exclude=*.sock' a/crates/horizon_event_system/src/system/emitters.rs b/crates/horizon_event_system/src/system/emitters.rs
---- a/crates/horizon_event_system/src/system/emitters.rs	2026-04-25 00:31:25.648288666 +0200
-+++ b/crates/horizon_event_system/src/system/emitters.rs	2026-07-15 20:51:09.309007235 +0200
+diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=logs' '--exclude=*.sock' '--exclude=Cargo.lock' a/crates/horizon_event_system/src/system/emitters.rs b/crates/horizon_event_system/src/system/emitters.rs
+--- a/crates/horizon_event_system/src/system/emitters.rs	2026-08-21 10:19:52.216138509 +0200
++++ b/crates/horizon_event_system/src/system/emitters.rs	2026-08-21 10:14:20.625189403 +0200
 @@ -151,8 +151,19 @@
                  if dest == Dest::Server || dest == Dest::Both {
                      let instance_key = CompactString::new_inline("gorc_instance:") + object_type + ":" + &channel.to_string() + ":" + event_name;
@@ -1499,9 +1500,9 @@ diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=log
          
          Ok(())
      }
-diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=logs' '--exclude=*.sock' a/crates/horizon_event_system/src/system/handlers.rs b/crates/horizon_event_system/src/system/handlers.rs
---- a/crates/horizon_event_system/src/system/handlers.rs	2026-04-25 00:31:25.648288666 +0200
-+++ b/crates/horizon_event_system/src/system/handlers.rs	2025-12-11 17:06:04.268192467 +0100
+diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=logs' '--exclude=*.sock' '--exclude=Cargo.lock' a/crates/horizon_event_system/src/system/handlers.rs b/crates/horizon_event_system/src/system/handlers.rs
+--- a/crates/horizon_event_system/src/system/handlers.rs	2026-08-21 10:19:52.216138509 +0200
++++ b/crates/horizon_event_system/src/system/handlers.rs	2026-08-21 10:14:20.625484349 +0200
 @@ -504,17 +504,37 @@
                  }
              };
@@ -1550,9 +1551,9 @@ diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=log
  
              result
          });
-diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=logs' '--exclude=*.sock' a/crates/horizon_event_system/src/types.rs b/crates/horizon_event_system/src/types.rs
---- a/crates/horizon_event_system/src/types.rs	2026-04-25 00:31:25.649042009 +0200
-+++ b/crates/horizon_event_system/src/types.rs	2025-12-11 12:41:24.811405900 +0100
+diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=logs' '--exclude=*.sock' '--exclude=Cargo.lock' a/crates/horizon_event_system/src/types.rs b/crates/horizon_event_system/src/types.rs
+--- a/crates/horizon_event_system/src/types.rs	2026-08-21 10:19:52.216138509 +0200
++++ b/crates/horizon_event_system/src/types.rs	2026-08-21 10:14:20.625484349 +0200
 @@ -236,6 +236,29 @@
          (dx * dx + dy * dy + dz * dz).sqrt()
      }
@@ -1583,9 +1584,9 @@ diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=log
      /// Creates a zero vector (0, 0, 0).
      pub fn zero() -> Self {
          Self::new(0.0, 0.0, 0.0)
-diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=logs' '--exclude=*.sock' a/crates/plugin_greeter/Cargo.toml b/crates/plugin_greeter/Cargo.toml
---- a/crates/plugin_greeter/Cargo.toml	2026-04-25 00:31:25.650802998 +0200
-+++ b/crates/plugin_greeter/Cargo.toml	2025-12-24 13:45:47.839891564 +0100
+diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=logs' '--exclude=*.sock' '--exclude=Cargo.lock' a/crates/plugin_greeter/Cargo.toml b/crates/plugin_greeter/Cargo.toml
+--- a/crates/plugin_greeter/Cargo.toml	2026-08-21 10:19:52.217493245 +0200
++++ b/crates/plugin_greeter/Cargo.toml	2026-08-21 10:14:20.625484349 +0200
 @@ -10,7 +10,7 @@
  horizon_event_system = { path = "../horizon_event_system" }
  serde = { version = "1.0", features = ["derive"] }
@@ -1595,9 +1596,9 @@ diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=log
  async-trait = "0.1"
  chrono = { version = "0.4.41", features = ["serde"]}
  futures = { workspace = true }
-diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=logs' '--exclude=*.sock' a/crates/plugin_system/src/error.rs b/crates/plugin_system/src/error.rs
---- a/crates/plugin_system/src/error.rs	2026-04-25 00:31:25.654253669 +0200
-+++ b/crates/plugin_system/src/error.rs	2025-12-22 09:31:42.460833688 +0100
+diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=logs' '--exclude=*.sock' '--exclude=Cargo.lock' a/crates/plugin_system/src/error.rs b/crates/plugin_system/src/error.rs
+--- a/crates/plugin_system/src/error.rs	2026-08-21 10:19:52.219793613 +0200
++++ b/crates/plugin_system/src/error.rs	2026-08-21 10:14:20.625484349 +0200
 @@ -27,4 +27,7 @@
      
      #[error("Plugin version mismatch: {0}")]
@@ -1607,9 +1608,9 @@ diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=log
 +    LockPoisoned(String),
  }
 \ No newline at end of file
-diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=logs' '--exclude=*.sock' a/crates/plugin_system/src/manager.rs b/crates/plugin_system/src/manager.rs
---- a/crates/plugin_system/src/manager.rs	2026-04-25 00:31:25.654366223 +0200
-+++ b/crates/plugin_system/src/manager.rs	2026-05-02 10:38:10.985301436 +0200
+diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=logs' '--exclude=*.sock' '--exclude=Cargo.lock' a/crates/plugin_system/src/manager.rs b/crates/plugin_system/src/manager.rs
+--- a/crates/plugin_system/src/manager.rs	2026-08-21 10:19:52.219868034 +0200
++++ b/crates/plugin_system/src/manager.rs	2026-08-21 10:14:20.625681959 +0200
 @@ -34,7 +34,11 @@
  struct BasicServerContext {
      event_system: Arc<EventSystem>,
@@ -1760,9 +1761,9 @@ diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=log
          // Phase 1: Pre-initialization (register handlers)
          let plugin_names: Vec<String> = self.loaded_plugins.iter().map(|entry| entry.key().clone()).collect();
          
-diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=logs' '--exclude=*.sock' a/crates/universal_plugin_system/Cargo.toml b/crates/universal_plugin_system/Cargo.toml
---- a/crates/universal_plugin_system/Cargo.toml	2026-04-25 00:31:25.654366223 +0200
-+++ b/crates/universal_plugin_system/Cargo.toml	2025-12-24 13:45:30.044636142 +0100
+diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=logs' '--exclude=*.sock' '--exclude=Cargo.lock' a/crates/universal_plugin_system/Cargo.toml b/crates/universal_plugin_system/Cargo.toml
+--- a/crates/universal_plugin_system/Cargo.toml	2026-08-21 10:19:52.219868034 +0200
++++ b/crates/universal_plugin_system/Cargo.toml	2026-08-21 10:14:20.625681959 +0200
 @@ -12,7 +12,7 @@
  [dependencies]
  # Core dependencies
@@ -1772,10 +1773,9 @@ diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=log
  serde = { version = "1.0", features = ["derive"] }
  serde_json = "1.0"
  thiserror = "1.0"
-File a/localhost:9090 is a socket while file b/localhost:9090 is a socket
-diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=logs' '--exclude=*.sock' a/my_config.toml b/my_config.toml
+diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=logs' '--exclude=*.sock' '--exclude=Cargo.lock' a/my_config.toml b/my_config.toml
 --- a/my_config.toml	1970-01-01 01:00:00.000000000 +0100
-+++ b/my_config.toml	2026-01-25 10:28:54.676405883 +0100
++++ b/my_config.toml	2026-08-21 10:14:20.625681959 +0200
 @@ -0,0 +1,383 @@
 +# ============================================================================
 +# Horizon Game Server Configuration
@@ -2160,9 +2160,9 @@ diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=log
 +max_cpu_percent = 90.0
 +max_file_descriptors = 2000000
 +max_network_bandwidth_mbps = 1000
-diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=logs' '--exclude=*.sock' a/my_config.toml2 b/my_config.toml2
+diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=logs' '--exclude=*.sock' '--exclude=Cargo.lock' a/my_config.toml2 b/my_config.toml2
 --- a/my_config.toml2	1970-01-01 01:00:00.000000000 +0100
-+++ b/my_config.toml2	2025-10-13 18:57:10.431278167 +0200
++++ b/my_config.toml2	2026-08-21 10:14:20.625681959 +0200
 @@ -0,0 +1,51 @@
 +[server]
 +bind_address = "0.0.0.0:7040"
@@ -2215,10 +2215,10 @@ diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=log
 +max_objects_per_node = 8
 +enable_caching = true
 +cache_expiry_ms = 30000
-diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=logs' '--exclude=*.sock' a/plugins.toml b/plugins.toml
+diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=logs' '--exclude=*.sock' '--exclude=Cargo.lock' a/plugins.toml b/plugins.toml
 --- a/plugins.toml	1970-01-01 01:00:00.000000000 +0100
-+++ b/plugins.toml	2026-04-28 20:28:51.426042816 +0200
-@@ -0,0 +1,35 @@
++++ b/plugins.toml	2026-08-21 10:14:20.632095989 +0200
+@@ -0,0 +1,84 @@
 +# ============================================================================
 +# DyingStar plugins configuration
 +# ============================================================================
@@ -2231,12 +2231,12 @@ diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=log
 +#  * "single" (only 1 server)
 +#  * "development" (multiple servers, use game_servers list)
 +#  * "production" (multiple servers, will use kubernetes to create and start servers on demand, so ignore game_servers list)
-+servers_mode = "development"
++servers_mode = "single"
 +
 +# Split rule (ignored in single mode). Possible values:
 +#  * "fps:20"    => split when last 10 fps (get by serverinfo) is under 20 in this example (prefer this for production)
 +#  * "players:3" => split when more than 3 players are connected on a server
-+split_rule = "players:10"
++split_rule = "fps:20"
 +
 +[ds_genericprops]
 +log_level = "info"
@@ -2249,8 +2249,58 @@ diff -urN --strip-trailing-cr '--exclude=target' '--exclude=.git' '--exclude=log
 +
 +[ds_services]
 +log_level = "info"
-+resources_dynamic_address = "localhost:9200"
++resources_dynamic_address = "service-resourcesdynamic:9200"
 +
 +[ds_audio]
 +log_level = "info"
-+livekit_servers = ["ws://livekit:7880"]
++
++# ============================================================================
++# ds_bridge — WebSocket bridge to external services
++# Each service entry defines a WS server to connect to and which Horizon events
++# to subscribe and forward. Events received from the service are re-emitted
++# back into the Horizon event system.
++#
++# subscribe key format:
++#   "core:<event_name>"             — subscribe to a core Horizon event
++#   "plugin:<plugin_name>:<event>"  — subscribe to a plugin-to-plugin event
++# ============================================================================
++[ds_bridge]
++log_level = "debug"
++
++# Example service: uncomment and configure as needed
++# [[ds_bridge.services]]
++# name = "scoring"
++# url = "ws://scoring-service:8080"
++# subscribe = [
++#     "core:player_connected",
++#     "core:player_disconnected",
++#     "plugin:ds_player_authentication:player_authenticated",
++# ]
++
++[[ds_bridge.services]]
++name = "persistence"
++url = "ws://service-persistence:9100/ws"
++subscribe = [
++    "plugin:genericprops:create_object",
++    "plugin:genericprops:create_object_from_gameserver",
++    "plugin:genericprops:update_object",
++    "plugin:genericprops:update_object_from_external",
++    "plugin:genericprops:delete_object",
++    "plugin:bridge_persistence:get_all_items",
++    "plugin:bridge_persistence:player_spawn",
++]
++
++# ── Monitoring service ── forwards events used for Prometheus metrics
++[[ds_bridge.services]]
++name = "monitoring"
++url = "ws://service-monitoring:9300/ws"
++subscribe = [
++    "core:player_connected",
++    "core:player_disconnected",
++    "plugin:genericprops:create_object",
++    "plugin:genericprops:create_object_from_gameserver",
++    "plugin:ds_player_authentication:player_authenticated",
++    "plugin:ds_game_server:server_registered",
++    "plugin:ds_game_server:server_unregistered",
++]
+\ No newline at end of file

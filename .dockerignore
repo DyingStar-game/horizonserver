@@ -8,3 +8,9 @@ Horizon/.git
 target
 tests/node_modules
 .git
+
+# Dead ds_genericprops data: referenced by no code, but 2.7MB of build context
+# on every build and — before .docker/Dockerfile.data existed — a spurious
+# rebuild trigger. Does not match startup_items.json, which is still shipped.
+ds_genericprops/startup_items_rocks.json
+ds_genericprops/startup_items copy.json

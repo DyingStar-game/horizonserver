@@ -1,0 +1,4 @@
+[submodule "Horizon"]
+	path = Horizon
+	url = https://github.com/DyingStar-game/Horizon.git
+	branch = ds-develop

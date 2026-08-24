@@ -2,16 +2,29 @@
 
 ## Local setup
 
-To build the plugins and launch the horizon server follow the steps:
+The Horizon server itself lives in `Horizon/`, a git submodule pointing at
+[DyingStar-game/Horizon](https://github.com/DyingStar-game/Horizon) — our fork,
+where `main` mirrors upstream and our patches sit on `ds-develop`. Clone with
+submodules:
+
 - Install Docker
-- Clone the repository `git clone https://github.com/DyingStar-game/horizonserver.git`
+- Clone the repository `git clone --recurse-submodules https://github.com/DyingStar-game/horizonserver.git`
+  (already cloned without `--recurse-submodules`? `scripts/install.sh` fixes it up)
 - Run `docker compose up -d` to start the dev environment
 - Enter the docker container with `docker exec -it horizon_1 bash`
-- Run `scripts/install.sh` to clone the horizon repository
-- Modify the bind address in `Horizon/config.toml` to `0.0.0.0:7040`
-- You can modify the `game_server_address` in `Horizon/plugins.toml` to `host.docker.internal:8980` if you are not on linux
+- Run `scripts/install.sh` to check out the pinned Horizon commit and drop in the configs
+- You can modify the `game_server_address` in `plugins.toml` to `host.docker.internal:8980` if you are not on linux
 - Run `scripts/build.sh` to build the plugins
 - Run `scripts/run.sh` to start the horizon server
+
+The two runtime configs live in this repo, not in the fork: `dev_config.toml`
+(bind address, GORC settings — passed to the server as `--config`) and
+`plugins.toml`. `scripts/install.sh` copies both into `Horizon/`, where the
+server reads them. Edit them here; anything you change directly inside
+`Horizon/` is overwritten on the next `install.sh`.
+
+To pull in upstream Horizon changes or to add a patch of our own, see
+[docs/horizon-fork.md](docs/horizon-fork.md).
 
 ## Send a message to all players
 

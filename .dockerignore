@@ -1,0 +1,10 @@
+# The Docker build context is the repo root. Horizon/ is a submodule now (no
+# longer gitignored), so without these its build artifacts — hundreds of MB of
+# compiled plugins and target/ — would be uploaded to the daemon on every build.
+Horizon/target
+Horizon/plugins
+Horizon/logs
+Horizon/.git
+target
+tests/node_modules
+.git

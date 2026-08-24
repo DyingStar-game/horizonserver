@@ -6,7 +6,8 @@ on:
       - develop
     paths:
       - "scripts/install.sh"
-      - "horizon.diff"
+      - "Horizon"
+      - ".gitmodules"
       - "ds_*/**"
       - "Cargo.toml"
       - "Cargo.lock"
@@ -49,7 +50,8 @@ jobs:
           filters: |
             server:
               - 'scripts/install.sh'
-              - 'horizon.diff'
+              - 'Horizon'
+              - '.gitmodules'
               - '.docker/Dockerfile.server'
               - '.docker/entrypoint.sh'
               - '.docker/production_config.toml'
@@ -80,9 +82,14 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Fetch Horizon source
         run: scripts/install.sh
+
+      - name: Check dependency sync with Horizon
+        run: scripts/check_deps_sync.sh
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -112,9 +119,14 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Fetch Horizon source
         run: scripts/install.sh
+
+      - name: Check dependency sync with Horizon
+        run: scripts/check_deps_sync.sh
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3

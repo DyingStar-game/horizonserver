@@ -14,7 +14,13 @@ COPY Cargo.lock .
 COPY ds_common/ ds_common/
 COPY ds_game_server/ ds_game_server/
 COPY ds_player_authentication/ ds_player_authentication/
-COPY ds_genericprops/ ds_genericprops/
+# ds_genericprops carries ~5.4MB of JSON data that this image never ships (the
+# final stage keeps only the .so files). Copying the whole crate would let a
+# JSON edit invalidate this layer and re-run the Rust build for nothing, so
+# take only what the compiler needs. Safe: the crate has no build.rs and no
+# include_str!/include_dir!.
+COPY ds_genericprops/Cargo.toml ds_genericprops/Cargo.toml
+COPY ds_genericprops/src/ ds_genericprops/src/
 COPY ds_props/ ds_props/
 COPY ds_services/ ds_services/
 COPY ds_audio/ ds_audio/

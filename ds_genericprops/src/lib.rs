@@ -158,6 +158,11 @@ impl SimplePlugin for GenericPropsPlugin {
             "../ds_genericprops/props/"
         };
 
+        // Definitions are mandatory: without them create_object cannot resolve an
+        // object type and the server comes up healthy but unable to spawn anything.
+        // Swallowing a read_dir error here used to make that failure silent, which is
+        // hard to trace back from the symptom — so count and report either way.
+        let mut loaded = 0usize;
         if let Ok(directory) = fs::read_dir(props_path) {
 			for entry in directory {
 				if let Ok(entry) = entry {
@@ -168,15 +173,31 @@ impl SimplePlugin for GenericPropsPlugin {
 							let json: serde_json::Value = serde_json::from_reader(file)
 							.expect("file should be proper JSON");
 							self.new_definition(name.get(0..(name.len()-9)).unwrap().into(), json);
+							loaded += 1;
 							context.log(
 								LogLevel::Info,
-								"🎮 GenericPropsPlugin: new definition loaded"
+								&format!("🎮 GenericPropsPlugin: definition loaded from {}", name)
 							);
 						}
 					}
 				}
 			}
+		} else {
+			error!(
+				"🎮 GenericPropsPlugin: cannot read props directory {:?} (cwd {:?}) - no object \
+				 definitions will be available. In Kubernetes this directory comes from the \
+				 horizon-data image via the copy-props init container: check dataImage in the \
+				 horizon chart values.",
+				props_path,
+				std::env::current_dir().ok()
+			);
 		}
+
+        if loaded == 0 {
+            error!("🎮 GenericPropsPlugin: 0 object definitions loaded from {:?} - object creation will fail", props_path);
+        } else {
+            info!("🎮 GenericPropsPlugin: {} object definitions loaded from {:?}", loaded, props_path);
+        }
 
         info!("🎮 GenericPropsPlugin: GORC player management system activated and ready!");
         Ok(())

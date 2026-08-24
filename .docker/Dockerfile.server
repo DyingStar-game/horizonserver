@@ -35,9 +35,10 @@ RUN mkdir -p /app /app/plugins
 COPY .docker/production_config.toml /app/config.toml
 COPY .docker/plugins.toml /app/plugins.toml
 
-# Props data
-COPY ds_genericprops/props /app/props
-COPY ds_genericprops/startup_items.json /app/startup_items.json
+# NOTE: ds_genericprops' props/ and startup_items.json are NOT copied here.
+# They ship in the horizon-data image (.docker/Dockerfile.data) and are mounted
+# at /app/props and /app/ds_genericprops by the chart's copy-props init container,
+# so a JSON edit never rebuilds this image.
 
 # Server binary
 COPY --from=builder /horizon /app/server

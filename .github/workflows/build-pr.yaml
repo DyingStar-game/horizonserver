@@ -19,6 +19,7 @@ jobs:
     outputs:
       server: ${{ steps.filter.outputs.server }}
       plugins: ${{ steps.filter.outputs.plugins }}
+      data: ${{ steps.filter.outputs.data }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -36,8 +37,18 @@ jobs:
               - '.docker/entrypoint.sh'
               - '.docker/production_config.toml'
               - '.docker/plugins.toml'
+            # Each filter mirrors the COPY instructions of its Dockerfile. If one
+            # moves, the other must follow — otherwise a change ships to a registry
+            # that never receives it (which is exactly what used to happen to the
+            # ds_genericprops JSON files: they matched 'plugins', an image that
+            # does not carry them).
+            data:
+              - 'ds_genericprops/props/**'
+              - 'ds_genericprops/startup_items.json'
+              - '.docker/Dockerfile.data'
             plugins:
-              - 'ds_*/**'
+              - 'ds_*/src/**'
+              - 'ds_*/Cargo.toml'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'plugins.toml'
@@ -95,4 +106,26 @@ jobs:
         with:
           context: .
           file: .docker/Dockerfile.plugins
+          push: false
+
+  build-data:
+    name: Build data image
+    needs: detect-changes
+    if: needs.detect-changes.outputs.data == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      # No submodules / install.sh / check_deps_sync.sh: Dockerfile.data is two
+      # COPY instructions over ds_genericprops and touches neither Horizon/ nor
+      # the Rust toolchain.
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build data image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: .docker/Dockerfile.data
           push: false

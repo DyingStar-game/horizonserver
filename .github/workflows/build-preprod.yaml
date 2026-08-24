@@ -23,11 +23,16 @@ on:
         description: "Build and push the horizon plugins image"
         type: boolean
         default: true
+      build_data:
+        description: "Build and push the horizon data image (ds_genericprops JSON)"
+        type: boolean
+        default: true
 
 env:
   HARBOR_REGISTRY: harbor.dyingstar-game.space
   SERVER_IMAGE: harbor.dyingstar-game.space/dyingstar/horizon
   PLUGINS_IMAGE: harbor.dyingstar-game.space/dyingstar/horizon-plugins
+  DATA_IMAGE: harbor.dyingstar-game.space/dyingstar/horizon-data
   IMAGE_TAG: develop
   CHART_NAME: horizon
 
@@ -38,6 +43,7 @@ jobs:
     outputs:
       server: ${{ steps.result.outputs.server }}
       plugins: ${{ steps.result.outputs.plugins }}
+      data: ${{ steps.result.outputs.data }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -56,8 +62,18 @@ jobs:
               - '.docker/entrypoint.sh'
               - '.docker/production_config.toml'
               - '.docker/plugins.toml'
+            # Each filter mirrors the COPY instructions of its Dockerfile. If one
+            # moves, the other must follow — otherwise a change ships to a registry
+            # that never receives it (which is exactly what used to happen to the
+            # ds_genericprops JSON files: they matched 'plugins', an image that
+            # does not carry them).
+            data:
+              - 'ds_genericprops/props/**'
+              - 'ds_genericprops/startup_items.json'
+              - '.docker/Dockerfile.data'
             plugins:
-              - 'ds_*/**'
+              - 'ds_*/src/**'
+              - 'ds_*/Cargo.toml'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'plugins.toml'
@@ -69,9 +85,11 @@ jobs:
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             echo "server=${{ inputs.build_server }}" >> $GITHUB_OUTPUT
             echo "plugins=${{ inputs.build_plugins }}" >> $GITHUB_OUTPUT
+            echo "data=${{ inputs.build_data }}" >> $GITHUB_OUTPUT
           else
             echo "server=${{ steps.filter.outputs.server }}" >> $GITHUB_OUTPUT
             echo "plugins=${{ steps.filter.outputs.plugins }}" >> $GITHUB_OUTPUT
+            echo "data=${{ steps.filter.outputs.data }}" >> $GITHUB_OUTPUT
           fi
 
   build-server:
@@ -148,14 +166,47 @@ jobs:
           cache-from: type=registry,ref=${{ env.PLUGINS_IMAGE }}:buildcache-preprod
           cache-to: type=registry,ref=${{ env.PLUGINS_IMAGE }}:buildcache-preprod,mode=max
 
+  build-data:
+    name: Build data image
+    needs: detect-changes
+    if: needs.detect-changes.outputs.data == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      # No submodules / install.sh / check_deps_sync.sh: Dockerfile.data is two
+      # COPY instructions over ds_genericprops and touches neither Horizon/ nor
+      # the Rust toolchain. No registry cache either — there is nothing to cache.
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Harbor
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.HARBOR_REGISTRY }}
+          username: ${{ secrets.HARBOR_USERNAME }}
+          password: ${{ secrets.HARBOR_PASSWORD }}
+
+      - name: Build and push data image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: .docker/Dockerfile.data
+          push: true
+          tags: ${{ env.DATA_IMAGE }}:${{ env.IMAGE_TAG }}
+
   deploy:
     name: Trigger preprod deployment
-    needs: [build-server, build-plugins]
+    needs: [build-server, build-plugins, build-data]
     if: >-
       always() &&
-      (needs.build-server.result == 'success' || needs.build-plugins.result == 'success') &&
+      (needs.build-server.result == 'success' ||
+       needs.build-plugins.result == 'success' ||
+       needs.build-data.result == 'success') &&
       needs.build-server.result != 'failure' &&
-      needs.build-plugins.result != 'failure'
+      needs.build-plugins.result != 'failure' &&
+      needs.build-data.result != 'failure'
     runs-on: ubuntu-latest
     steps:
       - name: Trigger preprod deployment

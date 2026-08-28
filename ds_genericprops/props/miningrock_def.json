@@ -4,6 +4,16 @@
 			"zone": 0,
 			"distance": 200.0,
 			"frequency": 30.0,
+			"lod": [
+				{
+					"distance": 100.0,
+					"frequency": 30.0
+				},
+				{
+					"distance": 200.0,
+					"frequency": 10.0
+				}
+			],
 			"properties": [
 				"position",
 				"rotation",
@@ -25,7 +35,8 @@
 				"weight",
 				"blocs",
 				"ore_seed",
-				"mineral_id"
+				"mineral_id",
+				"host_rock_id"
 			]
 		}
 	]

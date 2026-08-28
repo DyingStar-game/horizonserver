@@ -19,8 +19,8 @@ pub fn handle_client_update_request(
     _client_player: PlayerId,
     _connection: ClientConnectionRef,
     object_instance: &mut ObjectInstance,
-    events: Arc<EventSystem>,
-	luminal_handle: Handle,
+    _events: Arc<EventSystem>,
+	_luminal_handle: Handle,
 ) -> Result<(), EventError> {
 	
 	// Parse the movement data from the GORC event payload
@@ -36,40 +36,37 @@ pub fn handle_client_update_request(
             EventError::HandlerExecution("Invalid update request format".to_string())
         })?;
     
+    let object_type = object_instance.type_name.clone();
+
     // Update the object instance directly (this is the authoritative update)
     object_instance.get_object_mut::<GenericProps>().expect("TODO").update(req_data.new_data.clone());
 
-    luminal_handle.spawn(async move {
-		// Broadcast position update to nearby players (within 25m range)
-		broadcast_object_update(
-			&gorc_event.object_id,
-			&req_data,
-			events,
-		).await;
-    });
+    // Queueing is synchronous and cheap, so no task is spawned: the delivery
+    // loop decides who gets this payload and how often.
+    broadcast_object_update(&gorc_event.object_id, &object_type, &req_data);
     Ok(())
 }
 
-async fn broadcast_object_update(
+/// Hand a channel payload to the rate-limited delivery loop.
+///
+/// Replaces a direct `emit_gorc_instance(..., Dest::Client)`: subscribers close
+/// to the object are served at the channel's full rate, distant ones at the
+/// slower rate their `lod` tier allows. The server-side (`Dest::Server`) half of
+/// `emit_gorc_instance` is not lost here — this path only ever used
+/// `Dest::Client`, and no `on_gorc_instance` handler is registered anywhere.
+fn broadcast_object_update(
     object_id_str: &str,
+    object_type: &str,
     update_data: &GenericPropsGORCUpdateRequest,
-    events: Arc<EventSystem>,
 ) {
-    
-    // Parse the GORC object ID and emit the update
     if let Ok(gorc_id) = GorcObjectId::from_str(object_id_str) {
-        // Emit on channel 0 (movement) with automatic spatial replication
-        if let Err(e) = events.emit_gorc_instance(
+        crate::lod::queue(
             gorc_id,
-            update_data.channel, // Channel 0: Critical movement data
+            update_data.channel,
+            object_type,
             "gorc_info",
             &serde_json::json!(&update_data),
-            horizon_event_system::Dest::Client
-        ).await {
-            error!("🚀 GORC: ❌ Failed to broadcast object update: {}", e);
-        } else {
-            debug!("🚀 GORC: ✅ Broadcasted position update success");
-        }
+        );
     } else {
         error!("🚀 GORC: ❌ Invalid GORC object ID format: {}", object_id_str);
     }
@@ -213,17 +210,13 @@ pub fn handle_object_update(
 						if let Some(props) = object_instance.get_object::<GenericProps>() {
 							for layer in props.get_layers().iter() {
 								let layer_data = props.get_data_for_layer(layer).unwrap_or(serde_json::Value::Null);
-								if let Err(e) = events.emit_gorc_instance(
+								crate::lod::queue(
 									gorc_id,
 									layer.channel,
+									&object_instance.type_name,
 									"update_property",
 									&layer_data,
-									horizon_event_system::Dest::Client,
-								).await {
-									error!("🚀 GORC: ❌ Failed to broadcast channel update (broadcast_only): {}", e);
-								} else {
-									debug!("🚀 GORC: ✅ Broadcasted channel update (broadcast_only) for object {}", gorc_id);
-								}
+								);
 							}
 						}
 					}
@@ -288,17 +281,16 @@ pub fn handle_object_update(
 							for zone in &zone_set {
 								for replicationlayer in layers.iter() {
 									if replicationlayer.channel == *zone {
-										if let Err(e) = events.emit_gorc_instance(
+										let layer_data = props
+											.get_data_for_layer(replicationlayer)
+											.unwrap_or(serde_json::Value::Null);
+										crate::lod::queue(
 											gorc_id,
 											*zone,
+											&snapshot.type_name,
 											"update_property",
-											&props.get_data_for_layer(replicationlayer).unwrap_or(serde_json::Value::Null),
-											horizon_event_system::Dest::Client
-										).await {
-											error!("🚀 GORC: ❌ Failed to broadcast channel update: {}", e);
-										} else {
-											debug!("🚀 GORC: ✅ Broadcasted channel update for object> {}", gorc_id);
-										}
+											&layer_data,
+										);
 									}
 								}
 							}

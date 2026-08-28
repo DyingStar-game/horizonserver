@@ -23,6 +23,7 @@ use std::fs;
 pub mod genericprops;
 pub mod events;
 pub mod objectdefinition;
+pub mod lod;
 // Internal imports
 mod handlers;
 use handlers::*;
@@ -798,6 +799,11 @@ impl GenericPropsPlugin {
         //     Ok(())
         // }).await
         // .map_err(|e| PluginError::ExecutionError(e.to_string()))?;
+
+        // Channel payloads are queued rather than emitted, and delivered from
+        // here at the rate each recipient's distance earns it. Started last so
+        // the loop only comes up once every handler that feeds it is live.
+        lod::start(Arc::clone(&events), Arc::clone(&self.definitions));
 
         debug!("🎮 GenericPropsPlugin: handler registered");
         Ok(())

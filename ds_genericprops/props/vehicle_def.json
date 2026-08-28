@@ -4,38 +4,48 @@
 			"zone": 0,
 			"distance": 200.0,
 			"frequency": 30.0,
+			"lod": [
+				{
+					"distance": 100.0,
+					"frequency": 30.0
+				},
+				{
+					"distance": 200.0,
+					"frequency": 10.0
+				}
+			],
 			"properties": [
 				"position",
 				"rotation",
-				"parent_id",
 				"pilot_uuid",
 				"steering",
 				"speed",
-				"cargo_mass",
 				"handbrake",
-				"mass",
 				"headlights",
 				"engine",
-				"horn",
-				"horn_special",
 				"doors",
 				"seats"
 			]
 		},
 		{
 			"zone": 1,
-			"distance": 40.0,
-			"frequency": 30.0,
+			"distance": 100.0,
+			"frequency": 1.0,
 			"properties": [
+				"horn",
+				"horn_special",
+				"mass",
+				"cargo_mass",
 				"suspension"
 			]
 		},
 		{
 			"zone": 6,
 			"distance": 200.0,
-			"frequency": 3.0,
+			"frequency": 1.0,
 			"properties": [
-				"scenename"
+				"scenename",
+				"parent_id"
 			]
 		}
 	]

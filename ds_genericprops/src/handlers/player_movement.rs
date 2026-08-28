@@ -364,22 +364,19 @@ pub fn handle_movement_request_sync(
                 // Note: update_object_position was already called above, before update_object
                 debug!("🚀 STEP 12: Parsed GORC ID successfully: {:?}", gorc_id);
 
-                // Emit to subscribers - use async directly
-                debug!("🚀 STEP 13: About to call emit_gorc_instance on channel 0");
-                match events.emit_gorc_instance(
+                // Queue for rate-limited delivery instead of emitting to every
+                // subscriber. Movement packets arrive at up to 60Hz while
+                // player_def.json asks for 30Hz on channel 0, so this is where
+                // that ceiling finally applies — and distant observers drop to
+                // whatever their lod tier allows.
+                debug!("🚀 STEP 13: Queueing channel 0 movement payload");
+                crate::lod::queue(
                     gorc_id,
                     0, // Channel 0: Critical movement data
+                    &object_instance.type_name,
                     "move",
                     &position_update,
-                    horizon_event_system::Dest::Client
-                ).await {
-                    Ok(_) => {
-                        debug!("🚀 STEP 14: ✅ emit_gorc_instance completed successfully");
-                    },
-                    Err(e) => {
-                        error!("🚀 STEP 14: ❌ emit_gorc_instance failed: {}", e);
-                    }
-                }
+                );
 
                 // manage player out of godot server zone
                 if move_data.out_of_zone.is_some() {

@@ -90,7 +90,7 @@ impl SimplePlugin for DyingstarAudioPlugin {
     async fn register_handlers(
         &mut self,
         events: Arc<EventSystem>,
-        context: Arc<dyn ServerContext>,
+        _context: Arc<dyn ServerContext>,
     ) -> Result<(), PluginError> {
         info!("🔧 DyingstarAudioPlugin: Registering event handlers...");
 
@@ -98,7 +98,25 @@ impl SimplePlugin for DyingstarAudioPlugin {
         let api_key = Arc::clone(&self.api_key);
         let api_secret = Arc::clone(&self.api_secret);
         let livekit_public_url = Arc::clone(&self.livekit_public_url);
-        let tokio_handle = context.tokio_handle();
+        // NEVER spawn on `context.tokio_handle()` from a plugin handler.
+        //
+        // That Handle points at the HOST binary's tokio runtime, but the code calling
+        // `spawn` is this dylib's own statically-linked copy of tokio + parking_lot.
+        // `Handle::spawn` -> `Handle::bind_new_task` -> `OwnedTasks::bind_inner` then
+        // locks the host scheduler's mutex through a *second* `parking_lot_core`
+        // instance (each .so has its own global parking table and thread-local data),
+        // and `RawMutex::lock_slow` livelocks at 100% CPU instead of parking.
+        //
+        // The handler that hangs is running inline inside the event dispatch loop, so
+        // the whole `plugin:plugingameserver:new_player` emit never returns: every
+        // handler registered after this one (ds_game_server -> spawn_player) is never
+        // invoked and the player is never created on the Godot game server. Verified
+        // on a live pod: one luminal worker pinned at 100% CPU since the exact second
+        // of the first player connection, stack = TypedEventHandler::handle ->
+        // Handle::bind_new_task -> OwnedTasks::bind_inner -> RawMutex::lock_slow.
+        //
+        // The plugin-owned runtime below is the only safe target for every spawn.
+        let tokio_handle = self.runtime.handle().clone();
         let tokio_handle_enter = tokio_handle.clone();
         let tokio_handle_exit = tokio_handle.clone();
         let events_send = events.clone(); // used to get the real ClientResponseSender at call time

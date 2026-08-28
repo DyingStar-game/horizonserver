@@ -184,7 +184,13 @@ pub fn handle_object_create(
 						let _ = events.notify_players_for_new_gorc_object(gorc_id).await;
 					}
 				}
-				if spawn_in_gameserver {
+				// Players are already forwarded to the game server by the
+				// `plugingameserver:new_player` emit above (spawn_player), whose payload
+				// carries `_global_position`. Emitting `spawn_object` for them as well makes
+				// the Godot server create the player a second time from a payload without
+				// `_global_position`, which drops the first instance
+				// ("Player reconnecting, removing stale instance").
+				if spawn_in_gameserver && req_data.object_type != "player" {
 					// Send to ds_game_server to spawn in game world
 					if let Err(e) = events
 						.emit_plugin("gameserverplugin", "spawn_object", &serde_json::json!(event_clone))

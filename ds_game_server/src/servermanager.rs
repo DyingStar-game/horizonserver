@@ -263,12 +263,19 @@ impl ServerManager {
                             // Now borrow mutably one at a time
                             let (zone1, zone2);
                             {
-                                let server_to_split = &manage_servers[server_to_split_idx];
+                                // Snapshot the zone into an owned value first: the std
+                                // RwLock guard must not be alive across the await below,
+                                // otherwise the future stops being Send.
+                                let zone_to_split = {
+                                    let server_to_split = &manage_servers[server_to_split_idx];
+                                    let zone_guard = server_to_split.zone.read().unwrap();
+                                    zone_guard.clone()
+                                };
                                 // split the server zone into 2 zones
                                 let (z1, z2) = ServerManager::split_zone(
-                                    server_to_split.zone.read().unwrap().clone(),
+                                    zone_to_split,
                                     context.clone(),
-                                );
+                                ).await;
                                 zone1 = z1;
                                 zone2 = z2;
                             }
@@ -349,37 +356,42 @@ impl ServerManager {
 
     }
 
-    pub fn split_zone(zone: Zone, context: Arc<dyn ServerContext>) -> (Zone, Zone) {
+    pub async fn split_zone(zone: Zone, context: Arc<dyn ServerContext>) -> (Zone, Zone) {
 
         // Get GORC instances from context
         let gorc_instances = context.events().get_gorc_instances();
         info!("Initial zone to split: {:?}", zone);
         // Get GORC objects and filter players with global_position in zone
         let players_positions: Vec<Vec3> = if let Some(gorc) = &gorc_instances {
-            // Use blocking approach to get object positions from GORC
-            let gorc_clone = gorc.clone();
-            let zone_clone = zone.clone();
-            let tokio_handle = context.tokio_handle();
-            tokio_handle.block_on(async {
-                let mut objects_in_zone = Vec::new();
-                    
-                // Get all player objects from GORC
-                let player_object_ids = gorc_clone.get_objects_by_type("player").await;
-                info!("Total player objects in GORC: {}", player_object_ids.len());
-                for object_id in player_object_ids {
-                    if let Some(global_position) = gorc_clone.get_object_position(object_id).await {
-                        // Check if global_position is within the zone
-                        info!("Checking player object {:?} at position {:?}", object_id, global_position);
-                        if global_position.x >= zone_clone.min_x && global_position.x <= zone_clone.max_x &&
-                            global_position.y >= zone_clone.min_y && global_position.y <= zone_clone.max_y &&
-                            global_position.z >= zone_clone.min_z && global_position.z <= zone_clone.max_z {
-                            objects_in_zone.push(global_position);
-                        }
+            // Await the GORC queries directly — the only caller (`mode_development`) is
+            // already async.
+            //
+            // Do NOT reintroduce `context.tokio_handle().block_on(...)` here. That Handle
+            // belongs to the HOST binary's runtime, while this code is the plugin dylib's
+            // own statically-linked copy of tokio + parking_lot: the runtime's internal
+            // locks then get driven through a second `parking_lot_core` instance, whose
+            // park/unpark bookkeeping is separate, and `RawMutex::lock_slow` livelocks at
+            // 100% CPU. That is the exact failure that made the audio plugin wedge the
+            // whole `plugin:plugingameserver:new_player` dispatch. `block_on` from inside
+            // a runtime worker also panics outright.
+            let mut objects_in_zone = Vec::new();
+
+            // Get all player objects from GORC
+            let player_object_ids = gorc.get_objects_by_type("player").await;
+            info!("Total player objects in GORC: {}", player_object_ids.len());
+            for object_id in player_object_ids {
+                if let Some(global_position) = gorc.get_object_position(object_id).await {
+                    // Check if global_position is within the zone
+                    info!("Checking player object {:?} at position {:?}", object_id, global_position);
+                    if global_position.x >= zone.min_x && global_position.x <= zone.max_x &&
+                        global_position.y >= zone.min_y && global_position.y <= zone.max_y &&
+                        global_position.z >= zone.min_z && global_position.z <= zone.max_z {
+                        objects_in_zone.push(global_position);
                     }
                 }
-                
-                objects_in_zone
-            })
+            }
+
+            objects_in_zone
         } else {
             Vec::new()
         };

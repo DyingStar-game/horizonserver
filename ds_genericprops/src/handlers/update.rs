@@ -211,26 +211,41 @@ pub fn handle_object_update(
 							}
 						}
 					}
-				} else if let Some(mut object_instance) = gorc_instances.get_object(gorc_id).await {
-					// Update the GenericProps on the object instance. Clone object_data to avoid reuse/move issues.
-					let zone_set = object_instance.get_object_mut::<GenericProps>().expect("Object must exists").update(req_data.object_data.clone());
-					for zone in zone_set {
-						object_instance.mark_needs_update(zone);
+				} else if gorc_instances.get_object(gorc_id).await.is_some() {
+					// Apply the incoming properties IN PLACE, under the instance lock, and take
+					// back the set of dirty zones. Cloning the instance, mutating the clone and
+					// writing it back would race with handle_player_movement, which touches this
+					// same object at ~30 Hz: whichever write lands last silently reverts the
+					// other's change. A one-shot field such as the reparent `parent_id` is then
+					// lost for good and every later global position is resolved against the wrong
+					// parent. Working in place also leaves the live zone_manager and subscriber
+					// lists untouched.
+					let zone_set = gorc_instances.with_object_mut(gorc_id, |instance| {
+						let zone_set = instance.get_object_mut::<GenericProps>()
+							.expect("Object must exists")
+							.update(req_data.object_data.clone());
+						for zone in &zone_set {
+							instance.mark_needs_update(*zone);
+						}
+						zone_set
+					}).await.unwrap_or_default();
 
+					// Resolve the new global position ONCE (it does not depend on the zone being
+					// iterated) and apply it only after the payload is in place, so the parent_id
+					// read here is the one this very update may have just set.
+					let mut pending_global_position: Option<horizon_event_system::Vec3> = None;
+					if !zone_set.is_empty() {
 						if let Some(position_value) = req_data.object_data.get("position") {
 							if let Ok(position) = serde_json::from_value::<horizon_event_system::Vec3>(position_value.clone()) {
-								// TODO Not sure required to update object_instance position here
-								// object_instance.update_position(position);
-
-								// we update the position in gorc for update zones
-
-								let parent_id = object_instance.get_object::<GenericProps>().and_then(|props| {
-									props.data.values()
-										.filter_map(|zone_data| zone_data.get("parent_id"))
-										.filter_map(|v| v.as_str())
-										.find(|s| !s.is_empty())
-										.map(|s| s.to_string())
-								});
+								let parent_id = gorc_instances.with_object_mut(gorc_id, |instance| {
+									instance.get_object::<GenericProps>().and_then(|props| {
+										props.data.values()
+											.filter_map(|zone_data| zone_data.get("parent_id"))
+											.filter_map(|v| v.as_str())
+											.find(|s| !s.is_empty())
+											.map(|s| s.to_string())
+									})
+								}).await.flatten();
 								let mut final_position = position;
 
 								if let Some(parent_id_str) = &parent_id {
@@ -244,40 +259,48 @@ pub fn handle_object_update(
 										}
 									}
 								}
-								
-								// Update the object_instance global_position property
-								object_instance.get_object_mut::<GenericProps>().expect("Object must exists").global_position = final_position;
-								
-								// Use events.update_object_position to update position AND send zone
-								// entry/exit messages to players. Using gorc_instances.update_object_position
-								// directly would compute zone changes but discard them, so players near
-								// the new position would never receive zone entry messages.
-								if let Err(e) = events.update_object_position(gorc_id, final_position).await {
-									error!("🚀 GORC: ❌ Failed to update object position with zone events: {}", e);
-								}
 
-								// Update children objects' global positions
-								update_children_positions(gorc_id, final_position, Arc::clone(&props_clone), &gorc_instances, Arc::clone(&events)).await;
+								pending_global_position = Some(final_position);
 							}
 						}
+					}
 
-						for replicationlayer in object_instance.get_object::<GenericProps>().expect("Object must exists").get_layers().iter() {
-							if replicationlayer.channel == zone {
-								if let Err(e) = events.emit_gorc_instance(
-									gorc_id,
-									zone,
-									"update_property",
-									&object_instance.get_object_mut::<GenericProps>().expect("Object must exists").get_data_for_layer(&replicationlayer).unwrap_or(serde_json::Value::Null),
-									horizon_event_system::Dest::Client
-								).await {
-									error!("🚀 GORC: ❌ Failed to broadcast channel update: {}", e);
-								} else {
-									debug!("🚀 GORC: ✅ Broadcasted channel update for object> {}", gorc_id);
+					// Broadcast the freshly stored payload, read back from the live instance.
+					if let Some(snapshot) = gorc_instances.get_object(gorc_id).await {
+						if let Some(props) = snapshot.get_object::<GenericProps>() {
+							let layers = props.get_layers();
+							for zone in &zone_set {
+								for replicationlayer in layers.iter() {
+									if replicationlayer.channel == *zone {
+										if let Err(e) = events.emit_gorc_instance(
+											gorc_id,
+											*zone,
+											"update_property",
+											&props.get_data_for_layer(replicationlayer).unwrap_or(serde_json::Value::Null),
+											horizon_event_system::Dest::Client
+										).await {
+											error!("🚀 GORC: ❌ Failed to broadcast channel update: {}", e);
+										} else {
+											debug!("🚀 GORC: ✅ Broadcasted channel update for object> {}", gorc_id);
+										}
+									}
 								}
 							}
 						}
 					}
-					gorc_instances.update_object(gorc_id, object_instance).await;
+
+					if let Some(final_position) = pending_global_position {
+						// Use events.update_object_position to update position AND send zone
+						// entry/exit messages to players. Using gorc_instances.update_object_position
+						// directly would compute zone changes but discard them, so players near
+						// the new position would never receive zone entry messages.
+						if let Err(e) = events.update_object_position(gorc_id, final_position).await {
+							error!("🚀 GORC: ❌ Failed to update object position with zone events: {}", e);
+						}
+
+						// Update children objects' global positions
+						update_children_positions(gorc_id, final_position, Arc::clone(&props_clone), &gorc_instances, Arc::clone(&events)).await;
+					}
 				} else {
 					error!("🎮 GORC: ❌ Object instance not found in GORC for uuid: {}", req_data.object_uuid);
 				}

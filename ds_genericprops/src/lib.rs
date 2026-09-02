@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use dashmap::DashMap;
+use dashmap::{DashMap, DashSet};
 use horizon_event_system::gorc::instance;
 use horizon_event_system::{
     create_simple_plugin,
@@ -11,6 +11,7 @@ use horizon_event_system::{
     ServerContext,
     SimplePlugin,
     PlayerDisconnectedEvent,
+    PlayerId,
     Vec3,
 };
 use std::sync::Arc;
@@ -35,7 +36,11 @@ use serde_json::{json, Value};
 pub struct GenericPropsPlugin {
     name: String,
 	props: Arc<DashMap<String, GorcObjectId>>,
-	definitions: Arc<DashMap<String, ObjectDefinition>>
+	definitions: Arc<DashMap<String, ObjectDefinition>>,
+	/// Players currently connected, by their final (post `update_player_id`) uuid.
+	/// Used to prune ghost subscribers off every newly registered GORC object — see
+	/// the comment in `handlers::create::handle_object_create`.
+	live_players: Arc<DashSet<PlayerId>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -75,6 +80,7 @@ impl GenericPropsPlugin {
             name: "GenericPropsPlugin".to_string(),
             props: Arc::new(DashMap::with_capacity_and_shard_amount(64, 32)),
             definitions: Arc::new(DashMap::with_capacity_and_shard_amount(64, 32)),
+            live_players: Arc::new(DashSet::new()),
         }
     }
 	pub fn new_definition(&mut self, name: String, definition_data: serde_json::Value) {
@@ -281,6 +287,7 @@ impl GenericPropsPlugin {
         let definitions2 = Arc::clone(&self.definitions);
         let props2 = Arc::clone(&self.props);
         let queue_objects_create2 = Arc::clone(&queue_objects_create);
+        let live_players2 = Arc::clone(&self.live_players);
         
         events.on_plugin("genericprops", "create_object", move |event: serde_json::Value| {
             debug!("plugin genericprops (create): Receive object message {:?}", event);
@@ -292,6 +299,7 @@ impl GenericPropsPlugin {
                                 handle2.clone(),
                                 true,
                                 queue_objects_create2.clone(),
+                                live_players2.clone(),
                             )
                         {
                             error!("🎮 Failed to handle object update: {}", e);
@@ -305,6 +313,7 @@ impl GenericPropsPlugin {
         let definitions3 = Arc::clone(&self.definitions);
         let props3 = Arc::clone(&self.props);
         let queue_objects_create3 = Arc::clone(&queue_objects_create);
+        let live_players3 = Arc::clone(&self.live_players);
 
         events.on_plugin("genericprops", "create_object_from_gameserver", move |event: serde_json::Value| {
             debug!("plugin genericprops (create from gameserver): Receive object message {:?}", event);
@@ -316,6 +325,7 @@ impl GenericPropsPlugin {
                                 handle3.clone(),
                                 false,
                                 queue_objects_create3.clone(),
+                                live_players3.clone(),
                             )
                         {
                             error!("🎮 Failed to handle object update: {}", e);
@@ -468,10 +478,16 @@ impl GenericPropsPlugin {
         let props_player_remove = Arc::clone(&self.props);
         let handle_player_remove = luminal_handle.clone();
         let events_core = Arc::clone(&events);
+        let live_players_remove = Arc::clone(&self.live_players);
         events.on_core("player_disconnected", move |event: PlayerDisconnectedEvent| {
             let props_player_remove = Arc::clone(&props_player_remove);
             let events_core = Arc::clone(&events_core);
+            let live_players_remove = Arc::clone(&live_players_remove);
             let event = event.clone();
+            // Mark the player dead synchronously, before the spawned cleanup runs: any
+            // GORC object registered in the meantime must not pick them up as a
+            // subscriber (see handlers::create::handle_object_create).
+            live_players_remove.remove(&event.player_id);
             handle_player_remove.spawn(async move {
                 // Remove player from props and get their GORC object ID
                 if let Some((_, gorc_id)) = props_player_remove.remove(&event.player_id.to_string()) {
@@ -543,6 +559,7 @@ impl GenericPropsPlugin {
         let definitions_items_chunk = Arc::clone(&self.definitions);
         let props_items_chunk = Arc::clone(&self.props);
         let queue_objects_create_items_chunk = Arc::clone(&queue_objects_create);
+        let live_players_items_chunk = Arc::clone(&self.live_players);
         let events_items_chunk = Arc::clone(&events);
         events.on_plugin("genericprops", "items_chunk", move |event: PersistenceItemsChunkPayloadEvent| {
             debug!("plugin genericprops (items_chunk): Receive items chunk message with {} items", event.items.len());
@@ -569,6 +586,7 @@ impl GenericPropsPlugin {
                     handle_items_chunk.clone(),
                     true,
                     queue_objects_create_items_chunk.clone(),
+                    live_players_items_chunk.clone(),
                 ) {
                     error!("plugin genericprops (items_chunk): failed to create object: {}", e);
                 }

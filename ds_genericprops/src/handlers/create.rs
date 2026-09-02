@@ -6,7 +6,7 @@ use horizon_event_system::{
 };
 use tracing::{debug, info, warn, error};
 use serde_json;
-use dashmap::DashMap;
+use dashmap::{DashMap, DashSet};
 use tokio::sync::RwLock;
 
 use ds_common::events::GenericPropsRequest;
@@ -21,6 +21,7 @@ pub fn handle_object_create(
 		handle: luminal::Handle,
 		spawn_in_gameserver: bool,
 		queue_objects_create: Arc<RwLock<HashMap<String, serde_json::Value>>>,
+		live_players: Arc<DashSet<PlayerId>>,
 	) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 		
 		let Some(gorc_instances) = events.get_gorc_instances() else {
@@ -119,6 +120,9 @@ pub fn handle_object_create(
 					let player_id = PlayerId::from_str(
 						event["object_uuid"].as_str().unwrap_or_default()
 					).unwrap_or_else(|_| PlayerId::new());
+					// Record the player as live BEFORE add_player, so that an object
+					// registered concurrently never prunes them as a ghost.
+					live_players.insert(player_id);
 					gorc_instances.add_player(player_id, obj.global_position.clone()).await;
 					debug!("🎮 GORC: ✅ Player {} added to spatial tracking BEFORE object registration", player_id);
 				}
@@ -129,6 +133,28 @@ pub fn handle_object_create(
 				debug!("🚀 GORC: object register {} completed with id {}", uuid, gorc_id.to_string());
 				props.insert(uuid, gorc_id.clone());
 				if let Some(mut object_instance) = gorc_instances.get_object(gorc_id).await {
+					// Drop subscribers that are no longer connected.
+					//
+					// `register_object_with_uuid` subscribes every player found in GORC's
+					// `player_positions` map without checking that they are still connected
+					// (Horizon: gorc/instance.rs, "Pre-calculate subscriptions"), and
+					// `update_player_position` re-inserts a player into that map with no such
+					// check either. So a movement event still in flight when a player
+					// disconnects resurrects them there, `remove_player` has already run and
+					// never runs again, and from then on EVERY newly registered object
+					// re-subscribes the dead player and replicates to them forever — observed
+					// on preprod as ~30 failed sends/s per ghost, 13 CPU cores burnt and the
+					// live clients' message channels overflowing ("Message channel full").
+					let mut pruned = 0usize;
+					for subscribers in object_instance.subscribers.values_mut() {
+						let before = subscribers.len();
+						subscribers.retain(|player_id| live_players.contains(player_id));
+						pruned += before - subscribers.len();
+					}
+					if pruned > 0 {
+						debug!("🎮 GORC: pruned {} stale subscriber(s) from newly registered object {}", pruned, gorc_id);
+					}
+
 					for channel in &definition.channels {
 						object_instance.mark_needs_update(channel.zone);
 					}
@@ -248,6 +274,7 @@ pub fn handle_object_create(
 						   handle_clone.clone(),
 						   spawn_in_gameserver,
 						   queue_objects_create.clone(),
+						   live_players.clone(),
 					   ) {
 						   error!("🚀 Plugin: ❌ Failed to handle queued object create: {}", e);
 					   }

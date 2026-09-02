@@ -224,66 +224,79 @@ pub fn handle_movement_request_sync(
                         // Check if player has a parent_id and calculate global position
                         let mut computed_position = move_data.position;
 
-                        // Update the GenericProps on the object instance
-                        if let Some(mut object_instance) = gorc_instances.get_object(gorc_id).await {
-                            let zone_set = object_instance.get_object_mut::<GenericProps>()
-                                .expect("Object must exists")
-                                .update(serde_json::json!({
-                                    "position": computed_position.clone()
-                                }));
-                            
-                            for zone in zone_set {
-                                object_instance.mark_needs_update(zone);
-
-                                // Get parent_id to calculate global position
-                                let parent_id = object_instance.get_object::<GenericProps>().and_then(|props| {
+                        // Resolve the parent this movement is expressed against. A parent_id
+                        // carried by the packet itself (a reparent: leaving a building for the
+                        // planet) wins immediately — the local coordinates in the SAME packet are
+                        // already relative to that new parent. Reading the stored parent first, as
+                        // this used to, resolved the reparent packet against the OLD parent and
+                        // threw the player ~6360 km away for one frame, emptying every zone
+                        // around them before the next packet pulled them back.
+                        let parent_id = match &move_data.parent_id {
+                            Some(parent_id) => Some(parent_id.clone()),
+                            None => gorc_instances.with_object_mut(gorc_id, |instance| {
+                                instance.get_object::<GenericProps>().and_then(|props| {
                                     props.data.values()
                                         .filter_map(|zone_data| zone_data.get("parent_id"))
                                         .filter_map(|v| v.as_str())
                                         .find(|s| !s.is_empty())
                                         .map(|s| s.to_string())
-                                });
+                                })
+                            }).await.flatten(),
+                        };
 
-                                if let Some(parent_id_str) = &parent_id {
-                                    if let Ok(parent_gorc_id) = GorcObjectId::from_str(parent_id_str) {
-                                        if let Some(parent_global_position) = gorc_instances.get_object_position(parent_gorc_id).await {
-                                            final_position = horizon_event_system::Vec3 {
-                                                x: parent_global_position.x + computed_position.x,
-                                                y: parent_global_position.y + computed_position.y,
-                                                z: parent_global_position.z + computed_position.z,
-                                            };
-                                        }
-                                    }
+                        // Resolving the parent's global position needs an await, so it has to
+                        // happen before the instance is locked below.
+                        if let Some(parent_id_str) = &parent_id {
+                            if let Ok(parent_gorc_id) = GorcObjectId::from_str(parent_id_str) {
+                                if let Some(parent_global_position) = gorc_instances.get_object_position(parent_gorc_id).await {
+                                    final_position = horizon_event_system::Vec3 {
+                                        x: parent_global_position.x + move_data.position.x,
+                                        y: parent_global_position.y + move_data.position.y,
+                                        z: parent_global_position.z + move_data.position.z,
+                                    };
                                 }
-                                
-                                // Update the object_instance global_position property
-                                object_instance.get_object_mut::<GenericProps>()
-                                    .expect("Object must exists")
-                                    .global_position = final_position;
-                                computed_position = final_position;
                             }
-                            
-                            // If the movement carries a new parent_id, persist it into the
-                            // GenericProps data before writing back to GORC so that subsequent
-                            // reads (e.g. global-position calculation) see the updated value.
+                        }
+                        computed_position = final_position;
+
+                        // Apply the payload IN PLACE, under the instance lock, instead of
+                        // cloning it and writing the clone back. handle_object_update runs
+                        // concurrently on this same object (head, head_yaw, action, ... at ~30 Hz)
+                        // and a write-back of either snapshot silently reverts the other's change.
+                        // parent_id is sent by the client exactly once, so losing that race even
+                        // a single time pins the player to its old parent forever.
+                        //
+                        // The stored `position` stays the LOCAL one — that is what clients need to
+                        // place the object under its parent. And global_position is deliberately
+                        // left alone here: update_object_position() below reads it as the OLD
+                        // position to detect zone crossings, and pre-writing the new value makes
+                        // old == new, so every move reports "0 zone changes" and a stationary
+                        // player is never told that someone walked into their zone.
+                        let applied = gorc_instances.with_object_mut(gorc_id, |instance| {
+                            // rotation is stored alongside position: it is part of channel 0 and is
+                            // what gorc_zone_enter serves to a client discovering this player. Only
+                            // position used to be persisted, so the snapshot kept the orientation
+                            // frozen at spawn time and a player standing still was replicated to
+                            // newcomers lying flat on the planet surface.
+                            let mut patch = serde_json::json!({
+                                "position": move_data.position.clone(),
+                                "rotation": move_data.rotation.clone(),
+                            });
                             if let Some(ref parent_id) = move_data.parent_id {
-                                object_instance.get_object_mut::<GenericProps>()
-                                    .expect("Object must exists")
-                                    .update(serde_json::json!({ "parent_id": parent_id }));
+                                patch["parent_id"] = serde_json::json!(parent_id);
                             }
+                            let zone_set = instance.get_object_mut::<GenericProps>()
+                                .expect("Object must exists")
+                                .update(patch);
+                            for zone in zone_set {
+                                instance.mark_needs_update(zone);
+                            }
+                        }).await;
 
-                            // Write the updated GenericProps snapshot back to GORC FIRST.
-                            // update_object performs a blind insert that REPLACES the entire
-                            // ObjectInstance — including its zone_manager center and subscriber
-                            // lists — with this snapshot (captured above, before the position
-                            // moved). It must therefore run BEFORE update_object_position;
-                            // otherwise it clobbers the fresh zone center and subscription
-                            // changes that update_object_position produces. On a teleport/reparent
-                            // that clobber leaves the player unsubscribed from its own object
-                            // (move -> 0 subscribers, so the client stops receiving positions).
-                            gorc_instances.update_object(gorc_id, object_instance).await;
-
-                            // Now update the tracked object position LAST. This refreshes the
+                        if applied.is_none() {
+                            error!("🎮 GORC: ❌ Object instance not found in GORC for uuid: {}", move_data.player_id);
+                        } else {
+                            // Update the tracked object position LAST. This refreshes the
                             // zone_manager center on the live instance and recalculates zone
                             // subscriptions against the new position, and must be the final
                             // authoritative write so nothing overwrites it.
@@ -294,8 +307,6 @@ pub fn handle_movement_request_sync(
                                 debug!("🚀 STEP 11.3: ✅ Updated GORC object tracking for {:?} at {:?}",
                                     gorc_id, final_position);
                             }
-                        } else {
-                            error!("🎮 GORC: ❌ Object instance not found in GORC for uuid: {}", move_data.player_id);
                         }
 
                         // Update player position in GORC tracking

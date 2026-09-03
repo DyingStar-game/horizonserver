@@ -322,7 +322,7 @@ impl SimplePlugin for DyingstarServicesPlugin {
                                                         } else if object_type == "star" {
                                                             debug!("Emitting star object to genericprops...");
                                                             if let Some(scenename) = modified_obj["object_data"]["scenename"].as_str() {
-                                                                modified_obj["object_data"]["scenename"] = scenename.replace("scenes/systems/tarsis/tarsis.tscn", "scenes/star/star.tscn").into();
+                                                                modified_obj["object_data"]["scenename"] = scenename.replace("scenes/systems/tarsis/tarsis.tscn", "scenes/_universe/environment/space/star.tscn").into();
                                                             }
                                                             if let Some(parent_id) = modified_obj["object_data"]["parent_id"].as_str() {
                                                                 modified_obj["object_data"]["parent_id"] = "".into();

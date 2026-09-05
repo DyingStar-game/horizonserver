@@ -21,6 +21,7 @@
 				"fractures",
 				"kick",
 				"mineral_id",
+				"host_rock_id",
 				"weight",
 				"blocs",
 				"ore_seed",

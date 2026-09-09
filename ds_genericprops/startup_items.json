@@ -7,14 +7,14 @@
             "parent_id": "_planet_SandBox",
             "scenename": "scenes/_universe/structures/buildings/spawn_building.tscn",
             "position": {
-                "x": 4450603.901,
-                "y": 2674216.174,
-                "z": -3675741.487
+                "x": 4450602.998,
+                "y": 2674215.631,
+                "z": -3675740.7411
             },
             "rotation": {
-                "x": -0.6091,
-                "y": -2.1223,
-                "z": 1.0332
+                "x": -0.609,
+                "y": -2.122,
+                "z": 1.0327
             },
             "x_spacing": -5.16,
             "z_spacing": 3.16,
@@ -36,14 +36,14 @@
             "parent_id": "_planet_SandBox",
             "scenename": "scenes/_universe/structures/buildings/spawn_building.tscn",
             "position": {
-                "x": 4450601.178,
-                "y": 2674203.28,
-                "z": -3675754.212
+                "x": 4450600.271,
+                "y": 2674202.735,
+                "z": -3675753.4627
             },
             "rotation": {
-                "x": -0.6091,
-                "y": -2.1223,
-                "z": 1.0332
+                "x": -0.609,
+                "y": -2.122,
+                "z": 1.0327
             },
             "x_spacing": -5.16,
             "z_spacing": 3.16,
@@ -65,14 +65,14 @@
             "parent_id": "_planet_SandBox",
             "scenename": "scenes/_universe/structures/buildings/spawn_building.tscn",
             "position": {
-                "x": 4450598.455,
-                "y": 2674190.385,
-                "z": -3675766.937
+                "x": 4450597.544,
+                "y": 2674189.837,
+                "z": -3675766.1844
             },
             "rotation": {
-                "x": -0.6091,
-                "y": -2.1223,
-                "z": 1.0332
+                "x": -0.609,
+                "y": -2.122,
+                "z": 1.0327
             },
             "x_spacing": -5.16,
             "z_spacing": 3.16,
@@ -94,14 +94,14 @@
             "parent_id": "_planet_SandBox",
             "scenename": "scenes/_universe/structures/buildings/spawn_building.tscn",
             "position": {
-                "x": 4450610.787,
-                "y": 2674248.775,
-                "z": -3675709.314
+                "x": 4450609.892,
+                "y": 2674248.238,
+                "z": -3675708.5752
             },
             "rotation": {
-                "x": -0.6091,
-                "y": -2.1223,
-                "z": 1.0332
+                "x": -0.609,
+                "y": -2.122,
+                "z": 1.0327
             },
             "x_spacing": -5.16,
             "z_spacing": 3.16,
@@ -123,14 +123,14 @@
             "parent_id": "_planet_SandBox",
             "scenename": "scenes/_universe/structures/buildings/spawn_building.tscn",
             "position": {
-                "x": 4450612.743,
-                "y": 2674258.037,
-                "z": -3675700.173
+                "x": 4450611.851,
+                "y": 2674257.501,
+                "z": -3675699.4364
             },
             "rotation": {
-                "x": -0.6091,
-                "y": -2.1223,
-                "z": 1.0332
+                "x": -0.609,
+                "y": -2.122,
+                "z": 1.0327
             },
             "x_spacing": -5.16,
             "z_spacing": 3.16,
@@ -152,14 +152,14 @@
             "parent_id": "_planet_SandBox",
             "scenename": "scenes/_universe/structures/buildings/spawn_building.tscn",
             "position": {
-                "x": 4450583.507,
-                "y": 2674224.312,
-                "z": -3675760.227
+                "x": 4450582.605,
+                "y": 2674223.77,
+                "z": -3675759.4821
             },
             "rotation": {
-                "x": -0.7819,
-                "y": 0.2129,
-                "z": -0.9372
+                "x": -0.782,
+                "y": 0.212,
+                "z": -0.9369
             },
             "x_spacing": -5.16,
             "z_spacing": 3.16,
@@ -181,14 +181,14 @@
             "parent_id": "_planet_SandBox",
             "scenename": "scenes/_universe/structures/buildings/spawn_building.tscn",
             "position": {
-                "x": 4450578.56,
-                "y": 2674200.888,
-                "z": -3675783.342
+                "x": 4450577.654,
+                "y": 2674200.343,
+                "z": -3675782.5935
             },
             "rotation": {
-                "x": -0.7819,
-                "y": 0.2129,
-                "z": -0.9372
+                "x": -0.782,
+                "y": 0.213,
+                "z": -0.9369
             },
             "x_spacing": -5.16,
             "z_spacing": 3.16,
@@ -210,14 +210,14 @@
             "parent_id": "_planet_SandBox",
             "scenename": "scenes/_universe/structures/buildings/spawn_building.tscn",
             "position": {
-                "x": 4450622.068,
-                "y": 2674231.046,
-                "z": -3675708.62
+                "x": 4450621.172,
+                "y": 2674230.507,
+                "z": -3675707.8798
             },
             "rotation": {
-                "x": -0.7819,
-                "y": 0.2129,
-                "z": -0.9372
+                "x": -0.782,
+                "y": 0.212,
+                "z": -0.9369
             },
             "x_spacing": -5.16,
             "z_spacing": 3.16,
@@ -239,14 +239,14 @@
             "parent_id": "_planet_SandBox",
             "scenename": "scenes/_universe/structures/buildings/spawn_building.tscn",
             "position": {
-                "x": 4450618.061,
-                "y": 2674212.07,
-                "z": -3675727.346
+                "x": 4450617.158,
+                "y": 2674211.528,
+                "z": -3675726.6003
             },
             "rotation": {
-                "x": -0.7819,
-                "y": 0.2129,
-                "z": -0.9372
+                "x": -0.782,
+                "y": 0.212,
+                "z": -0.9369
             },
             "x_spacing": -5.16,
             "z_spacing": 3.16,
@@ -268,14 +268,14 @@
             "parent_id": "_planet_SandBox",
             "scenename": "scenes/_universe/structures/buildings/spawn_building.tscn",
             "position": {
-                "x": 4450612.644,
-                "y": 2674186.423,
-                "z": -3675752.657
+                "x": 4450611.731,
+                "y": 2674185.875,
+                "z": -3675751.9033
             },
             "rotation": {
-                "x": -0.7819,
-                "y": 0.2129,
-                "z": -0.9372
+                "x": -0.782,
+                "y": 0.212,
+                "z": -0.9369
             },
             "x_spacing": -5.16,
             "z_spacing": 3.16,
@@ -297,14 +297,14 @@
             "parent_id": "_planet_SandBox",
             "scenename": "scenes/_universe/structures/buildings/spawn_building.tscn",
             "position": {
-                "x": 4450610.295,
-                "y": 2674175.302,
-                "z": -3675763.631
+                "x": 4450609.379,
+                "y": 2674174.751,
+                "z": -3675762.8741
             },
             "rotation": {
-                "x": -0.7819,
-                "y": 0.2129,
-                "z": -0.9372
+                "x": -0.782,
+                "y": 0.213,
+                "z": -0.9369
             },
             "x_spacing": -5.16,
             "z_spacing": 3.16,
@@ -326,14 +326,14 @@
             "parent_id": "_planet_SandBox",
             "scenename": "scenes/_universe/structures/industrial/cargo_depot.tscn",
             "position": {
-                "x": 4450631.112,
-                "y": 2674167.154,
-                "z": -3675744.514
+                "x": 4450630.197,
+                "y": 2674166.604,
+                "z": -3675743.7587
             },
             "rotation": {
-                "x": 0.6091,
-                "y": 1.0193,
-                "z": -1.0332
+                "x": 0.609,
+                "y": 1.019,
+                "z": -1.0327
             },
             "reception_players": [],
             "reception_owner": "",
@@ -7673,14 +7673,14 @@
             "parent_id": "_planet_SandBox",
             "scenename": "scenes/_universe/structures/industrial/cargo_depot.tscn",
             "position": {
-                "x": 4456811.265,
-                "y": 2658665.817,
-                "z": -3679611.757
+                "x": 4457559.297,
+                "y": 2657965.49,
+                "z": -3679112.0077
             },
             "rotation": {
-                "x": -0.3002,
-                "y": 0.5463,
-                "z": -1.1188
+                "x": 0.06,
+                "y": 0.717,
+                "z": -1.1389
             },
             "reception_players": [],
             "reception_owner": "",
@@ -7862,14 +7862,14 @@
             "parent_id": "_planet_SandBox",
             "scenename": "scenes/_universe/structures/industrial/cargo_depot.tscn",
             "position": {
-                "x": 4464455.623,
-                "y": 2667444.926,
-                "z": -3668630.788
+                "x": 4464892.524,
+                "y": 2666883.662,
+                "z": -3668692.2405
             },
             "rotation": {
-                "x": -0.3002,
-                "y": 0.5445,
-                "z": -1.117
+                "x": -0.3,
+                "y": 0.544,
+                "z": -1.1167
             },
             "reception_players": [],
             "reception_owner": "",
@@ -8047,9 +8047,9 @@
         "object_data": {
             "parent_id": "_planet_SandBox",
             "position": {
-                "x": 4450644.032,
-                "y": 2674171.236,
-                "z": -3675726.5613
+                "x": 4450643.323,
+                "y": 2674170.81,
+                "z": -3675725.9753
             },
             "rotation": {
                 "x": 0.673,
@@ -8070,9 +8070,9 @@
         "object_data": {
             "parent_id": "_planet_SandBox",
             "position": {
-                "x": 4450640.668,
-                "y": 2674174.534,
-                "z": -3675728.2359
+                "x": 4450639.959,
+                "y": 2674174.108,
+                "z": -3675727.6499
             },
             "rotation": {
                 "x": 0.673,
@@ -8093,9 +8093,9 @@
         "object_data": {
             "parent_id": "_planet_SandBox",
             "position": {
-                "x": 4450637.303,
-                "y": 2674177.832,
-                "z": -3675729.9106
+                "x": 4450636.594,
+                "y": 2674177.406,
+                "z": -3675729.3246
             },
             "rotation": {
                 "x": 0.673,
@@ -8116,9 +8116,9 @@
         "object_data": {
             "parent_id": "_planet_SandBox",
             "position": {
-                "x": 4450647.397,
-                "y": 2674167.938,
-                "z": -3675724.8867
+                "x": 4450646.688,
+                "y": 2674167.512,
+                "z": -3675724.3007
             },
             "rotation": {
                 "x": 0.673,
@@ -8139,9 +8139,9 @@
         "object_data": {
             "parent_id": "_planet_SandBox",
             "position": {
-                "x": 4450650.761,
-                "y": 2674164.64,
-                "z": -3675723.2121
+                "x": 4450650.052,
+                "y": 2674164.214,
+                "z": -3675722.6261
             },
             "rotation": {
                 "x": 0.673,
@@ -8162,9 +8162,9 @@
         "object_data": {
             "parent_id": "_planet_SandBox",
             "position": {
-                "x": 4450654.126,
-                "y": 2674161.342,
-                "z": -3675721.5375
+                "x": 4450653.417,
+                "y": 2674160.916,
+                "z": -3675720.9515
             },
             "rotation": {
                 "x": 0.673,
@@ -8185,9 +8185,9 @@
         "object_data": {
             "parent_id": "_planet_SandBox",
             "position": {
-                "x": 4450657.49,
-                "y": 2674158.045,
-                "z": -3675719.8629
+                "x": 4450656.781,
+                "y": 2674157.619,
+                "z": -3675719.2769
             },
             "rotation": {
                 "x": 0.673,
@@ -8208,9 +8208,9 @@
         "object_data": {
             "parent_id": "_planet_SandBox",
             "position": {
-                "x": 4450660.855,
-                "y": 2674154.747,
-                "z": -3675718.1883
+                "x": 4450660.146,
+                "y": 2674154.321,
+                "z": -3675717.6023
             },
             "rotation": {
                 "x": 0.673,
@@ -8231,9 +8231,9 @@
         "object_data": {
             "parent_id": "_planet_SandBox",
             "position": {
-                "x": 4450645.743,
-                "y": 2674175.672,
-                "z": -3675721.2619
+                "x": 4450645.034,
+                "y": 2674175.246,
+                "z": -3675720.6759
             },
             "rotation": {
                 "x": 0.673,
@@ -8254,9 +8254,9 @@
         "object_data": {
             "parent_id": "_planet_SandBox",
             "position": {
-                "x": 4450642.379,
-                "y": 2674178.97,
-                "z": -3675722.9365
+                "x": 4450641.67,
+                "y": 2674178.544,
+                "z": -3675722.3505
             },
             "rotation": {
                 "x": 0.673,
@@ -8277,9 +8277,9 @@
         "object_data": {
             "parent_id": "_planet_SandBox",
             "position": {
-                "x": 4450639.014,
-                "y": 2674182.268,
-                "z": -3675724.6111
+                "x": 4450638.305,
+                "y": 2674181.842,
+                "z": -3675724.0251
             },
             "rotation": {
                 "x": 0.673,
@@ -8300,9 +8300,9 @@
         "object_data": {
             "parent_id": "_planet_SandBox",
             "position": {
-                "x": 4450649.108,
-                "y": 2674172.375,
-                "z": -3675719.5873
+                "x": 4450648.399,
+                "y": 2674171.949,
+                "z": -3675719.0013
             },
             "rotation": {
                 "x": 0.673,
@@ -8323,9 +8323,9 @@
         "object_data": {
             "parent_id": "_planet_SandBox",
             "position": {
-                "x": 4450652.472,
-                "y": 2674169.077,
-                "z": -3675717.9127
+                "x": 4450651.763,
+                "y": 2674168.651,
+                "z": -3675717.3267
             },
             "rotation": {
                 "x": 0.673,
@@ -8346,9 +8346,9 @@
         "object_data": {
             "parent_id": "_planet_SandBox",
             "position": {
-                "x": 4450655.837,
-                "y": 2674165.779,
-                "z": -3675716.2381
+                "x": 4450655.128,
+                "y": 2674165.353,
+                "z": -3675715.6521
             },
             "rotation": {
                 "x": 0.673,
@@ -8369,9 +8369,9 @@
         "object_data": {
             "parent_id": "_planet_SandBox",
             "position": {
-                "x": 4450659.201,
-                "y": 2674162.481,
-                "z": -3675714.5635
+                "x": 4450658.492,
+                "y": 2674162.055,
+                "z": -3675713.9775
             },
             "rotation": {
                 "x": 0.673,
@@ -8392,9 +8392,9 @@
         "object_data": {
             "parent_id": "_planet_SandBox",
             "position": {
-                "x": 4450662.566,
-                "y": 2674159.183,
-                "z": -3675712.8889
+                "x": 4450661.857,
+                "y": 2674158.757,
+                "z": -3675712.3029
             },
             "rotation": {
                 "x": 0.673,
@@ -8415,9 +8415,9 @@
         "object_data": {
             "parent_id": "_planet_SandBox",
             "position": {
-                "x": 4450670.738,
-                "y": 2674151.978,
-                "z": -3675707.5086
+                "x": 4450669.862,
+                "y": 2674151.452,
+                "z": -3675706.7853
             },
             "rotation": {
                 "x": 0.547,

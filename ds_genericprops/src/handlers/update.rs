@@ -131,6 +131,21 @@ async fn update_children_positions(
                     if let Err(e) = events.update_object_position(child_gorc_id, new_global_position).await {
                         error!("🚀 GORC: ❌ Failed to update child object position with zone events: {}", e);
                     }
+
+                    // A player riding this parent (seated in a vehicle) is also a VIEWER, and the
+                    // viewer position is a separate store (player_positions) that only
+                    // handle_player_movement refreshes — and a seated player, motionless in its
+                    // seat, sends no movement at all. Left alone, the viewer stayed at the
+                    // boarding point while the body drove away: 200 m later it "exited" the zone
+                    // of the very vehicle it sat in, and of its own body, and the client obeyed by
+                    // deleting both (a camera left behind a truck that stopped moving).
+                    if child_props.type_name() == "player" {
+                        if let Ok(player_id) = PlayerId::from_str(&child_props.uuid) {
+                            if let Err(e) = events.update_player_position(player_id, new_global_position).await {
+                                error!("🚀 GORC: ❌ Failed to update child player viewer position: {}", e);
+                            }
+                        }
+                    }
                 }
             }
         }

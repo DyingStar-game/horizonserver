@@ -24,7 +24,8 @@
 				"headlights",
 				"engine",
 				"doors",
-				"seats"
+				"seats",
+				"components"
 			]
 		},
 		{

@@ -12,6 +12,7 @@ use crate::events::GenericPropsGORCUpdateRequest;
 use ds_common::events::GenericPropsRequest;
 use crate::objectdefinition::ObjectDefinition;
 use crate::genericprops::GenericProps;
+use crate::handlers::world;
 
 pub fn handle_client_update_request(
     gorc_event: GorcEvent,
@@ -323,10 +324,52 @@ pub fn handle_object_update(
 				error!("🎮 GORC: ❌ Unknown props uuid in request (not in props map and not a valid GORC ID): {}", req_data.object_uuid);
 			}
 
+			// The Godot server flags a prop that drove out of its zones with
+			// `out_of_zone: <its server uuid>` (the same contract as players). Read it
+			// before the payload is consumed below.
+			let out_of_zone = req_data.object_data.get("out_of_zone").and_then(|v| v.as_str()).map(|s| s.to_string());
+			let (object_uuid, object_type) = (req_data.object_uuid.clone(), req_data.object_type.clone());
+
 			if send_to_server_godot {
-				// Forward the update event to the game server plugin 
+				// Forward the update event to the game server plugin, with the object's
+				// world (space / planet + local position) so it can route the update to
+				// the Godot server owning that zone. Read back AFTER the in-place update
+				// so a reparent carried by this very payload is already visible.
+				let mut req_data = req_data;
+				if let Some(gorc_id) = gorc_id_opt {
+					let stored = gorc_instances
+						.with_object_mut(gorc_id, |instance| {
+							instance.get_object::<GenericProps>().map(|gp| (world::read_own_local_and_parent(gp), gp.global_position))
+						})
+						.await
+						.flatten();
+					if let Some(((own_local, parent_id), global_position)) = stored {
+						let object_world = world::resolve_world(&gorc_instances, own_local, parent_id).await;
+						world::inject_world(&mut req_data.object_data, &object_world);
+						world::inject_global_position(&mut req_data.object_data, global_position);
+					}
+				}
 				if let Err(e) = events.emit_plugin("gameserverplugin", "update_prop", &req_data).await {
 					error!("🎮 GORC: ❌ Failed to emit plugin event: {}", e);
+				}
+
+			}
+
+			// The whole subtree travels with an out-of-zone prop — seated players, cargo,
+			// whatever is parented under it — so the game-server plugin gets the item AND
+			// its descendants, parents first, each with its world.
+			if let Some(source_uuid) = out_of_zone {
+				if let Some(item) = world::full_item(&gorc_instances, &object_uuid).await {
+					let children = world::descendants_of(&props_clone, &gorc_instances, &object_uuid).await;
+					info!("🚚 object {} ({}) out of zone of server {} with {} descendant(s)",
+						object_uuid, object_type, source_uuid, children.len());
+					if let Err(e) = events.emit_plugin("gameserverplugin", "object_out_of_zone", &serde_json::json!({
+						"server_uuid": source_uuid,
+						"item": item,
+						"children": children,
+					})).await {
+						error!("🎮 GORC: ❌ Failed to emit object_out_of_zone: {}", e);
+					}
 				}
 			}
 		});

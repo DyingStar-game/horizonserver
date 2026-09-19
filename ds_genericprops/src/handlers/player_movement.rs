@@ -46,6 +46,8 @@ use crate::genericprops::GenericProps;
 use dashmap::DashMap;
 use std::collections::HashMap;
 use ds_common::events::GenericPropsRequest;
+use ds_common::world::ObjectWorld;
+use crate::handlers::world;
 use serde_json::{json, Value};
 use std::sync::OnceLock;
 use std::time::Instant;
@@ -172,6 +174,7 @@ pub fn handle_movement_request_sync(
     let spawn_id = SPAWN_COUNTER.fetch_add(1, Ordering::Relaxed);
     debug!("🚀 HANDLER #{}: Spawning async task (spawn_id={})", handler_id, spawn_id);
     
+    let props_for_children = Arc::clone(&props);
     handle.spawn(async move {
         debug!("🚀 SPAWN #{}: ✅ Async task started for player {}", spawn_id, player_uuid);
 
@@ -402,6 +405,17 @@ pub fn handle_movement_request_sync(
                         map.insert(player_uuid_str.clone(), now);
                         info!("🚀 Player out of zone detected (emitting, cooldown started): {:?}", move_data.out_of_zone);
 
+                        // The world (space / planet + local position) is what ds_game_server
+                        // matches against each Godot server's zones to pick the destination of
+                        // the transfer. Read from the LIVE instance: the `object_instance` clone
+                        // above predates the in-place patch (a reparent in this packet).
+                        let stored = gorc_instances
+                            .with_object_mut(gorc_id, |instance| instance.get_object::<GenericProps>().map(world::read_own_local_and_parent))
+                            .await
+                            .flatten();
+                        let (own_local, parent_id) = stored.unwrap_or((move_data.position, None));
+                        let object_world = world::resolve_world(&gorc_instances, own_local, parent_id).await;
+
                         let mut prop_properties = HashMap::new();
                         if let Some(generic_props) = object_instance.get_object_mut::<GenericProps>() {
                             for properties in generic_props.data.values() {
@@ -416,6 +430,7 @@ pub fn handle_movement_request_sync(
                                 }
                             }
                             prop_properties.insert("_global_position".to_string(), serde_json::to_value(final_position).unwrap_or(Value::Null));
+                            prop_properties.insert(ObjectWorld::KEY.to_string(), serde_json::to_value(&object_world).unwrap_or(Value::Null));
 
                             debug!("🚀 Player out of zone properties: {:?}", prop_properties);
                             let item = GenericPropsRequest  {
@@ -425,14 +440,17 @@ pub fn handle_movement_request_sync(
                                 broadcast_only: None,
                             };
 
-                            // loop on all props and check if zone match
-                            // then return the list of objects found to the gameserver that requested it
+                            // Whatever is parented under the player (the crate in their hands)
+                            // crosses with them: the destination gets the children right after
+                            // the player, the source freezes them instead of losing them.
+                            let children = world::descendants_of(&props_for_children, &gorc_instances, &player_uuid_str).await;
                             events.emit_plugin(
                                 "gameserverplugin",
                                 "player_out_of_zone",
                                 &json!({
                                     "server_uuid": move_data.out_of_zone.as_ref().unwrap(),
                                     "item": item,
+                                    "children": children,
                                     "global_position": final_position,
                                 }),
                             ).await.unwrap();

@@ -3,6 +3,7 @@ pub mod delete;
 pub mod create;
 pub mod player_movement;
 pub mod new_player;
+pub mod world;
 
 pub use update::*;
 pub use delete::*;

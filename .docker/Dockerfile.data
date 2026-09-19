@@ -1,19 +1,23 @@
 # ------------------------------------------------------------------- #
-# Dockerfile.data — Ships only the ds_genericprops JSON data files.    #
+# Dockerfile.data — Ships the runtime data of the plugins: the         #
+# ds_genericprops JSON files and the plugins configuration.            #
 #                                                                      #
 # Consumed as an init container (copy-props) by the horizon chart,     #
 # which copies /data into an emptyDir shared with the server.          #
 #                                                                      #
 # These files are deliberately NOT in the server image: they change    #
 # far more often than the binary, and keeping them here means a JSON   #
-# edit rebuilds two COPY layers (~2s, no Rust toolchain) instead of    #
-# an image that carries the compiled server.                           #
+# or TOML edit rebuilds a few COPY layers (~2s, no Rust toolchain)     #
+# instead of an image that carries the compiled server.                #
 #                                                                      #
-# The paths below mirror what ds_genericprops reads at runtime — see   #
+# The paths below mirror what is read at runtime — see                 #
 # ds_genericprops/src/lib.rs (props/ at on_init, startup_items.json    #
-# on the items_end event). If one moves, the other must follow.        #
+# on the items_end event) and .docker/entrypoint.sh (plugins.toml is   #
+# copied to /app/plugins.toml, where ds_common::Config reads it, before #
+# game_servers is rewritten). If one moves, the other must follow.     #
 # ------------------------------------------------------------------- #
 FROM busybox:1.37
 
 COPY ds_genericprops/props /data/props
 COPY ds_genericprops/startup_items.json /data/startup_items.json
+COPY .docker/plugins.toml /data/plugins.toml

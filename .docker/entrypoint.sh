@@ -1,6 +1,29 @@
 #!/bin/bash
 set -e
 
+# plugins.toml ships in the horizon-data image and is mounted read-only (root-owned,
+# copied by the copy-props init container) under /app/data. The plugins read it from
+# the workdir (/app/plugins.toml — see ds_common::Config) and update_game_servers
+# rewrites it with `sed -i`, so install a private copy the server user can write.
+# The monolith image (.docker/Dockerfile) still bakes /app/plugins.toml directly:
+# without a data mount that copy is used as is.
+install_plugins_config() {
+    local SRC="/app/data/plugins.toml"
+    local DEST="/app/plugins.toml"
+
+    if [ -f "$SRC" ]; then
+        cp "$SRC" "$DEST"
+        echo "Installed $DEST from $SRC"
+    elif [ -f "$DEST" ]; then
+        echo "No $SRC mounted, using $DEST baked in the image"
+    else
+        echo "ERROR: $DEST not found and no $SRC mounted." >&2
+        echo "       plugins.toml ships in the horizon-data image: is dataImage.enabled in the chart," >&2
+        echo "       and does the copy-props init container mount the data volume at /app/data?" >&2
+        exit 1
+    fi
+}
+
 # Function to update game_servers in plugins.toml
 update_game_servers() {
     local PLUGINS_FILE="/app/plugins.toml"
@@ -47,7 +70,8 @@ update_game_servers() {
     fi
 }
 
-# Update game_servers configuration
+# Install plugins.toml, then update its game_servers configuration
+install_plugins_config
 update_game_servers
 
 # Execute the main application

@@ -12,6 +12,7 @@ use tokio::sync::RwLock;
 use ds_common::events::GenericPropsRequest;
 use crate::objectdefinition::ObjectDefinition;
 use crate::genericprops::GenericProps;
+use crate::handlers::world;
 
 pub fn handle_object_create(
 		definitions: Arc<DashMap<String, ObjectDefinition>>,
@@ -185,17 +186,13 @@ pub fn handle_object_create(
 							debug!("🎮 GORC: ✅ Player {} subscribed to existing objects successfully", event["object_uuid"]);
 						}
 
-						// now send player data to the game server
+						// now send player data to the game server, with its world
+						// (space / planet + local position) so ds_game_server can pick
+						// the Godot server owning that zone.
 						let mut event_with_position = event.clone();
-						if let Some(obj_data) = event_with_position.get_mut("object_data") {
-							if let Some(obj_map) = obj_data.as_object_mut() {
-								obj_map.insert("_global_position".to_string(), serde_json::json!({
-									"x": global_position.x,
-									"y": global_position.y,
-									"z": global_position.z
-								}));
-							}
-						}
+						let object_world = world::resolve_world(&gorc_instances, position, parent_id.clone()).await;
+						world::inject_global_position(&mut event_with_position["object_data"], global_position);
+						world::inject_world(&mut event_with_position["object_data"], &object_world);
 
 						info!("🎮 genericprops: EMIT plugingameserver:new_player uuid={:?} global_position=({}, {}, {})",
 							event["object_uuid"], global_position.x, global_position.y, global_position.z);
@@ -217,9 +214,15 @@ pub fn handle_object_create(
 				// `_global_position`, which drops the first instance
 				// ("Player reconnecting, removing stale instance").
 				if spawn_in_gameserver && req_data.object_type != "player" {
-					// Send to ds_game_server to spawn in game world
+					// Send to ds_game_server to spawn in game world. A copy carries the
+					// object's world + global position (Horizon-internal keys, stripped
+					// before the Godot wire); the persisted event stays untouched.
+					let mut spawn_event = event_clone.clone();
+					let object_world = world::resolve_world(&gorc_instances, position, parent_id.clone()).await;
+					world::inject_global_position(&mut spawn_event["object_data"], global_position);
+					world::inject_world(&mut spawn_event["object_data"], &object_world);
 					if let Err(e) = events
-						.emit_plugin("gameserverplugin", "spawn_object", &serde_json::json!(event_clone))
+						.emit_plugin("gameserverplugin", "spawn_object", &spawn_event)
 						.await
 					{
 						error!("🚀 Plugin: ❌ Failed to emit generic prop to DsGameServerPlugin: {}", e);

@@ -144,64 +144,7 @@
             "apartments": []
         }
     },
-    {
-        "object_type": "spawnbuilding",
-        "object_uuid": "f845c6ae-3fc1-4892-9a92-4012de49775f",
-        "object_data": {
-            "name": "tarsis_4-1006",
-            "parent_id": "_planet_SandBox",
-            "scenename": "scenes/_universe/structures/buildings/spawn_building.tscn",
-            "position": {
-                "x": 4450582.605,
-                "y": 2674223.77,
-                "z": -3675759.4821
-            },
-            "rotation": {
-                "x": -0.782,
-                "y": 0.212,
-                "z": -0.9369
-            },
-            "x_spacing": -5.16,
-            "z_spacing": 3.16,
-            "y_spacing": 3.25,
-            "total": 36,
-            "available": 36,
-            "cols": 18,
-            "rows": 2,
-            "floors": 1,
-            "spawn_point": {"x": -1.934, "y": 0.071, "z": 1.471},
-            "apartments": []
-        }
-    },
-    {
-        "object_type": "spawnbuilding",
-        "object_uuid": "c266a55a-a704-4cbe-b402-84d49c05059d",
-        "object_data": {
-            "name": "tarsis_4-1007",
-            "parent_id": "_planet_SandBox",
-            "scenename": "scenes/_universe/structures/buildings/spawn_building.tscn",
-            "position": {
-                "x": 4450577.654,
-                "y": 2674200.343,
-                "z": -3675782.5935
-            },
-            "rotation": {
-                "x": -0.782,
-                "y": 0.213,
-                "z": -0.9369
-            },
-            "x_spacing": -5.16,
-            "z_spacing": 3.16,
-            "y_spacing": 3.25,
-            "total": 16,
-            "available": 16,
-            "cols": 8,
-            "rows": 2,
-            "floors": 1,
-            "spawn_point": {"x": -1.934, "y": 0.071, "z": 1.471},
-            "apartments": []
-        }
-    },
+
     {
         "object_type": "spawnbuilding",
         "object_uuid": "663b6d8e-2874-4ad3-84a5-1b75e9a51624",
@@ -317,6 +260,469 @@
             "spawn_point": {"x": -1.934, "y": 0.071, "z": 1.471},
             "apartments": []
         }
+    },
+
+    {
+        "object_data": {
+            "name": "tarsis_4-1006",
+            "parent_id": "_planet_SandBox",
+            "position": {
+                "x": 4450567.99,
+                "y": 2674235.731,
+                "z": -3675768.4885
+            },
+            "rotation": {
+                "x": -0.782,
+                "y": 0.212,
+                "z": -0.9369
+            },
+            "scenename": "scenes/_universe/structures/buildings/spawn_building.tscn",
+            "rows": 2,
+            "apartments": [],
+            "available": 36,
+            "cols": 18,
+            "floors": 1,
+            "spawn_point": {
+                "x": -1.934,
+                "y": 0.071,
+                "z": 1.471
+            },
+            "total": 36,
+            "x_spacing": -5.16,
+            "y_spacing": 3.25,
+            "z_spacing": 3.16
+        },
+        "object_type": "spawnbuilding",
+        "object_uuid": "f845c6ae-3fc1-4892-9a92-4012de49775f"
+    },
+    {
+        "object_data": {
+            "apartments": [],
+            "available": 16,
+            "cols": 8,
+            "floors": 1,
+            "name": "tarsis_4-1007",
+            "parent_id": "_planet_SandBox",
+            "position": {
+                "x": 4450563.03,
+                "y": 2674212.304,
+                "z": -3675791.5853
+            },
+            "rotation": {
+                "x": -0.782,
+                "y": 0.213,
+                "z": -0.9369
+            },
+            "rows": 2,
+            "scenename": "scenes/_universe/structures/buildings/spawn_building.tscn",
+            "spawn_point": {
+                "x": -1.934,
+                "y": 0.071,
+                "z": 1.471
+            },
+            "total": 16,
+            "x_spacing": -5.16,
+            "y_spacing": 3.25,
+            "z_spacing": 3.16
+        },
+        "object_type": "spawnbuilding",
+        "object_uuid": "c266a55a-a704-4cbe-b402-84d49c05059d"
+    },
+    {
+        "object_data": {
+            "name": "tarsis_4-3008",
+            "parent_id": "_planet_SandBox",
+            "position": {
+                "x": 4450534.879,
+                "y": 2674280.087,
+                "z": -3675776.3373
+            },
+            "rotation": {
+                "x": -0.782,
+                "y": 0.212,
+                "z": -0.9369
+            },
+            "scenename": "scenes/_universe/structures/buildings/spawn_building.tscn",
+            "rows": 2,
+            "apartments": [],
+            "available": 36,
+            "cols": 18,
+            "floors": 1,
+            "spawn_point": {
+                "x": -1.934,
+                "y": 0.071,
+                "z": 1.471
+            },
+            "total": 36,
+            "x_spacing": -5.16,
+            "y_spacing": 3.25,
+            "z_spacing": 3.16
+        },
+        "object_type": "spawnbuilding",
+        "object_uuid": null
+    },
+    {
+        "object_data": {
+            "name": "tarsis_4-3009",
+            "parent_id": "_planet_SandBox",
+            "position": {
+                "x": 4450526.781,
+                "y": 2674241.953,
+                "z": -3675813.874
+            },
+            "rotation": {
+                "x": -0.782,
+                "y": 0.213,
+                "z": -0.9369
+            },
+            "scenename": "scenes/_universe/structures/buildings/spawn_building.tscn",
+            "rows": 2,
+            "apartments": [],
+            "available": 36,
+            "cols": 18,
+            "floors": 1,
+            "spawn_point": {
+                "x": -1.934,
+                "y": 0.071,
+                "z": 1.471
+            },
+            "total": 36,
+            "x_spacing": -5.16,
+            "y_spacing": 3.25,
+            "z_spacing": 3.16
+        },
+        "object_type": "spawnbuilding",
+        "object_uuid": null
+    },
+    {
+        "object_data": {
+            "name": "tarsis_4-3010",
+            "parent_id": "_planet_SandBox",
+            "position": {
+                "x": 4450496.344,
+                "y": 2674311.625,
+                "z": -3675800.085
+            },
+            "rotation": {
+                "x": -0.782,
+                "y": 0.212,
+                "z": -0.9369
+            },
+            "scenename": "scenes/_universe/structures/buildings/spawn_building.tscn",
+            "rows": 2,
+            "apartments": [],
+            "available": 36,
+            "cols": 18,
+            "floors": 1,
+            "spawn_point": {
+                "x": -1.934,
+                "y": 0.071,
+                "z": 1.471
+            },
+            "total": 36,
+            "x_spacing": -5.16,
+            "y_spacing": 3.25,
+            "z_spacing": 3.16
+        },
+        "object_type": "spawnbuilding",
+        "object_uuid": null
+    },
+    {
+        "object_data": {
+            "name": "tarsis_4-3011",
+            "parent_id": "_planet_SandBox",
+            "position": {
+                "x": 4450488.222,
+                "y": 2674273.491,
+                "z": -3675837.5831
+            },
+            "rotation": {
+                "x": -0.782,
+                "y": 0.213,
+                "z": -0.9369
+            },
+            "scenename": "scenes/_universe/structures/buildings/spawn_building.tscn",
+            "rows": 2,
+            "apartments": [],
+            "available": 36,
+            "cols": 18,
+            "floors": 1,
+            "spawn_point": {
+                "x": -1.934,
+                "y": 0.071,
+                "z": 1.471
+            },
+            "total": 36,
+            "x_spacing": -5.16,
+            "y_spacing": 3.25,
+            "z_spacing": 3.16
+        },
+        "object_type": "spawnbuilding",
+        "object_uuid": null
+    },
+    {
+        "object_data": {
+            "name": "tarsis_4-3012",
+            "parent_id": "_planet_SandBox",
+            "position": {
+                "x": 4450457.524,
+                "y": 2674343.396,
+                "z": -3675824.0082
+            },
+            "rotation": {
+                "x": -0.782,
+                "y": 0.212,
+                "z": -0.9369
+            },
+            "scenename": "scenes/_universe/structures/buildings/spawn_building.tscn",
+            "rows": 2,
+            "apartments": [],
+            "available": 36,
+            "cols": 18,
+            "floors": 1,
+            "spawn_point": {
+                "x": -1.934,
+                "y": 0.071,
+                "z": 1.471
+            },
+            "total": 36,
+            "x_spacing": -5.16,
+            "y_spacing": 3.25,
+            "z_spacing": 3.16
+        },
+        "object_type": "spawnbuilding",
+        "object_uuid": null
+    },
+    {
+        "object_data": {
+            "name": "tarsis_4-3014",
+            "parent_id": "_planet_SandBox",
+            "position": {
+                "x": 4450548.241,
+                "y": 2674343.157,
+                "z": -3675714.259
+            },
+            "rotation": {
+                "x": -0.782,
+                "y": 0.212,
+                "z": -0.9369
+            },
+            "scenename": "scenes/_universe/structures/buildings/spawn_building.tscn",
+            "rows": 2,
+            "apartments": [],
+            "available": 36,
+            "cols": 18,
+            "floors": 1,
+            "spawn_point": {
+                "x": -1.934,
+                "y": 0.071,
+                "z": 1.471
+            },
+            "total": 36,
+            "x_spacing": -5.16,
+            "y_spacing": 3.25,
+            "z_spacing": 3.16
+        },
+        "object_type": "spawnbuilding",
+        "object_uuid": null
+    },
+    {
+        "object_data": {
+            "name": "tarsis_4-3015",
+            "parent_id": "_planet_SandBox",
+            "position": {
+                "x": 4450509.705,
+                "y": 2674374.695,
+                "z": -3675738.0067
+            },
+            "rotation": {
+                "x": -0.782,
+                "y": 0.212,
+                "z": -0.9369
+            },
+            "scenename": "scenes/_universe/structures/buildings/spawn_building.tscn",
+            "rows": 2,
+            "apartments": [],
+            "available": 36,
+            "cols": 18,
+            "floors": 1,
+            "spawn_point": {
+                "x": -1.934,
+                "y": 0.071,
+                "z": 1.471
+            },
+            "total": 36,
+            "x_spacing": -5.16,
+            "y_spacing": 3.25,
+            "z_spacing": 3.16
+        },
+        "object_type": "spawnbuilding",
+        "object_uuid": null
+    },
+    {
+        "object_data": {
+            "name": "tarsis_4-3016",
+            "parent_id": "_planet_SandBox",
+            "position": {
+                "x": 4450470.885,
+                "y": 2674406.466,
+                "z": -3675761.93
+            },
+            "rotation": {
+                "x": -0.782,
+                "y": 0.212,
+                "z": -0.9369
+            },
+            "scenename": "scenes/_universe/structures/buildings/spawn_building.tscn",
+            "rows": 2,
+            "apartments": [],
+            "available": 36,
+            "cols": 18,
+            "floors": 1,
+            "spawn_point": {
+                "x": -1.934,
+                "y": 0.071,
+                "z": 1.471
+            },
+            "total": 36,
+            "x_spacing": -5.16,
+            "y_spacing": 3.25,
+            "z_spacing": 3.16
+        },
+        "object_type": "spawnbuilding",
+        "object_uuid": null
+    },
+    {
+        "object_data": {
+            "name": "tarsis_4-3013",
+            "parent_id": "_planet_SandBox",
+            "position": {
+                "x": 4450449.378,
+                "y": 2674305.262,
+                "z": -3675861.4675
+            },
+            "rotation": {
+                "x": -0.782,
+                "y": 0.213,
+                "z": -0.9369
+            },
+            "scenename": "scenes/_universe/structures/buildings/spawn_building.tscn",
+            "rows": 2,
+            "apartments": [],
+            "available": 36,
+            "cols": 18,
+            "floors": 1,
+            "spawn_point": {
+                "x": -1.934,
+                "y": 0.071,
+                "z": 1.471
+            },
+            "total": 36,
+            "x_spacing": -5.16,
+            "y_spacing": 3.25,
+            "z_spacing": 3.16
+        },
+        "object_type": "spawnbuilding",
+        "object_uuid": null
+    },
+    {
+        "object_data": {
+            "name": "tarsis_4-3017",
+            "parent_id": "_planet_SandBox",
+            "position": {
+                "x": 4450399.857,
+                "y": 2674390.592,
+                "z": -3675859.5459
+            },
+            "rotation": {
+                "x": -0.782,
+                "y": 0.212,
+                "z": -0.9369
+            },
+            "scenename": "scenes/_universe/structures/buildings/spawn_building.tscn",
+            "rows": 2,
+            "apartments": [],
+            "available": 36,
+            "cols": 18,
+            "floors": 1,
+            "spawn_point": {
+                "x": -1.934,
+                "y": 0.071,
+                "z": 1.471
+            },
+            "total": 36,
+            "x_spacing": -5.16,
+            "y_spacing": 3.25,
+            "z_spacing": 3.16
+        },
+        "object_type": "spawnbuilding",
+        "object_uuid": null
+    },
+    {
+        "object_data": {
+            "name": "tarsis_4-3018",
+            "parent_id": "_planet_SandBox",
+            "position": {
+                "x": 4450413.218,
+                "y": 2674453.662,
+                "z": -3675797.4677
+            },
+            "rotation": {
+                "x": -0.782,
+                "y": 0.212,
+                "z": -0.9369
+            },
+            "scenename": "scenes/_universe/structures/buildings/spawn_building.tscn",
+            "rows": 2,
+            "apartments": [],
+            "available": 36,
+            "cols": 18,
+            "floors": 1,
+            "spawn_point": {
+                "x": -1.934,
+                "y": 0.071,
+                "z": 1.471
+            },
+            "total": 36,
+            "x_spacing": -5.16,
+            "y_spacing": 3.25,
+            "z_spacing": 3.16
+        },
+        "object_type": "spawnbuilding",
+        "object_uuid": null
+    },
+    {
+        "object_data": {
+            "name": "tarsis_4-3019",
+            "parent_id": "_planet_SandBox",
+            "position": {
+                "x": 4450391.676,
+                "y": 2674352.458,
+                "z": -3675896.9475
+            },
+            "rotation": {
+                "x": -0.782,
+                "y": 0.213,
+                "z": -0.9369
+            },
+            "scenename": "scenes/_universe/structures/buildings/spawn_building.tscn",
+            "rows": 2,
+            "apartments": [],
+            "available": 36,
+            "cols": 18,
+            "floors": 1,
+            "spawn_point": {
+                "x": -1.934,
+                "y": 0.071,
+                "z": 1.471
+            },
+            "total": 36,
+            "x_spacing": -5.16,
+            "y_spacing": 3.25,
+            "z_spacing": 3.16
+        },
+        "object_type": "spawnbuilding",
+        "object_uuid": null
     },
     {
         "object_type": "cargo_depot",

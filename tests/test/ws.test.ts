@@ -104,6 +104,26 @@ describe("WebSocket GORC Player Channel 0", function () {
     expect(result2.data?.zone_data.name).to.equal("ddurieux");
   });
 
+  it("receives the serverinfo of the godot server managing the player (tps + zones)", async () => {
+    // The fake godot server sends a serverinfo sample every second once it got its
+    // zones; Horizon forwards it to every player that server manages.
+    type ServerInfoWs = {
+      player_id: string;
+      object_type: string;
+      data: { godotserver: { tps: number; zones: any[]; name: string }; universe: any };
+    };
+    const message = await waitForMessage<ServerInfoWs>(
+      ws,
+      (m) => m.object_type === "serverinfo",
+      4500
+    );
+    expect(message.data.godotserver.tps).to.be.a("number");
+    expect(message.data.godotserver.zones).to.be.an("array");
+    expect(message.data.godotserver.zones.length).to.be.greaterThan(0);
+    expect(message.data.godotserver.zones[0]).to.have.property("world");
+    expect(message.data.universe.godotservers_number).to.be.greaterThan(0);
+  });
+
   it("connect second player", async () => {
     const expectedPlayerName = "player2";
 

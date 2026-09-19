@@ -357,66 +357,71 @@ impl GenericPropsPlugin {
 
         let props = Arc::clone(&self.props);
         let gorc_instances = context.events().get_gorc_instances().unwrap();
-        let handle_objs_zone = luminal_handle.clone();
-        let objs_zone_events = Arc::clone(&events);
+        let handle_snapshot = luminal_handle.clone();
+        let snapshot_events = Arc::clone(&events);
 
-        events.on_plugin("genericprops", "get_objects_on_zone", move |event: serde_json::Value| {
-            info!("plugin genericprops (get_objects_on_zone): Receive object message {:?}", event);
+        // Snapshot of every object, with its flattened properties, `_global_position`
+        // and `_world` (space / planet + local position). Request/response pair used
+        // by ds_game_server's ServerManager to plan a split or a merge: it emits
+        // `genericprops:get_objects_snapshot {request_id}` and awaits
+        // `gameserver:objects_snapshot {request_id, items}`.
+        events.on_plugin("genericprops", "get_objects_snapshot", move |event: serde_json::Value| {
+            let request_id = event.get("request_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            info!("plugin genericprops (get_objects_snapshot): request {} for {} props", request_id, props.len());
 
             let props = Arc::clone(&props);
             let gorc_instances = Arc::clone(&gorc_instances);
-            let events = Arc::clone(&objs_zone_events);
+            let events = Arc::clone(&snapshot_events);
 
-            handle_objs_zone.spawn(async move {
-                info!("plugin genericprops (get_objects_on_zone): Number props {:?}", props.clone().len());
-
+            handle_snapshot.spawn(async move {
                 let mut items: HashMap<String, GenericPropsRequest> = HashMap::new();
 
-                // TODO: get all items on the zone
                 for entry in props.iter() {
-                    let prop_uuid = entry.key();
-                    let mut prop_properties = HashMap::new();
-                    let mut object_type = String::new();
-                    if let Some(mut object_instance) = gorc_instances.get_object(GorcObjectId::from_str(prop_uuid).unwrap()).await {
-                        if let Some(generic_props) = object_instance.get_object_mut::<GenericProps>() {
-                            object_type = generic_props.object_def.name.clone();
-                            for properties in generic_props.data.values() {
-                                match properties {
-                                    Value::Null => warn!("property null"),
-                                    Value::Object(map) => {
-                                        for(key, value) in map.iter() {
-                                            prop_properties.insert(key.to_string(), value.clone());
-                                        }
-                                    },
-                                    _ => warn!("no properties"),
-                                }
-                            }
-                            prop_properties.insert("_global_position".to_string(), serde_json::to_value(&generic_props.global_position).unwrap_or(Value::Null));
-                        }
-                    }
-                    debug!("plugin genericprops (get_objects_on_zone): Found prop uuid {:?} with properties {:?}", prop_uuid, prop_properties);
+                    let prop_uuid = entry.key().clone();
+                    let Ok(gorc_id) = GorcObjectId::from_str(&prop_uuid) else { continue };
+                    // Snapshot the instance data under the lock, resolve the world after
+                    // (resolve_world awaits on GORC for every ancestor).
+                    let snapshot = gorc_instances
+                        .with_object_mut(gorc_id, |instance| {
+                            instance.get_object::<GenericProps>().map(|gp| (
+                                gp.object_def.name.clone(),
+                                world::flatten_props(gp),
+                                gp.global_position,
+                                world::read_own_local_and_parent(gp),
+                            ))
+                        })
+                        .await
+                        .flatten();
+                    let Some((object_type, prop_properties, global_position, (own_local, parent_id))) = snapshot else {
+                        debug!("plugin genericprops (get_objects_snapshot): {} not in GORC, skipped", prop_uuid);
+                        continue;
+                    };
+                    let object_world = world::resolve_world(&gorc_instances, own_local, parent_id).await;
+                    let mut object_data = Value::Object(prop_properties);
+                    world::inject_global_position(&mut object_data, global_position);
+                    world::inject_world(&mut object_data, &object_world);
                     items.insert(
-                        prop_uuid.to_string(),
+                        prop_uuid.clone(),
                         GenericPropsRequest {
-                            object_type: object_type,
-                            object_uuid: prop_uuid.to_string(),
-                            object_data: serde_json::to_value(&prop_properties).unwrap_or(Value::Null),
+                            object_type,
+                            object_uuid: prop_uuid,
+                            object_data,
                             broadcast_only: None,
                         }
                     );
                 }
 
-                // loop on all props and check if zone match
-                // then return the list of objects found to the gameserver that requested it
-                events.emit_plugin(
+                info!("plugin genericprops (get_objects_snapshot): request {} answered with {} items", request_id, items.len());
+                if let Err(e) = events.emit_plugin(
                     "gameserver",
-                    "initial_objects_on_zone",
+                    "objects_snapshot",
                     &json!({
-                        "server_uuid": event.get("server_uuid").and_then(|v| v.as_str()).unwrap_or(""),
-                        "split_server_uuid": event.get("split_server_uuid").and_then(|v| v.as_str()).unwrap_or(""),
+                        "request_id": request_id,
                         "items": items
                     }),
-                ).await.unwrap();
+                ).await {
+                    error!("plugin genericprops (get_objects_snapshot): failed to emit objects_snapshot: {}", e);
+                }
             });
 
         Ok(())

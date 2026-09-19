@@ -1,238 +1,158 @@
-use horizon_event_system::{
-    EventError,
-};
-use tracing::{info, debug, warn, error};
-use std::sync::{Arc, Mutex};
-use std::net::TcpStream;
-use websocket::sender::Writer;
-use websocket::message::OwnedMessage;
-use serde_json::json;
+//! Bulk object transfer between Horizon and one Godot server, used when a server
+//! starts (initial world dump), when zones are split and when they are merged.
+//!
+//! Every item carries `object_data["_world"]` (space / planet + local position),
+//! injected by ds_genericprops; membership is `zones_contain(zones, world)`.
+//! Planets and stars are worlds, not zone content: always sent, never frozen.
+
 use ds_common::events::GenericPropsRequest;
-use crate::server::Zone;
-use std::collections::HashMap;
+use ds_common::world::ObjectWorld;
+use ds_common::zone::{is_world_object, zones_contain, zones_label, Zone};
+use horizon_event_system::EventError;
+use serde_json::{json, Value};
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
+use tracing::{debug, info, warn};
 
-pub async fn handle_initial_object(
-    event: serde_json::Value,
-    websocket: Arc<Mutex<Option<Writer<TcpStream>>>>,
-    managed_objects: Arc<Mutex<Vec<String>>>,
-    managed_players: Arc<Mutex<Vec<String>>>,
-    zone: &Zone,
+use super::send_ws;
+use crate::server::Server;
+
+pub type ManagedObjects = Arc<Mutex<HashSet<String>>>;
+pub type ManagedPlayers = Arc<Mutex<Vec<String>>>;
+
+/// The item as Godot must see it: without the Horizon-internal keys.
+pub fn item_on_wire(item: &GenericPropsRequest) -> Value {
+    let mut value = serde_json::to_value(item).unwrap_or(Value::Null);
+    ObjectWorld::strip_internal_keys(&mut value["object_data"]);
+    value
+}
+
+fn is_member(item: &GenericPropsRequest, zones: &[Zone]) -> bool {
+    match ObjectWorld::from_object_data(&item.object_data) {
+        Some(world) => zones_contain(zones, &world),
+        None => {
+            warn!("[initial_object] item {} has no _world / _global_position, treated as outside", item.object_uuid);
+            false
+        }
+    }
+}
+
+fn track(item: &GenericPropsRequest, server: &Server) {
+    server.managed_objects.lock().unwrap().insert(item.object_uuid.clone());
+    if item.object_type == "player" {
+        let mut players = server.managed_players.lock().unwrap();
+        if !players.contains(&item.object_uuid) {
+            players.push(item.object_uuid.clone());
+        }
+        let parent = item.object_data.get("parent_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        server.player_parents.lock().unwrap().insert(item.object_uuid.clone(), parent);
+    }
+}
+
+fn untrack(item: &GenericPropsRequest, server: &Server) {
+    server.managed_objects.lock().unwrap().remove(&item.object_uuid);
+    if item.object_type == "player" {
+        let mut players = server.managed_players.lock().unwrap();
+        if let Some(pos) = players.iter().position(|x| x == &item.object_uuid) {
+            players.remove(pos);
+        }
+        server.player_parents.lock().unwrap().remove(&item.object_uuid);
+    }
+}
+
+/// Sends every item to the server as `initial_object`; items outside `zones` are
+/// frozen right after (Godot needs them for collisions but must not simulate them),
+/// items inside become managed. Ends with `initial_object_end`.
+pub fn handle_initial_object(
+    items: &HashMap<String, GenericPropsRequest>,
+    server: &Server,
+    zones: &[Zone],
 ) -> Result<(), EventError> {
-    info!("[initial_object] handler called");
-    debug!("[initial_object] handler called with event: {:?}", event);
-    // debug!("[initial_object] websocket Arc ptr: {:p}", &websocket);
+    let websocket = server.websocket_sender.clone();
+    info!("[initial_object] sending {} items, zones=[{}]", items.len(), zones_label(zones));
 
-    let mut ws_guard = match websocket.lock() {
-        Ok(g) => g,
-        Err(e) => {
-            error!("[initial_object] websocket lock error: {}", e);
-            return Err(EventError::HandlerExecution(format!("websocket lock error: {}", e)));
+    let mut sent = 0usize;
+    let mut frozen = 0usize;
+    for item in items.values() {
+        let wire = item_on_wire(item);
+        send_ws(&websocket, "initial_object", &json!({
+            "namespace": "server",
+            "event": "initial_object",
+            "data": wire,
+        }))?;
+        sent += 1;
+
+        if is_world_object(&item.object_type) {
+            continue;
         }
-    };
-    if ws_guard.is_none() {
-        debug!("[initial_object] No websocket writer available");
-        return Err(EventError::HandlerExecution("No websocket writer available".to_string()));
+        if is_member(item, zones) {
+            track(item, server);
+        } else {
+            debug!("[initial_object] item {} ({}) is outside the zones, freezing", item.object_uuid, item.object_type);
+            send_ws(&websocket, "freeze_object", &json!({
+                "namespace": "server",
+                "event": "freeze_object",
+                "data": wire,
+            }))?;
+            frozen += 1;
+        }
     }
 
-    // Inside the handler:
-    if let Ok(items) = serde_json::from_value::<HashMap<String, GenericPropsRequest>>(event["items"].clone()) {
-        for (uuid, item) in items {
-            // check if item in the server zone
-            let pos = &item.object_data["_global_position"];
-            let x = pos["x"].as_f64().unwrap_or(0.0);
-            let y = pos["y"].as_f64().unwrap_or(0.0);
-            let z = pos["z"].as_f64().unwrap_or(0.0);
-            // Remove _global_position from object_data
-            let mut item = item;
-            if let Some(obj) = item.object_data.as_object_mut() {
-                obj.remove("_global_position");
-            }
-            if item.object_type == "player" {
-                info!("[initial_object] Checking item {} position ({}, {}, {}) against zone {:?}", uuid, x, y, z, zone);
-            }
-            if !is_position_in_zone(x, y, z, zone) {
-                debug!("[initial_object] Item {} position ({}, {}, {}) is out of zone {:?}, skipping", uuid, x, y, z, zone);
-                // we send to create objects, but we will send freeze after
-
-                let message = json!({
-                    "namespace": "server",
-                    "event": "initial_object",
-                    "data": item,
-                });
-
-                debug!("[initial_object] constructed message: {:?}", message);
-                if let Some(w) = ws_guard.as_mut() {
-                    debug!("[initial_object] Sending message to websocket");
-                    if let Err(e) = w.send_message(&OwnedMessage::Text(message.to_string())) {
-                        error!("[initial_object] ERROR sending message to game server: {}", e);
-                        return Err(EventError::HandlerExecution(format!("Message blocked: {}", e)));
-                    } else {
-                        debug!("[initial_object] Message sent successfully");
-                    }
-                }
-
-                let message = json!({
-                    "namespace": "server",
-                    "event": "freeze_object",
-                    "data": item,
-                });
-
-                debug!("[freeze_object] constructed message: {:?}", message);
-                if let Some(w) = ws_guard.as_mut() {
-                    debug!("[freeze_object] Sending message to websocket");
-                    if let Err(e) = w.send_message(&OwnedMessage::Text(message.to_string())) {
-                        error!("[freeze_object] ERROR sending message to game server: {}", e);
-                        return Err(EventError::HandlerExecution(format!("Message blocked: {}", e)));
-                    } else {
-                        debug!("[freeze_object] Message sent successfully");
-                    }
-                }
-            } else {
-                // server manage the object in its zone
-                managed_objects.lock().unwrap().push(item.object_uuid.clone());
-                debug!("🔧 [initial_object] Item {}: type={}, data={:?}", uuid, item.object_type, item.object_data);
-                if item.object_type == "player" {
-                    managed_players.lock().unwrap().push(item.object_uuid.clone());
-                }
-
-                let message = json!({
-                    "namespace": "server",
-                    "event": "initial_object",
-                    "data": item,
-                });
-
-                debug!("[initial_object] constructed message: {:?}", message);
-                if let Some(w) = ws_guard.as_mut() {
-                    debug!("[initial_object] Sending message to websocket");
-                    if let Err(e) = w.send_message(&OwnedMessage::Text(message.to_string())) {
-                        error!("[initial_object] ERROR sending message to game server: {}", e);
-                        return Err(EventError::HandlerExecution(format!("Message blocked: {}", e)));
-                    } else {
-                        debug!("[initial_object] Message sent successfully");
-                    }
-                }
-            }
-        }
-        info!("[initial_object] List of players on new server manage now: {:?}", managed_players.lock().unwrap());
-    }
-
-    // send final message
-    let message = json!({
+    send_ws(&websocket, "initial_object", &json!({
         "namespace": "server",
         "event": "initial_object_end",
         "data": {},
-    });
-    debug!("[initial_object] send end of initial objects");
-    if let Some(w) = ws_guard.as_mut() {
-        debug!("[initial_object] Sending message to websocket");
-        if let Err(e) = w.send_message(&OwnedMessage::Text(message.to_string())) {
-            error!("[initial_object] ERROR sending message to game server: {}", e);
-            return Err(EventError::HandlerExecution(format!("Message blocked: {}", e)));
-        } else {
-            debug!("[initial_object] Message sent successfully");
-        }
-    }
+    }))?;
+    info!(
+        "[initial_object] done: sent={} frozen={} players managed now: {:?}",
+        sent, frozen, server.managed_players.lock().unwrap()
+    );
     Ok(())
 }
 
-pub async fn handle_freeze_object(
-    event: serde_json::Value,
-    websocket: Arc<Mutex<Option<Writer<TcpStream>>>>,
-    managed_objects: Arc<Mutex<Vec<String>>>,
-    managed_players: Arc<Mutex<Vec<String>>>,
-    zone: &Zone,
+/// Sends only the world objects (planets, stars) of `items`: what an idle server of
+/// the pool preloads so that being handed zones later is not a cold start.
+pub fn handle_world_objects(items: &HashMap<String, GenericPropsRequest>, server: &Server) -> Result<(), EventError> {
+    let mut sent = 0usize;
+    for item in items.values().filter(|i| is_world_object(&i.object_type)) {
+        send_ws(&server.websocket_sender, "initial_object", &json!({
+            "namespace": "server",
+            "event": "initial_object",
+            "data": item_on_wire(item),
+        }))?;
+        sent += 1;
+    }
+    info!("[initial_object] {} preloaded {} world object(s) (planets/stars)", server.server_name, sent);
+    Ok(())
+}
+
+/// Freezes on the server every non-world item that is NOT inside `zones` (pass an
+/// empty slice to freeze everything) and forgets it from the managed sets.
+pub fn handle_freeze_object(
+    items: &HashMap<String, GenericPropsRequest>,
+    server: &Server,
+    zones: &[Zone],
 ) -> Result<(), EventError> {
-    info!("[freeze_object] handler called");
-    debug!("[freeze_object] handler called with event: {:?}", event);
-    // debug!("[freeze_object] websocket Arc ptr: {:p}", &websocket);
+    let websocket = server.websocket_sender.clone();
+    info!("[freeze_object] checking {} items against zones=[{}]", items.len(), zones_label(zones));
 
-    let mut ws_guard = match websocket.lock() {
-        Ok(g) => g,
-        Err(e) => {
-            error!("[freeze_object] websocket lock error: {}", e);
-            return Err(EventError::HandlerExecution(format!("websocket lock error: {}", e)));
+    let mut frozen = 0usize;
+    for item in items.values() {
+        if is_world_object(&item.object_type) || is_member(item, zones) {
+            continue;
         }
-    };
-    if ws_guard.is_none() {
-        debug!("[freeze_object] No websocket writer available");
-        return Err(EventError::HandlerExecution("No websocket writer available".to_string()));
+        untrack(item, server);
+        debug!("[freeze_object] item {} ({}) leaves this server", item.object_uuid, item.object_type);
+        send_ws(&websocket, "freeze_object", &json!({
+            "namespace": "server",
+            "event": "freeze_object",
+            "data": item_on_wire(item),
+        }))?;
+        frozen += 1;
     }
-
-    // Inside the handler:
-    if let Ok(items) = serde_json::from_value::<HashMap<String, GenericPropsRequest>>(event["items"].clone()) {
-        for (uuid, item) in items {
-            // check if item in the server zone
-            let pos = &item.object_data["_global_position"];
-            let x = pos["x"].as_f64().unwrap_or(0.0);
-            let y = pos["y"].as_f64().unwrap_or(0.0);
-            let z = pos["z"].as_f64().unwrap_or(0.0);
-            if is_position_in_zone(x, y, z, zone) {
-                debug!("[initial_object] Item {} position ({}, {}, {}) is out of zone {:?}, skipping", uuid, x, y, z, zone);
-                continue;
-            }
-            // Remove _global_position from object_data
-            let mut item = item;
-            if let Some(obj) = item.object_data.as_object_mut() {
-                obj.remove("_global_position");
-            }
-
-            managed_objects.lock().unwrap().push(item.object_uuid.clone());
-            debug!("🔧 [freeze_object] Item {}: type={}, data={:?}", uuid, item.object_type, item.object_data);
-            if item.object_type == "player" {
-                // NOTE: For runtime transfers (player_out_of_zone), managed_players
-                // is already removed synchronously in server.rs BEFORE freeze is called.
-                // For initial zone splits, the player should also have been removed
-                // by the split logic. Only remove here as a defensive fallback.
-                let mut players = managed_players.lock().unwrap();
-                if let Some(pos) = players.iter().position(|x| x == &item.object_uuid) {
-                    warn!("[freeze_object] Player {} still in managed_players during freeze (unexpected), removing as fallback", item.object_uuid);
-                    players.remove(pos);
-                }
-            }
-
-            let message = json!({
-                "namespace": "server",
-                "event": "freeze_object",
-                "data": item,
-            });
-
-            debug!("[freeze_object] constructed message: {:?}", message);
-            if let Some(w) = ws_guard.as_mut() {
-                debug!("[freeze_object] Sending message to websocket");
-                if let Err(e) = w.send_message(&OwnedMessage::Text(message.to_string())) {
-                    error!("[freeze_object] ERROR sending message to game server: {}", e);
-                    return Err(EventError::HandlerExecution(format!("Message blocked: {}", e)));
-                } else {
-                    debug!("[freeze_object] Message sent successfully");
-                }
-            }
-        }
-    }
-    info!("[initial_object] List of players on old server manage now: {:?}", managed_players.lock().unwrap());
-
-
-    // // send final message
-    // let message = json!({
-    //     "namespace": "server",
-    //     "event": "freeze_object_end",
-    //     "data": {},
-    // });
-    // debug!("[freeze_object] send end of freezing objects");
-    // if let Some(w) = ws_guard.as_mut() {
-    //     debug!("[freeze_object] Sending message to websocket");
-    //     if let Err(e) = w.send_message(&OwnedMessage::Text(message.to_string())) {
-    //         error!("[freeze_object] ERROR sending message to game server: {}", e);
-    //         return Err(EventError::HandlerExecution(format!("Message blocked: {}", e)));
-    //     } else {
-    //         debug!("[freeze_object] Message sent successfully");
-    //     }
-    // }
-
+    info!(
+        "[freeze_object] done: frozen={} players managed now: {:?}",
+        frozen, server.managed_players.lock().unwrap()
+    );
     Ok(())
-}
-
-pub fn is_position_in_zone(x: f64, y: f64, z: f64, zone: &Zone) -> bool {
-    x >= zone.min_x && x <= zone.max_x &&
-    y >= zone.min_y && y <= zone.max_y &&
-    z >= zone.min_z && z <= zone.max_z
 }

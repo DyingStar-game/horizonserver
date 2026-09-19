@@ -33,12 +33,12 @@ RUN mkdir -p /app /app/plugins
 
 # Config
 COPY .docker/production_config.toml /app/config.toml
-COPY .docker/plugins.toml /app/plugins.toml
 
-# NOTE: ds_genericprops' props/ and startup_items.json are NOT copied here.
-# They ship in the horizon-data image (.docker/Dockerfile.data) and are mounted
-# at /app/props and /app/ds_genericprops by the chart's copy-props init container,
-# so a JSON edit never rebuilds this image.
+# NOTE: plugins.toml, ds_genericprops' props/ and startup_items.json are NOT
+# copied here. They ship in the horizon-data image (.docker/Dockerfile.data),
+# mounted at /app/data (+ /app/props and /app/ds_genericprops) by the chart's
+# copy-props init container, so a JSON or TOML edit never rebuilds this image.
+# entrypoint.sh installs /app/data/plugins.toml as /app/plugins.toml at startup.
 
 # Server binary
 COPY --from=builder /horizon /app/server

@@ -61,7 +61,6 @@ jobs:
               - '.docker/Dockerfile.server'
               - '.docker/entrypoint.sh'
               - '.docker/production_config.toml'
-              - '.docker/plugins.toml'
             # Each filter mirrors the COPY instructions of its Dockerfile. If one
             # moves, the other must follow — otherwise a change ships to a registry
             # that never receives it (which is exactly what used to happen to the
@@ -70,6 +69,7 @@ jobs:
             data:
               - 'ds_genericprops/props/**'
               - 'ds_genericprops/startup_items.json'
+              - '.docker/plugins.toml'
               - '.docker/Dockerfile.data'
             plugins:
               - 'ds_*/src/**'

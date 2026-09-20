@@ -124,8 +124,16 @@ fn report(counters: &mut Counters, streams_total: usize, elapsed: Duration) {
         .collect();
     sent.sort();
     let sent_total: u64 = counters.sent.values().sum();
+    // Movement intake ahead of the queue: `coalesced` above zero means the
+    // handlers are slower than the game servers and packets are being replaced
+    // before they are applied — the early sign of the overload that used to
+    // end in an OOM (see player_movement::coalesce).
+    let (moves_in, moves_coalesced, draining) = crate::handlers::player_movement::intake_report();
     info!(
-        "[lod] queued [{}] | streams={} evaluated={:.0}/s radius_scans={:.0}/s | sent [{}] total={:.0}/s {:.1} KB/s | recipients/eval avg={:.1} max={}",
+        "[lod] moves in={:.0}/s coalesced={:.0}/s draining={} | queued [{}] | streams={} evaluated={:.0}/s radius_scans={:.0}/s | sent [{}] total={:.0}/s {:.1} KB/s | recipients/eval avg={:.1} max={}",
+        moves_in as f64 / secs,
+        moves_coalesced as f64 / secs,
+        draining,
         queued.join(" "),
         streams_total,
         counters.evaluated as f64 / secs,

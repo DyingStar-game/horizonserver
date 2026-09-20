@@ -1004,15 +1004,17 @@ impl MeshWorker {
         }
         // The child gets the whole world (props first, frozen when outside its
         // zones, then the players once the ground is ready) and manages what is in
-        // its zones; only then does the parent shrink and freeze what it lost.
-        self.hand_over(child, &items, &plan.give, self.warmup()).await;
+        // its zones; only then does the parent shrink and freeze what it lost —
+        // judged on the snapshot the child's players came from, not the one taken
+        // before the warm-up (see hand_over).
+        let current = self.hand_over(child, &items, &plan.give, self.warmup()).await.unwrap_or(items);
         if !parent.update_zones(plan.keep.clone()) {
             error!("[mesh] split aborted: could not send the new zones to {}; releasing {}", parent.server_name, child.server_name);
             child.release();
             result.released.push(child.uuid.clone());
             return result;
         }
-        if let Err(e) = handle_freeze_object(&items, parent, &plan.keep) {
+        if let Err(e) = handle_freeze_object(&current, parent, &plan.keep) {
             error!("[mesh] freeze on {} failed: {}", parent.server_name, e);
         }
 
@@ -1066,8 +1068,18 @@ impl MeshWorker {
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
         info!("[mesh] merge moves {} objects ({} to spawn on {})", to_move.len(), to_spawn.len(), survivor.server_name);
-        self.hand_over(survivor, &to_spawn, &survivor_zones, self.warmup()).await;
-        if let Err(e) = handle_freeze_object(&to_move, released, &[]) {
+        // Freeze on the released server what the fresh snapshot (the one the
+        // survivor's players were spawned from) still places in its zones: a player
+        // who arrived there during the warm-up must leave with the others.
+        let to_freeze: SnapshotItems = match self.hand_over(survivor, &to_spawn, &survivor_zones, self.warmup()).await {
+            Some(fresh) => fresh
+                .into_iter()
+                .filter(|(_, i)| !is_world_object(&i.object_type))
+                .filter(|(_, i)| ObjectWorld::from_object_data(&i.object_data).map_or(false, |w| zones_contain(&released_zones, &w)))
+                .collect(),
+            None => to_move,
+        };
+        if let Err(e) = handle_freeze_object(&to_freeze, released, &[]) {
             error!("[mesh] freeze on {} failed: {}", released.server_name, e);
         }
         released.release();
@@ -1140,25 +1152,40 @@ impl MeshWorker {
     /// instantiates them (a burst that stalls its main loop for seconds) while the
     /// players are still simulated elsewhere; then, after the ground under the
     /// players is prewarmed and `warmup` has elapsed, the players themselves.
-    async fn hand_over(&self, server: &Server, items: &SnapshotItems, zones: &[Zone], warmup: Duration) {
+    ///
+    /// Returns the snapshot the players were taken from when one was re-requested
+    /// after the warm-up. The caller MUST freeze from that same snapshot: a player
+    /// who crossed into the parent's kept zones during the warm-up (a normal
+    /// out_of_zone transfer from a neighbour) is outside `keep` in the first
+    /// snapshot and inside it in the fresh one; freezing from the first one erases
+    /// them on the parent while the child, working from the fresh one, does not
+    /// spawn them — nobody simulates them any more (preprod, 2026-09-20).
+    async fn hand_over(&self, server: &Server, items: &SnapshotItems, zones: &[Zone], warmup: Duration) -> Option<SnapshotItems> {
         let (mut players, props): (SnapshotItems, SnapshotItems) =
             items.iter().map(|(k, v)| (k.clone(), v.clone())).partition(|(_, i)| i.object_type == "player");
         if let Err(e) = handle_initial_object(&props, server, zones) {
             error!("[mesh] initial props to {} failed: {}", server.server_name, e);
-            return;
+            return None;
         }
         self.prewarm_players(server, &players, zones).await;
+        let mut fresh_snapshot = None;
         if !warmup.is_zero() {
             self.wait_until_ready(server, warmup).await;
             // The players kept walking on their current server while we waited:
             // spawn them where they are NOW, not where the first snapshot saw them.
+            // Whoever already landed on `server` meanwhile (out_of_zone transfer into
+            // its zones, granted at start) is not spawned a second time, and a player
+            // outside `zones` is not sent at all: Godot would only spawn then erase it.
             match self.request_snapshot().await {
                 Ok(fresh) => {
-                    for (uuid, item) in players.iter_mut() {
-                        if let Some(current) = fresh.get(uuid) {
-                            *item = current.clone();
-                        }
-                    }
+                    let already_players = server.managed_players.lock().unwrap().clone();
+                    players = fresh
+                        .iter()
+                        .filter(|(uuid, i)| i.object_type == "player" && !already_players.contains(*uuid))
+                        .filter(|(_, i)| ObjectWorld::from_object_data(&i.object_data).map_or(false, |w| zones_contain(zones, &w)))
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect();
+                    fresh_snapshot = Some(fresh);
                 }
                 Err(e) => warn!("[mesh] could not refresh player positions before the hand-over: {}", e),
             }
@@ -1166,6 +1193,7 @@ impl MeshWorker {
         if let Err(e) = handle_initial_object(&players, server, zones) {
             error!("[mesh] initial players to {} failed: {}", server.server_name, e);
         }
+        fresh_snapshot
     }
 
     /// Tells `server` where the players of `items` that land in `zones` stand, so

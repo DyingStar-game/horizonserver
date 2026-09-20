@@ -4,7 +4,13 @@
 #
 [ds_game_server]
 log_level = "info"
+# Godot servers pool. game_servers is a static list of addresses; game_servers_dns
+# is a "host:port" resolved again every minute, every address it returns joins the
+# pool (on kubernetes: the headless godotserver service, one IP per ready pod).
+# The GAME_SERVER_HOST env var overrides game_servers_dns (a godotserver run
+# outside the cluster, e.g. host.minikube.internal; port 8980 when omitted).
 game_servers = ["ws://127.0.0.1:8980", "ws://127.0.0.1:8981"]
+game_servers_dns = ""
 
 # Values posible for servers_mode:
 #  * "single" (only 1 server)
@@ -12,10 +18,31 @@ game_servers = ["ws://127.0.0.1:8980", "ws://127.0.0.1:8981"]
 #  * "production" (multiple servers, will use kubernetes to create and start servers on demand, so ignore game_servers list)
 servers_mode = "single"
 
-# Split rule (ignored in single mode). Possible values:
-#  * "fps:20"    => split when last 10 fps (get by serverinfo) is under 20 in this example (prefer this for production)
-#  * "players:3" => split when more than 3 players are connected on a server
-split_rule = "fps:20"
+# Dynamic server meshing (ignored in single mode). A Godot server owns a list of
+# zones (space, or one planet, optionally bounded). When a server saturates, whole
+# zones are handed to an idle server of the pool; a server left with a single zone
+# gets that zone cut in two. Sibling servers are merged back when the load drops.
+#
+# split_rule:
+#  * "tps:20"     => split when the achieved physics ticks/s stay under 20
+#  * "players:50" => split when more than 50 players are connected on a server
+# merge_rule (mirror of split_rule, on the two sibling servers of a split):
+#  * "players:10" => merge when the sum of their players is under 10
+#  * "tps:50"     => merge when both run above 50 ticks/s
+# A rule must hold for N consecutive 1 s samples before acting.
+split_rule = "tps:20"
+merge_rule = "players:10"
+split_after_samples = 10
+merge_after_samples = 30
+# Seconds to wait for the genericprops objects snapshot used to plan a split/merge.
+snapshot_timeout_secs = 5
+# Hand-over of players to a server (split, merge, re-homing): the props are sent
+# first, then Horizon waits at least split_warmup_secs and until the server reports
+# a serverinfo with tps >= split_ready_tps and no terrain chunk left to load
+# (at most split_warmup_max_secs), and only then moves the players.
+split_warmup_secs = 5
+split_warmup_max_secs = 30
+split_ready_tps = 58
 
 [ds_genericprops]
 log_level = "info"

@@ -61,6 +61,7 @@ pub enum ServerState {
     Offline,
     /// Connected and simulating its zones.
     Running,
+    /// Retired from the pool (its address left DNS); never reconnected.
     Maintenance,
 }
 
@@ -218,6 +219,13 @@ impl Server {
         self.managed_players.lock().unwrap().clear();
         self.transferring_players.lock().unwrap().clear();
         self.set_state(if sent { ServerState::Online } else { ServerState::Offline });
+    }
+
+    /// Takes the server out of the pool for good (its address left DNS while it
+    /// was offline): the reconnect loop stops at its next attempt.
+    pub fn retire(&self) {
+        self.set_state(ServerState::Maintenance);
+        *self.websocket_sender.lock().unwrap() = None;
     }
 
     /// Marks the socket dead and tells the manager. Called by the reader task.

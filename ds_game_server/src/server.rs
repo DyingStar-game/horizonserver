@@ -426,6 +426,9 @@ impl Server {
             let server = self.clone();
             let rt = crate::plugin_rt();
             events.on_client("movement", "update_velocity", move |event: ClientEventWrapper<serde_json::Value>, _player_id: PlayerId, _connection: ClientConnectionRef| {
+                // Kept whoever manages the player: the client only sends a velocity when
+                // it changes, and the server they are transferred to needs the last one.
+                player_movement::remember_velocity(&event.player_id.to_string(), &event.data);
                 if !server.is_running() || !server.is_managed_player(&event.player_id.to_string()) {
                     debug!("🔧 DsGameServerPlugin: Player {} is not managed by this server, skipping movement", event.player_id);
                     return Ok(());
@@ -481,6 +484,7 @@ impl Server {
                             info!("🔧 DsGameServerPlugin: Removed player {} from managed_players after quit", object_uuid);
                         }
                         server.managed_objects.lock().unwrap().remove(&object_uuid);
+                        player_movement::forget_velocity(&object_uuid);
                     } else {
                         error!("🔧 DsGameServerPlugin: Failed to send remove_player for {}", object_uuid);
                     }
@@ -581,10 +585,13 @@ impl Server {
                         if child.object_type == "player" {
                             let spawned = spawn_player::handle_spawn_player(serde_json::to_value(child).unwrap_or_default(), Arc::clone(&server.websocket_sender)).await;
                             if spawned.is_ok() {
-                                let mut players = server.managed_players.lock().unwrap();
-                                if !players.contains(&child.object_uuid) {
-                                    players.push(child.object_uuid.clone());
+                                {
+                                    let mut players = server.managed_players.lock().unwrap();
+                                    if !players.contains(&child.object_uuid) {
+                                        players.push(child.object_uuid.clone());
+                                    }
                                 }
+                                let _ = player_movement::replay_velocity(&child.object_uuid, &server.websocket_sender);
                             }
                             server.transferring_players.lock().unwrap().remove(&child.object_uuid);
                         } else {
@@ -715,6 +722,9 @@ impl Server {
                             }
                         }
                         server.managed_objects.lock().unwrap().insert(object_uuid.clone());
+                        // The player was moving when they crossed: give the new server the
+                        // velocity the client will not send again until it changes.
+                        let _ = player_movement::replay_velocity(&object_uuid, &server.websocket_sender);
                         // Then what they carry, parented under them: the Godot server adopts
                         // its zone-frozen copy and puts it back in the player's hands.
                         for child in &children {

@@ -6,11 +6,11 @@ use horizon_event_system::{
 use livekit_api::access_token::{AccessToken, VideoGrants};
 use livekit_api::services::room::{CreateRoomOptions, RoomClient};
 use serde_json::json;
-use dashmap::DashMap;
+use dashmap::{DashMap, DashSet};
 use std::env;
 use std::sync::Arc;
 use std::sync::Mutex;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 mod livekit;
@@ -35,6 +35,10 @@ pub struct DyingstarAudioPlugin {
     /// Maps game player_id → server-generated LiveKit identity UUID.
     /// DashMap is internally sharded — no outer Mutex needed.
     player_to_livekit: Arc<DashMap<String, String>>,
+    /// Players flagged `is_npc` at new_player: bots never join LiveKit, so they get
+    /// no token and no subscription. Without this, N NPCs in one building cost
+    /// N² subscribe attempts of 10 LiveKit calls each, all failing.
+    npcs: Arc<DashSet<String>>,
     /// Dedicated runtime for plugin async work (bridges cross-DLL runtime boundary)
     runtime: Arc<tokio::runtime::Runtime>,
 }
@@ -72,6 +76,7 @@ impl DyingstarAudioPlugin {
             api_secret: Arc::new(Mutex::new(api_secret)),
             manager,
             player_to_livekit: Arc::new(DashMap::new()),
+            npcs: Arc::new(DashSet::new()),
             runtime,
         }
     }
@@ -132,6 +137,10 @@ impl SimplePlugin for DyingstarAudioPlugin {
         let player_to_livekit_enter = Arc::clone(&self.player_to_livekit);
         let player_to_livekit_exit = Arc::clone(&self.player_to_livekit);
         let player_to_livekit_quit = Arc::clone(&self.player_to_livekit);
+        let npcs_new = Arc::clone(&self.npcs);
+        let npcs_enter = Arc::clone(&self.npcs);
+        let npcs_exit = Arc::clone(&self.npcs);
+        let npcs_quit = Arc::clone(&self.npcs);
 
         // Pre-register the livekit_uuid as soon as the real player_id is assigned
         // (update_player_id fires before gorc_zone_entered, eliminating the race).
@@ -173,6 +182,14 @@ impl SimplePlugin for DyingstarAudioPlugin {
                         .as_str()
                         .unwrap_or_default()
                         .to_string();
+
+                    if event["object_data"]["is_npc"].as_bool().unwrap_or(false) {
+                        // Pre-registered by update_player_id like any client: undo it.
+                        npcs_new.insert(player_uuid.clone());
+                        player_to_livekit_new.remove(&player_uuid);
+                        debug!("🔊 DyingstarAudioPlugin: new_player {} is an NPC, no LiveKit", player_uuid);
+                        return Ok(());
+                    }
 
                     // Ensure uuid is in the map (may already be set by update_player_id handler).
                     let livekit_uuid = player_to_livekit_new
@@ -278,11 +295,14 @@ impl SimplePlugin for DyingstarAudioPlugin {
 
                 // e.g. only react when a player enters another Player's zone:
                 if object_type == "player" && player_id != object_id {
+                    if npcs_enter.contains(player_id) || npcs_enter.contains(object_id) {
+                        return Ok(());
+                    }
                     // Own the strings before borrowing event ends
                     let player_id = player_id.to_string();
                     let object_id = object_id.to_string();
 
-                    info!("🔊 DyingstarAudioPlugin - gorc_zone_entered: player_id={} object_id={} object_type={} channel={}", player_id, object_id, object_type, channel);
+                    debug!("🔊 DyingstarAudioPlugin - gorc_zone_entered: player_id={} object_id={} object_type={} channel={}", player_id, object_id, object_type, channel);
 
                     let lk_player = match player_to_livekit_enter.get(&player_id) {
                         Some(v) => v.clone(),
@@ -382,6 +402,9 @@ impl SimplePlugin for DyingstarAudioPlugin {
                 let channel     = event["channel"].as_u64().unwrap_or_default();
                 // e.g. only react when a player exits another Player's zone:
                 if object_type == "player" && player_id != object_id {
+                    if npcs_exit.contains(player_id) || npcs_exit.contains(object_id) {
+                        return Ok(());
+                    }
                     let player_id = player_id.to_string();
                     let object_id = object_id.to_string();
 
@@ -479,6 +502,9 @@ impl SimplePlugin for DyingstarAudioPlugin {
                     .unwrap_or_default()
                     .to_string();
 
+                if npcs_quit.remove(&player_uuid).is_some() {
+                    return Ok(());
+                }
                 if let Some((_, lk_uuid)) = player_to_livekit_quit.remove(&player_uuid) {
                     info!(
                         "🔊 DyingstarAudioPlugin: player_quit player_uuid={} livekit_uuid={}",

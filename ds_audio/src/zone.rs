@@ -2,7 +2,7 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use anyhow::Result;
 use super::livekit::LiveKitRoom;
-use tracing::info;
+use tracing::debug;
 
 /// Tracks which players are in each other's zone.
 /// `zones[player_id]` = set of player IDs currently in their zone.
@@ -30,7 +30,7 @@ impl ProximityManager {
             .or_default()
             .insert(other.to_string()); // returns false if already present
 
-        info!("🔊 DyingstarAudioPlugin - alreadyin: player={} other={} already_in={}", player, other, already_in);
+        debug!("🔊 DyingstarAudioPlugin - alreadyin: player={} other={} already_in={}", player, other, already_in);
 
         if !already_in {
             return Ok(()); // idempotent

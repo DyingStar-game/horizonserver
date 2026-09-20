@@ -176,6 +176,59 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const WATCHDOG_TICK: Duration = Duration::from_secs(5);
 /// How long the manager waits after the first planet of a burst before assigning them.
 const PLANET_BURST_WINDOW: Duration = Duration::from_millis(500);
+/// How often the pool name is resolved again (see `Discovery`).
+const DISCOVERY_INTERVAL: Duration = Duration::from_secs(60);
+/// Port of a Godot server when `GAME_SERVER_HOST` gives only a host.
+const GAME_SERVER_PORT: u16 = 8980;
+
+/// The pool read from DNS: `host` resolves to every Godot server (on kubernetes, a
+/// headless service answers with the IP of each ready pod). It is resolved again
+/// every `DISCOVERY_INTERVAL`, so a server pool redeployed while Horizon runs is
+/// picked up: the new addresses join the pool, the old ones are retired once
+/// their socket is gone. A static `game_servers` entry is never retired.
+#[derive(Debug, Clone)]
+struct Discovery {
+    host: String,
+    port: u16,
+}
+
+impl Discovery {
+    /// `game_servers_dns = "godotserver:8980"` from the config, overridden by the
+    /// `GAME_SERVER_HOST` env var (a godotserver run outside the cluster, e.g.
+    /// `host.minikube.internal`).
+    fn from_config(config: &ds_common::config::Config) -> Option<Discovery> {
+        let configured = config.get_value("game_servers_dns").and_then(|v| v.as_str()).unwrap_or_default().trim().to_string();
+        let target = match std::env::var("GAME_SERVER_HOST") {
+            Ok(host) if !host.trim().is_empty() => host.trim().to_string(),
+            _ => configured,
+        };
+        Discovery::parse(&target)
+    }
+
+    /// `host:port`, or `host` alone on port `GAME_SERVER_PORT`; empty = no discovery.
+    fn parse(target: &str) -> Option<Discovery> {
+        let target = target.trim();
+        if target.is_empty() {
+            return None;
+        }
+        let (host, port) = match target.rsplit_once(':') {
+            Some((host, port)) if !host.is_empty() && port.parse::<u16>().is_ok() => (host, port.parse().unwrap()),
+            _ => (target, GAME_SERVER_PORT),
+        };
+        Some(Discovery { host: host.to_string(), port })
+    }
+
+    async fn resolve(&self) -> Result<Vec<String>, String> {
+        let resolved: Vec<std::net::SocketAddr> = tokio::net::lookup_host((self.host.as_str(), self.port)).await.map_err(|e| e.to_string())?.collect();
+        // A dual-stack name lists each server twice: one family is enough.
+        let v4: Vec<std::net::SocketAddr> = resolved.iter().copied().filter(|a| a.is_ipv4()).collect();
+        let resolved = if v4.is_empty() { resolved } else { v4 };
+        let mut addresses: Vec<String> = resolved.iter().map(|a| format!("ws://{}", a)).collect();
+        addresses.sort();
+        addresses.dedup();
+        Ok(addresses)
+    }
+}
 
 pub struct ServerManager {
     servers: Vec<Server>,
@@ -194,6 +247,10 @@ pub struct ServerManager {
     queue: VecDeque<MeshOp>,
     tx: mpsc::Sender<ManagerMessage>,
     rx: mpsc::Receiver<ManagerMessage>,
+    /// Addresses listed in the config: part of the pool whatever DNS says.
+    static_pool: Vec<String>,
+    discovery: Option<Discovery>,
+    last_discovery: Option<Instant>,
 }
 
 impl ServerManager {
@@ -211,6 +268,9 @@ impl ServerManager {
             queue: VecDeque::new(),
             tx,
             rx,
+            static_pool: Vec::new(),
+            discovery: None,
+            last_discovery: None,
         }
     }
 
@@ -257,7 +317,9 @@ impl ServerManager {
                 None
             }
         };
-        info!("[mesh] mode={} rules={:?} pool={:?}", mode, self.rules, addresses);
+        self.discovery = Discovery::from_config(&config);
+        self.static_pool = addresses.clone();
+        info!("[mesh] mode={} rules={:?} pool={:?} dns={:?}", mode, self.rules, addresses, self.discovery);
         self.worker = Some(MeshWorker {
             pending_snapshots: Arc::clone(&self.pending_snapshots),
             rules: self.rules.clone(),
@@ -283,7 +345,8 @@ impl ServerManager {
             }
             self.servers.push(server);
         }
-        if self.servers.is_empty() {
+        self.refresh_pool(&context).await;
+        if self.servers.is_empty() && self.discovery.is_none() {
             error!("[mesh] no game_servers configured, nothing to manage");
             return;
         }
@@ -305,13 +368,20 @@ impl ServerManager {
                 // Start on everything known, and send the objects that already exist
                 // (Horizon may have loaded the world before the Godot server showed up).
                 let zones = self.initial_zones();
-                self.queue.push_back(MeshOp::Adopt { server: first, zones });
+                if first.start(zones.clone(), context.clone()) {
+                    self.queue.push_back(MeshOp::Adopt { server: first, zones });
+                } else {
+                    error!("[mesh] could not start {} on [{}]", first.server_name, zones_label(&zones));
+                }
             }
-            None => error!("[mesh] no online server in the pool; will start the first one that reconnects"),
+            None => warn!("[mesh] no online server in the pool; will start the first one that connects"),
         }
 
         let mut backlog: Vec<ManagerMessage> = Vec::new();
         loop {
+            if self.last_discovery.map_or(true, |at| at.elapsed() >= DISCOVERY_INTERVAL) {
+                self.refresh_pool(&context).await;
+            }
             self.check_silent_servers(&context).await;
             self.start_next_op();
             let message = match backlog.pop() {
@@ -342,7 +412,7 @@ impl ServerManager {
                     self.on_planets_discovered(planets);
                 }
                 ManagerMessage::ServerOffline(uuid) => self.on_server_offline(uuid, &context),
-                ManagerMessage::ServerReconnected { uuid, zones } => self.on_server_reconnected(uuid, zones),
+                ManagerMessage::ServerReconnected { uuid, zones } => self.on_server_reconnected(uuid, zones, &context),
                 ManagerMessage::OpDone(result) => self.on_op_done(result),
             }
         }
@@ -402,6 +472,53 @@ impl ServerManager {
         info!("[mesh] planet discovered: {} ({})", name, uuid);
         self.known_planets.push((uuid, name));
         true
+    }
+
+    // --------------------------------------------------------------- pool
+
+    /// Resolves the pool name again: new addresses are connected and join the
+    /// pool, addresses that left DNS are retired once offline. A server whose
+    /// address vanished while its socket still works is kept: DNS lags behind the
+    /// endpoints, and the socket is the truth about the process.
+    async fn refresh_pool(&mut self, context: &Arc<dyn ServerContext>) {
+        let Some(discovery) = self.discovery.clone() else { return };
+        self.last_discovery = Some(Instant::now());
+        let addresses = match discovery.resolve().await {
+            Ok(addresses) => addresses,
+            Err(e) => {
+                warn!("[mesh] cannot resolve {}:{}: {}", discovery.host, discovery.port, e);
+                return;
+            }
+        };
+
+        for address in &addresses {
+            if self.servers.iter().any(|s| &s.address == address) {
+                continue;
+            }
+            let server = Server::new(address.clone());
+            info!("[mesh] discovered {} as {} ({})", address, server.server_name, server.uuid);
+            // It reports through ServerReconnected like a server coming back.
+            self.spawn_connect(server.clone(), context.clone(), Vec::new(), Duration::ZERO);
+            self.servers.push(server);
+        }
+
+        let static_pool = &self.static_pool;
+        let mut retired = Vec::new();
+        self.servers.retain(|server| {
+            let keep = static_pool.contains(&server.address)
+                || addresses.contains(&server.address)
+                || server.state() != ServerState::Offline;
+            if !keep {
+                server.retire();
+                retired.push(server.clone());
+            }
+            keep
+        });
+        for server in retired {
+            info!("[mesh] {} ({}) left DNS: retired from the pool", server.server_name, server.address);
+            self.samples.remove(&server.uuid);
+            self.split_history.retain(|r| r.parent_uuid != server.uuid && r.child_uuid != server.uuid);
+        }
     }
 
     // ---------------------------------------------------------------- ops
@@ -618,15 +735,21 @@ impl ServerManager {
         self.spawn_reconnect(server, context.clone(), zones_for_return);
     }
 
-    fn on_server_reconnected(&mut self, uuid: String, zones: Vec<Zone>) {
+    fn on_server_reconnected(&mut self, uuid: String, zones: Vec<Zone>, context: &Arc<dyn ServerContext>) {
         let Some(server) = self.server(&uuid) else { return };
-        info!("[mesh] server {} ({}) is back online", server.server_name, uuid);
+        info!("[mesh] server {} ({}) is online", server.server_name, uuid);
         if self.running_servers().is_empty() {
             // Nobody simulates anything: this server takes the world back (its own
             // zones if they were kept for it, else everything). The objects are
             // re-sent since the Godot process may have restarted from scratch.
+            // Started right away: a whole pool connecting at once (first start,
+            // redeploy) must not elect several servers before the op runs.
             let zones = if zones.is_empty() { self.initial_zones() } else { zones };
-            self.queue.push_back(MeshOp::Adopt { server, zones });
+            if server.start(zones.clone(), context.clone()) {
+                self.queue.push_back(MeshOp::Adopt { server, zones });
+            } else {
+                error!("[mesh] could not start {} on [{}]", server.server_name, zones_label(&zones));
+            }
         } else {
             // Back in the pool: keep it warm with the planets.
             self.queue.push_back(MeshOp::Reseed { server });
@@ -635,11 +758,20 @@ impl ServerManager {
 
     /// Reconnects an offline server in the background and reports back.
     fn spawn_reconnect(&self, server: Server, context: Arc<dyn ServerContext>, zones: Vec<Zone>) {
+        self.spawn_connect(server, context, zones, RECONNECT_DELAY);
+    }
+
+    /// Connects `server` in the background, first after `initial_delay` then every
+    /// `RECONNECT_DELAY`, until it is connected or leaves the Offline state
+    /// (retired). Reports `ServerReconnected` with `zones` once connected.
+    fn spawn_connect(&self, server: Server, context: Arc<dyn ServerContext>, zones: Vec<Zone>, initial_delay: Duration) {
         let tx = self.tx.clone();
         crate::plugin_rt().spawn(async move {
             let server = server;
+            let mut delay = initial_delay;
             loop {
-                tokio::time::sleep(RECONNECT_DELAY).await;
+                tokio::time::sleep(delay).await;
+                delay = RECONNECT_DELAY;
                 if server.state() != ServerState::Offline {
                     return;
                 }
@@ -1093,5 +1225,28 @@ impl MeshWorker {
 
     fn warmup(&self) -> Duration {
         self.rules.as_ref().map(|r| r.warmup).unwrap_or(Duration::from_secs(5))
+    }
+}
+
+#[cfg(test)]
+mod discovery_tests {
+    use super::*;
+
+    #[test]
+    fn parse_host_and_port() {
+        let d = Discovery::parse("godotserver:8981").unwrap();
+        assert_eq!((d.host.as_str(), d.port), ("godotserver", 8981));
+        let d = Discovery::parse(" host.minikube.internal ").unwrap();
+        assert_eq!((d.host.as_str(), d.port), ("host.minikube.internal", GAME_SERVER_PORT));
+        assert!(Discovery::parse("").is_none());
+        assert!(Discovery::parse("  ").is_none());
+    }
+
+    #[tokio::test]
+    async fn resolve_gives_ws_addresses() {
+        let d = Discovery::parse("localhost:8980").unwrap();
+        let addresses = d.resolve().await.unwrap();
+        assert!(!addresses.is_empty());
+        assert!(addresses.iter().all(|a| a.starts_with("ws://") && a.ends_with(":8980")), "{:?}", addresses);
     }
 }

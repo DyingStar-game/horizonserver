@@ -4,7 +4,13 @@
 #
 [ds_game_server]
 log_level = "info"
-game_servers = ["ws://127.0.0.1:8980", "ws://127.0.0.1:8981"]
+# Godot servers pool. game_servers is a static list of addresses; game_servers_dns
+# is a "host:port" resolved again every minute, every address it returns joins the
+# pool (on kubernetes: the headless godotserver service, one IP per ready pod).
+# The GAME_SERVER_HOST env var overrides game_servers_dns (a godotserver run
+# outside the cluster, e.g. host.minikube.internal; port 8980 when omitted).
+game_servers = []
+game_servers_dns = "godotserver:8980"
 
 # Values posible for servers_mode:
 #  * "single" (only 1 server)

@@ -13,8 +13,8 @@
 # The paths below mirror what is read at runtime — see                 #
 # ds_genericprops/src/lib.rs (props/ at on_init, startup_items.json    #
 # on the items_end event) and .docker/entrypoint.sh (plugins.toml is   #
-# copied to /app/plugins.toml, where ds_common::Config reads it, before #
-# game_servers is rewritten). If one moves, the other must follow.     #
+# copied to /app/plugins.toml, where ds_common::Config reads it).      #
+# If one moves, the other must follow.                                 #
 # ------------------------------------------------------------------- #
 FROM busybox:1.37
 

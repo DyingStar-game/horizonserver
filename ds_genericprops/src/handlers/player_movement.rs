@@ -170,322 +170,473 @@ pub fn handle_movement_request_sync(
     };
     debug!("🚀 HANDLER #{}: ✅ Got GORC instances", handler_id);
 
-    let event = event.clone();
+    // One drain task per player at most: a packet arriving while the previous
+    // one is still being applied is coalesced into the pending slot instead of
+    // becoming a task of its own (see `coalesce`).
+    let Some(first) = coalesce(gorc_id, event) else {
+        debug!("🚀 HANDLER #{}: coalesced into the pending move of player {}", handler_id, player_uuid);
+        return Ok(());
+    };
     let spawn_id = SPAWN_COUNTER.fetch_add(1, Ordering::Relaxed);
     debug!("🚀 HANDLER #{}: Spawning async task (spawn_id={})", handler_id, spawn_id);
-    
+
     let props_for_children = Arc::clone(&props);
     handle.spawn(async move {
         debug!("🚀 SPAWN #{}: ✅ Async task started for player {}", spawn_id, player_uuid);
+        let mut event = first;
+        loop {
 
-        // Parse the movement data from the GORC event payload
-        debug!("🚀 STEP 1: ✅ Parsed raw JSON: {}", event);
+            // Parse the movement data from the GORC event payload
+            debug!("🚀 STEP 1: ✅ Parsed raw JSON: {}", event);
 
-        debug!("🚀 STEP 2: Movement handler called for player {}", event["object_uuid"]);
+            debug!("🚀 STEP 2: Movement handler called for player {}", event["object_uuid"]);
 
-        // SECURITY: Validate connection authentication before processing any movement
-        // if !connection.is_authenticated() {
-        //     debug!("🚀 STEP 2: ❌ Unauthenticated movement request from {}", connection.remote_addr);
-        //     return Err(EventError::HandlerExecution(
-        //         "Unauthenticated request".to_string()
-        //     ));
-        // }
-        debug!("🚀 STEP 3: ✅ Connection authenticated");
+            // SECURITY: Validate connection authentication before processing any movement
+            // if !connection.is_authenticated() {
+            //     debug!("🚀 STEP 2: ❌ Unauthenticated movement request from {}", connection.remote_addr);
+            //     return Err(EventError::HandlerExecution(
+            //         "Unauthenticated request".to_string()
+            //     ));
+            // }
+            debug!("🚀 STEP 3: ✅ Connection authenticated");
 
-        let move_data = match serde_json::from_value::<PlayerMoveRequest>(event["object_data"].clone()) {
-            Ok(data) => data,
-            Err(e) => {
-                error!("🚀 STEP 4: ❌ Failed to parse PlayerMoveRequest: {}", e);
-                return;
-            }
-        };
-        debug!("🚀 STEP 4: ✅ Parsed PlayerMoveRequest: {:?}", move_data);
-
-        debug!("🚀 STEP 5: Processing movement for ship {} to position {:?}",
-            move_data.player_id, move_data.position);
-
-        // SECURITY: Validate player ownership - players can only move their own ships
-        // if move_data.player_id != client_player {
-        //     error!("🚀 STEP 6: ❌ Security violation: Player {} tried to move ship belonging to {}",
-        //         client_player, move_data.player_id);
-        //     return Err(EventError::HandlerExecution(
-        //         "Unauthorized ship movement".to_string()
-        //     ));
-        // }
-        // debug!("🚀 STEP 6: ✅ Player ownership validated");
-
-        // gorc_id was already resolved (and the unknown-player case rejected)
-        // before this task was spawned.
-        {
-            if let Some(mut object_instance) = gorc_instances.get_object(gorc_id).await {
-
-                let mut final_position = move_data.position;
-
-                // Update player position in GORC tracking - use async directly since we're already in an async context
-                match PlayerId::from_str(move_data.player_id.to_string().as_str()) {
-                    Ok(player_id) => {
-                        // Check if player has a parent_id and calculate global position
-                        let mut computed_position = move_data.position;
-
-                        // Resolve the parent this movement is expressed against. A parent_id
-                        // carried by the packet itself (a reparent: leaving a building for the
-                        // planet) wins immediately — the local coordinates in the SAME packet are
-                        // already relative to that new parent. Reading the stored parent first, as
-                        // this used to, resolved the reparent packet against the OLD parent and
-                        // threw the player ~6360 km away for one frame, emptying every zone
-                        // around them before the next packet pulled them back.
-                        let parent_id = match &move_data.parent_id {
-                            Some(parent_id) => Some(parent_id.clone()),
-                            None => gorc_instances.with_object_mut(gorc_id, |instance| {
-                                instance.get_object::<GenericProps>().and_then(|props| {
-                                    props.data.values()
-                                        .filter_map(|zone_data| zone_data.get("parent_id"))
-                                        .filter_map(|v| v.as_str())
-                                        .find(|s| !s.is_empty())
-                                        .map(|s| s.to_string())
-                                })
-                            }).await.flatten(),
-                        };
-
-                        // Resolving the parent's global position needs an await, so it has to
-                        // happen before the instance is locked below.
-                        if let Some(parent_id_str) = &parent_id {
-                            if let Ok(parent_gorc_id) = GorcObjectId::from_str(parent_id_str) {
-                                if let Some(parent_global_position) = gorc_instances.get_object_position(parent_gorc_id).await {
-                                    final_position = horizon_event_system::Vec3 {
-                                        x: parent_global_position.x + move_data.position.x,
-                                        y: parent_global_position.y + move_data.position.y,
-                                        z: parent_global_position.z + move_data.position.z,
-                                    };
-                                }
-                            }
-                        }
-                        computed_position = final_position;
-
-                        // Apply the payload IN PLACE, under the instance lock, instead of
-                        // cloning it and writing the clone back. handle_object_update runs
-                        // concurrently on this same object (head, head_yaw, action, ... at ~30 Hz)
-                        // and a write-back of either snapshot silently reverts the other's change.
-                        // parent_id is sent by the client exactly once, so losing that race even
-                        // a single time pins the player to its old parent forever.
-                        //
-                        // The stored `position` stays the LOCAL one — that is what clients need to
-                        // place the object under its parent. And global_position is deliberately
-                        // left alone here: update_object_position() below reads it as the OLD
-                        // position to detect zone crossings, and pre-writing the new value makes
-                        // old == new, so every move reports "0 zone changes" and a stationary
-                        // player is never told that someone walked into their zone.
-                        let applied = gorc_instances.with_object_mut(gorc_id, |instance| {
-                            // rotation is stored alongside position: it is part of channel 0 and is
-                            // what gorc_zone_enter serves to a client discovering this player. Only
-                            // position used to be persisted, so the snapshot kept the orientation
-                            // frozen at spawn time and a player standing still was replicated to
-                            // newcomers lying flat on the planet surface.
-                            let mut patch = serde_json::json!({
-                                "position": move_data.position.clone(),
-                                "rotation": move_data.rotation.clone(),
-                            });
-                            if let Some(ref parent_id) = move_data.parent_id {
-                                patch["parent_id"] = serde_json::json!(parent_id);
-                            }
-                            let zone_set = instance.get_object_mut::<GenericProps>()
-                                .expect("Object must exists")
-                                .update(patch);
-                            for zone in zone_set {
-                                instance.mark_needs_update(zone);
-                            }
-                        }).await;
-
-                        if applied.is_none() {
-                            error!("🎮 GORC: ❌ Object instance not found in GORC for uuid: {}", move_data.player_id);
-                        } else {
-                            // Update the tracked object position LAST. This refreshes the
-                            // zone_manager center on the live instance and recalculates zone
-                            // subscriptions against the new position, and must be the final
-                            // authoritative write so nothing overwrites it.
-                            debug!("🚀 STEP 11.3: About to update GORC object position for {:?} to {:?}", gorc_id, final_position);
-                            if let Err(e) = events.update_object_position(gorc_id, final_position).await {
-                                error!("🚀 STEP 11.3: ❌ Failed to update GORC object tracking: {}", e);
-                            } else {
-                                debug!("🚀 STEP 11.3: ✅ Updated GORC object tracking for {:?} at {:?}",
-                                    gorc_id, final_position);
-                            }
-                        }
-
-                        // Update player position in GORC tracking
-                        debug!("🚀 STEP 11.5: Updating GORC player global_position for player {} to {:?}",
-                            move_data.player_id, computed_position);
-                        if let Err(e) = events.update_player_position(player_id, computed_position).await {
-                            error!("🚀 STEP 11.5: ❌ Failed to update GORC player tracking: {}", e);
-                        } else {
-                            debug!("🚀 STEP 11.5: ✅ Updated GORC player tracking for player {} at position {:?}",
-                                move_data.player_id, computed_position);
-                        }
-                    }
-                    Err(e) => {
-                        error!("🚀 STEP 11.5: ❌ Failed to parse player ID: {}", e);
-                    }
+            let move_data = match serde_json::from_value::<PlayerMoveRequest>(event["object_data"].clone()) {
+                Ok(data) => data,
+                Err(e) => {
+                    error!("🚀 STEP 4: ❌ Failed to parse PlayerMoveRequest: {}", e);
+                    return;
                 }
+            };
+            debug!("🚀 STEP 4: ✅ Parsed PlayerMoveRequest: {:?}", move_data);
 
+            debug!("🚀 STEP 5: Processing movement for ship {} to position {:?}",
+                move_data.player_id, move_data.position);
 
+            // SECURITY: Validate player ownership - players can only move their own ships
+            // if move_data.player_id != client_player {
+            //     error!("🚀 STEP 6: ❌ Security violation: Player {} tried to move ship belonging to {}",
+            //         client_player, move_data.player_id);
+            //     return Err(EventError::HandlerExecution(
+            //         "Unauthorized ship movement".to_string()
+            //     ));
+            // }
+            // debug!("🚀 STEP 6: ✅ Player ownership validated");
 
-                // Update the object instance position locally (for immediate response)
-                object_instance.object.update_position(final_position);
-                debug!("🚀 STEP 7: ✅ Updated local position for {} to {:?}",
-                    move_data.player_id, final_position);
-                
-                // Broadcast position update to nearby players (within 25m range)
-                // CRITICAL: Update BOTH player AND object positions in GORC tracking before broadcasting
-                debug!("🚀 STEP 8: Beginning position update broadcast for player {}", move_data.player_id);
-                // let object_id_str = gorc_event.object_id.clone();
-                // debug!("🚀 STEP 9: Using object ID: {}", object_id_str);
+            // gorc_id was already resolved (and the unknown-player case rejected)
+            // before this task was spawned.
+            {
+                if let Some(mut object_instance) = gorc_instances.get_object(gorc_id).await {
 
-                let mut position_update = serde_json::json!({
-                    "player_id": move_data.player_id,
-                    "position": move_data.position,
-                    "rotation": move_data.rotation,
-                    // "velocity": move_data.velocity,
-                    // "movement_state": move_data.movement_state,
-                    // "client_timestamp": chrono::Utc::now()
-                });
-                if let Some(ref parent_id) = move_data.parent_id {
-                    position_update["parent_id"] = serde_json::json!(parent_id);
-                }
-                debug!("🚀 STEP 10: Created position update payload: {}", position_update);
-                
-                // CRITICAL: We need to update player position synchronously for zone detection.
-                // Since the handler can run in either multi-threaded or single-threaded runtime,
-                // we use std::thread::spawn with a channel to safely execute async code.
-                
-                debug!("🚀 STEP 11: Updating player position for zone detection");
+                    let mut final_position = move_data.position;
 
+                    // Update player position in GORC tracking - use async directly since we're already in an async context
+                    match PlayerId::from_str(move_data.player_id.to_string().as_str()) {
+                        Ok(player_id) => {
+                            // Check if player has a parent_id and calculate global position
+                            let mut computed_position = move_data.position;
 
-
-                // Note: update_object_position was already called above, before update_object
-                debug!("🚀 STEP 12: Parsed GORC ID successfully: {:?}", gorc_id);
-
-                // Queue for rate-limited delivery instead of emitting to every
-                // subscriber. Movement packets arrive at up to 60Hz while
-                // player_def.json asks for 30Hz on channel 0, so this is where
-                // that ceiling finally applies — and distant observers drop to
-                // whatever their lod tier allows.
-                // parent_id rides on the ONE packet of a reparent (Server._on_player_move
-                // sends it on change only), so it is declared sticky: overwritten in the
-                // queue before delivery, it would otherwise never reach the client, which
-                // then applies planet-local coordinates under the building it still
-                // believes it is in — and lands in space.
-                debug!("🚀 STEP 13: Queueing channel 0 movement payload");
-                crate::lod::queue_sticky(
-                    gorc_id,
-                    0, // Channel 0: Critical movement data
-                    &object_instance.type_name,
-                    "move",
-                    &position_update,
-                    &["parent_id"],
-                );
-
-                // manage player out of godot server zone
-                if move_data.out_of_zone.is_some() {
-
-                    // Cooldown-based deduplication: only emit player_out_of_zone if
-                    // enough time has passed since the last emission for this player.
-                    // This prevents "ping-pong" transfers when Godot physics pushes
-                    // a freshly-spawned player back across the zone boundary.
-                    let player_uuid_str = event["object_uuid"].as_str().unwrap_or_default().to_string();
-                    let map = pending_out_of_zone_players();
-                    let now = Instant::now();
-
-                    let should_emit = match map.get(&player_uuid_str) {
-                        Some(entry) => entry.value().elapsed().as_secs_f64() >= OUT_OF_ZONE_COOLDOWN_SECS,
-                        None => true,
-                    };
-
-                    if !should_emit {
-                        debug!("🚀 Player {} out_of_zone suppressed (cooldown active, {:.1}s remaining)",
-                            player_uuid_str,
-                            OUT_OF_ZONE_COOLDOWN_SECS - map.get(&player_uuid_str).map(|e| e.value().elapsed().as_secs_f64()).unwrap_or(0.0));
-                    } else {
-                        map.insert(player_uuid_str.clone(), now);
-                        info!("🚀 Player out of zone detected (emitting, cooldown started): {:?}", move_data.out_of_zone);
-
-                        // The world (space / planet + local position) is what ds_game_server
-                        // matches against each Godot server's zones to pick the destination of
-                        // the transfer. Read from the LIVE instance: the `object_instance` clone
-                        // above predates the in-place patch (a reparent in this packet).
-                        let stored = gorc_instances
-                            .with_object_mut(gorc_id, |instance| instance.get_object::<GenericProps>().map(world::read_own_local_and_parent))
-                            .await
-                            .flatten();
-                        let (own_local, parent_id) = stored.unwrap_or((move_data.position, None));
-                        let object_world = world::resolve_world(&gorc_instances, own_local, parent_id).await;
-
-                        let mut prop_properties = HashMap::new();
-                        if let Some(generic_props) = object_instance.get_object_mut::<GenericProps>() {
-                            for properties in generic_props.data.values() {
-                                match properties {
-                                    Value::Null => warn!("property null"),
-                                    Value::Object(map) => {
-                                        for(key, value) in map.iter() {
-                                            prop_properties.insert(key.to_string(), value.clone());
-                                        }
-                                    },
-                                    _ => warn!("no properties"),
-                                }
-                            }
-                            prop_properties.insert("_global_position".to_string(), serde_json::to_value(final_position).unwrap_or(Value::Null));
-                            prop_properties.insert(ObjectWorld::KEY.to_string(), serde_json::to_value(&object_world).unwrap_or(Value::Null));
-
-                            debug!("🚀 Player out of zone properties: {:?}", prop_properties);
-                            let item = GenericPropsRequest  {
-                                object_type: "player".to_string(),
-                                object_uuid: event["object_uuid"].as_str().unwrap_or_default().to_string(),
-                                object_data: serde_json::to_value(&prop_properties).unwrap_or(Value::Null),
-                                broadcast_only: None,
+                            // Resolve the parent this movement is expressed against. A parent_id
+                            // carried by the packet itself (a reparent: leaving a building for the
+                            // planet) wins immediately — the local coordinates in the SAME packet are
+                            // already relative to that new parent. Reading the stored parent first, as
+                            // this used to, resolved the reparent packet against the OLD parent and
+                            // threw the player ~6360 km away for one frame, emptying every zone
+                            // around them before the next packet pulled them back.
+                            let parent_id = match &move_data.parent_id {
+                                Some(parent_id) => Some(parent_id.clone()),
+                                None => gorc_instances.with_object_mut(gorc_id, |instance| {
+                                    instance.get_object::<GenericProps>().and_then(|props| {
+                                        props.data.values()
+                                            .filter_map(|zone_data| zone_data.get("parent_id"))
+                                            .filter_map(|v| v.as_str())
+                                            .find(|s| !s.is_empty())
+                                            .map(|s| s.to_string())
+                                    })
+                                }).await.flatten(),
                             };
 
-                            // Whatever is parented under the player (the crate in their hands)
-                            // crosses with them: the destination gets the children right after
-                            // the player, the source freezes them instead of losing them.
-                            let children = world::descendants_of(&props_for_children, &gorc_instances, &player_uuid_str).await;
-                            events.emit_plugin(
-                                "gameserverplugin",
-                                "player_out_of_zone",
-                                &json!({
-                                    "server_uuid": move_data.out_of_zone.as_ref().unwrap(),
-                                    "item": item,
-                                    "children": children,
-                                    "global_position": final_position,
-                                }),
-                            ).await.unwrap();
-                        }
-                    }
-
-                } else {
-                    // Normal movement (no out_of_zone) - clear the cooldown entry
-                    // ONLY if the cooldown has expired. This ensures that a freshly-spawned
-                    // player on a new server can't immediately trigger a bounce-back transfer
-                    // even if the first few frames come in without out_of_zone.
-                    let player_uuid_str = event["object_uuid"].as_str().unwrap_or_default().to_string();
-                    let map = pending_out_of_zone_players();
-                    if let Some(entry) = map.get(&player_uuid_str) {
-                        if entry.value().elapsed().as_secs_f64() >= OUT_OF_ZONE_COOLDOWN_SECS {
-                            drop(entry); // release the read lock before removing
-                            if map.remove(&player_uuid_str).is_some() {
-                                debug!("🚀 Cleared out_of_zone cooldown for player {} (cooldown expired, normal movement)", player_uuid_str);
+                            // Resolving the parent's global position needs an await, so it has to
+                            // happen before the instance is locked below.
+                            if let Some(parent_id_str) = &parent_id {
+                                if let Ok(parent_gorc_id) = GorcObjectId::from_str(parent_id_str) {
+                                    if let Some(parent_global_position) = gorc_instances.get_object_position(parent_gorc_id).await {
+                                        final_position = horizon_event_system::Vec3 {
+                                            x: parent_global_position.x + move_data.position.x,
+                                            y: parent_global_position.y + move_data.position.y,
+                                            z: parent_global_position.z + move_data.position.z,
+                                        };
+                                    }
+                                }
                             }
-                        } else {
-                            debug!("🚀 Player {} normal movement but cooldown still active ({:.1}s remaining), keeping guard",
-                                player_uuid_str,
-                                OUT_OF_ZONE_COOLDOWN_SECS - entry.value().elapsed().as_secs_f64());
+                            computed_position = final_position;
+
+                            // Apply the payload IN PLACE, under the instance lock, instead of
+                            // cloning it and writing the clone back. handle_object_update runs
+                            // concurrently on this same object (head, head_yaw, action, ... at ~30 Hz)
+                            // and a write-back of either snapshot silently reverts the other's change.
+                            // parent_id is sent by the client exactly once, so losing that race even
+                            // a single time pins the player to its old parent forever.
+                            //
+                            // The stored `position` stays the LOCAL one — that is what clients need to
+                            // place the object under its parent. And global_position is deliberately
+                            // left alone here: update_object_position() below reads it as the OLD
+                            // position to detect zone crossings, and pre-writing the new value makes
+                            // old == new, so every move reports "0 zone changes" and a stationary
+                            // player is never told that someone walked into their zone.
+                            let applied = gorc_instances.with_object_mut(gorc_id, |instance| {
+                                // rotation is stored alongside position: it is part of channel 0 and is
+                                // what gorc_zone_enter serves to a client discovering this player. Only
+                                // position used to be persisted, so the snapshot kept the orientation
+                                // frozen at spawn time and a player standing still was replicated to
+                                // newcomers lying flat on the planet surface.
+                                let mut patch = serde_json::json!({
+                                    "position": move_data.position.clone(),
+                                    "rotation": move_data.rotation.clone(),
+                                });
+                                if let Some(ref parent_id) = move_data.parent_id {
+                                    patch["parent_id"] = serde_json::json!(parent_id);
+                                }
+                                let zone_set = instance.get_object_mut::<GenericProps>()
+                                    .expect("Object must exists")
+                                    .update(patch);
+                                for zone in zone_set {
+                                    instance.mark_needs_update(zone);
+                                }
+                            }).await;
+
+                            if applied.is_none() {
+                                error!("🎮 GORC: ❌ Object instance not found in GORC for uuid: {}", move_data.player_id);
+                            } else {
+                                // Update the tracked object position LAST. This refreshes the
+                                // zone_manager center on the live instance and recalculates zone
+                                // subscriptions against the new position, and must be the final
+                                // authoritative write so nothing overwrites it.
+                                debug!("🚀 STEP 11.3: About to update GORC object position for {:?} to {:?}", gorc_id, final_position);
+                                if let Err(e) = events.update_object_position(gorc_id, final_position).await {
+                                    error!("🚀 STEP 11.3: ❌ Failed to update GORC object tracking: {}", e);
+                                } else {
+                                    debug!("🚀 STEP 11.3: ✅ Updated GORC object tracking for {:?} at {:?}",
+                                        gorc_id, final_position);
+                                }
+                            }
+
+                            // Update player position in GORC tracking
+                            debug!("🚀 STEP 11.5: Updating GORC player global_position for player {} to {:?}",
+                                move_data.player_id, computed_position);
+                            if let Err(e) = events.update_player_position(player_id, computed_position).await {
+                                error!("🚀 STEP 11.5: ❌ Failed to update GORC player tracking: {}", e);
+                            } else {
+                                debug!("🚀 STEP 11.5: ✅ Updated GORC player tracking for player {} at position {:?}",
+                                    move_data.player_id, computed_position);
+                            }
+                        }
+                        Err(e) => {
+                            error!("🚀 STEP 11.5: ❌ Failed to parse player ID: {}", e);
                         }
                     }
-                }
 
+
+
+                    // Update the object instance position locally (for immediate response)
+                    object_instance.object.update_position(final_position);
+                    debug!("🚀 STEP 7: ✅ Updated local position for {} to {:?}",
+                        move_data.player_id, final_position);
+                
+                    // Broadcast position update to nearby players (within 25m range)
+                    // CRITICAL: Update BOTH player AND object positions in GORC tracking before broadcasting
+                    debug!("🚀 STEP 8: Beginning position update broadcast for player {}", move_data.player_id);
+                    // let object_id_str = gorc_event.object_id.clone();
+                    // debug!("🚀 STEP 9: Using object ID: {}", object_id_str);
+
+                    let mut position_update = serde_json::json!({
+                        "player_id": move_data.player_id,
+                        "position": move_data.position,
+                        "rotation": move_data.rotation,
+                        // "velocity": move_data.velocity,
+                        // "movement_state": move_data.movement_state,
+                        // "client_timestamp": chrono::Utc::now()
+                    });
+                    if let Some(ref parent_id) = move_data.parent_id {
+                        position_update["parent_id"] = serde_json::json!(parent_id);
+                    }
+                    debug!("🚀 STEP 10: Created position update payload: {}", position_update);
+                
+                    // CRITICAL: We need to update player position synchronously for zone detection.
+                    // Since the handler can run in either multi-threaded or single-threaded runtime,
+                    // we use std::thread::spawn with a channel to safely execute async code.
+                
+                    debug!("🚀 STEP 11: Updating player position for zone detection");
+
+
+
+                    // Note: update_object_position was already called above, before update_object
+                    debug!("🚀 STEP 12: Parsed GORC ID successfully: {:?}", gorc_id);
+
+                    // Queue for rate-limited delivery instead of emitting to every
+                    // subscriber. Movement packets arrive at up to 60Hz while
+                    // player_def.json asks for 30Hz on channel 0, so this is where
+                    // that ceiling finally applies — and distant observers drop to
+                    // whatever their lod tier allows.
+                    // parent_id rides on the ONE packet of a reparent (Server._on_player_move
+                    // sends it on change only), so it is declared sticky: overwritten in the
+                    // queue before delivery, it would otherwise never reach the client, which
+                    // then applies planet-local coordinates under the building it still
+                    // believes it is in — and lands in space.
+                    debug!("🚀 STEP 13: Queueing channel 0 movement payload");
+                    crate::lod::queue_sticky(
+                        gorc_id,
+                        0, // Channel 0: Critical movement data
+                        &object_instance.type_name,
+                        "move",
+                        &position_update,
+                        &["parent_id"],
+                    );
+
+                    // manage player out of godot server zone
+                    if move_data.out_of_zone.is_some() {
+
+                        // Cooldown-based deduplication: only emit player_out_of_zone if
+                        // enough time has passed since the last emission for this player.
+                        // This prevents "ping-pong" transfers when Godot physics pushes
+                        // a freshly-spawned player back across the zone boundary.
+                        let player_uuid_str = event["object_uuid"].as_str().unwrap_or_default().to_string();
+                        let map = pending_out_of_zone_players();
+                        let now = Instant::now();
+
+                        let should_emit = match map.get(&player_uuid_str) {
+                            Some(entry) => entry.value().elapsed().as_secs_f64() >= OUT_OF_ZONE_COOLDOWN_SECS,
+                            None => true,
+                        };
+
+                        if !should_emit {
+                            debug!("🚀 Player {} out_of_zone suppressed (cooldown active, {:.1}s remaining)",
+                                player_uuid_str,
+                                OUT_OF_ZONE_COOLDOWN_SECS - map.get(&player_uuid_str).map(|e| e.value().elapsed().as_secs_f64()).unwrap_or(0.0));
+                        } else {
+                            map.insert(player_uuid_str.clone(), now);
+                            info!("🚀 Player out of zone detected (emitting, cooldown started): {:?}", move_data.out_of_zone);
+
+                            // The world (space / planet + local position) is what ds_game_server
+                            // matches against each Godot server's zones to pick the destination of
+                            // the transfer. Read from the LIVE instance: the `object_instance` clone
+                            // above predates the in-place patch (a reparent in this packet).
+                            let stored = gorc_instances
+                                .with_object_mut(gorc_id, |instance| instance.get_object::<GenericProps>().map(world::read_own_local_and_parent))
+                                .await
+                                .flatten();
+                            let (own_local, parent_id) = stored.unwrap_or((move_data.position, None));
+                            let object_world = world::resolve_world(&gorc_instances, own_local, parent_id).await;
+
+                            let mut prop_properties = HashMap::new();
+                            if let Some(generic_props) = object_instance.get_object_mut::<GenericProps>() {
+                                for properties in generic_props.data.values() {
+                                    match properties {
+                                        Value::Null => warn!("property null"),
+                                        Value::Object(map) => {
+                                            for(key, value) in map.iter() {
+                                                prop_properties.insert(key.to_string(), value.clone());
+                                            }
+                                        },
+                                        _ => warn!("no properties"),
+                                    }
+                                }
+                                prop_properties.insert("_global_position".to_string(), serde_json::to_value(final_position).unwrap_or(Value::Null));
+                                prop_properties.insert(ObjectWorld::KEY.to_string(), serde_json::to_value(&object_world).unwrap_or(Value::Null));
+
+                                debug!("🚀 Player out of zone properties: {:?}", prop_properties);
+                                let item = GenericPropsRequest  {
+                                    object_type: "player".to_string(),
+                                    object_uuid: event["object_uuid"].as_str().unwrap_or_default().to_string(),
+                                    object_data: serde_json::to_value(&prop_properties).unwrap_or(Value::Null),
+                                    broadcast_only: None,
+                                };
+
+                                // Whatever is parented under the player (the crate in their hands)
+                                // crosses with them: the destination gets the children right after
+                                // the player, the source freezes them instead of losing them.
+                                let children = world::descendants_of(&props_for_children, &gorc_instances, &player_uuid_str).await;
+                                events.emit_plugin(
+                                    "gameserverplugin",
+                                    "player_out_of_zone",
+                                    &json!({
+                                        "server_uuid": move_data.out_of_zone.as_ref().unwrap(),
+                                        "item": item,
+                                        "children": children,
+                                        "global_position": final_position,
+                                    }),
+                                ).await.unwrap();
+                            }
+                        }
+
+                    } else {
+                        // Normal movement (no out_of_zone) - clear the cooldown entry
+                        // ONLY if the cooldown has expired. This ensures that a freshly-spawned
+                        // player on a new server can't immediately trigger a bounce-back transfer
+                        // even if the first few frames come in without out_of_zone.
+                        let player_uuid_str = event["object_uuid"].as_str().unwrap_or_default().to_string();
+                        let map = pending_out_of_zone_players();
+                        if let Some(entry) = map.get(&player_uuid_str) {
+                            if entry.value().elapsed().as_secs_f64() >= OUT_OF_ZONE_COOLDOWN_SECS {
+                                drop(entry); // release the read lock before removing
+                                if map.remove(&player_uuid_str).is_some() {
+                                    debug!("🚀 Cleared out_of_zone cooldown for player {} (cooldown expired, normal movement)", player_uuid_str);
+                                }
+                            } else {
+                                debug!("🚀 Player {} normal movement but cooldown still active ({:.1}s remaining), keeping guard",
+                                    player_uuid_str,
+                                    OUT_OF_ZONE_COOLDOWN_SECS - entry.value().elapsed().as_secs_f64());
+                            }
+                        }
+                    }
+
+                }
+            }
+            match next_move(gorc_id) {
+                Some(next) => event = next,
+                None => break,
             }
         }
         debug!("🚀 SPAWN #{}: ✅ Async task completed for player {}", spawn_id, player_uuid);
     });
-    
+
     debug!("🚀 HANDLER #{}: ✅ Spawn submitted, returning Ok", handler_id);
     Ok(())
+}
+
+// ------------------------------------------------------------ coalescing
+//
+// Movement packets used to become one luminal task each, with nothing between
+// the game servers' rate and the rate at which GORC can absorb them. The moment
+// the handlers ran slower than the packets came in (a split hand-over, a snapshot
+// holding the instance locks), tasks piled up faster than they drained, each one
+// holding its payload, and Horizon went from 300 MB to the 4 GB limit in two
+// minutes with every worker pegged (preprod, 2026-09-20 22:00). A position is
+// absolute, so when a player's previous packet is still being applied only the
+// newest one matters: it waits in a one-slot mailbox and the running task takes
+// it next. In-flight work is bounded by the number of players, not by the rate.
+
+/// The one pending packet of a player, and whether a task is draining it.
+#[derive(Default)]
+struct Mailbox {
+    pending: Option<Value>,
+    draining: bool,
+}
+
+fn mailboxes() -> &'static DashMap<GorcObjectId, std::sync::Mutex<Mailbox>> {
+    static MAP: OnceLock<DashMap<GorcObjectId, std::sync::Mutex<Mailbox>>> = OnceLock::new();
+    MAP.get_or_init(DashMap::new)
+}
+
+static MOVES_RECEIVED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static MOVES_COALESCED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Posts `event` for `gorc_id`. Returns it back when no task is draining that
+/// player (the caller spawns one); `None` when one is, the packet then waits in
+/// the mailbox — merged over the packet it replaces, because two fields ride on
+/// a single packet and would be lost with it: `parent_id` (sent once, on the
+/// reparent: the next packet's local position is relative to it) and
+/// `out_of_zone` (the transfer request).
+fn coalesce(gorc_id: GorcObjectId, event: Value) -> Option<Value> {
+    MOVES_RECEIVED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let entry = mailboxes().entry(gorc_id).or_default();
+    let mut mailbox = entry.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if !mailbox.draining {
+        mailbox.draining = true;
+        return Some(event);
+    }
+    let mut event = event;
+    if let Some(previous) = mailbox.pending.take() {
+        MOVES_COALESCED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        for key in ["parent_id", "out_of_zone"] {
+            if event["object_data"].get(key).map_or(true, Value::is_null) {
+                if let Some(kept) = previous["object_data"].get(key).filter(|v| !v.is_null()) {
+                    event["object_data"][key] = kept.clone();
+                }
+            }
+        }
+    }
+    mailbox.pending = Some(event);
+    None
+}
+
+/// The next packet of `gorc_id`, or `None` once the mailbox is empty — the
+/// drain task then stops and the mailbox is released (under the same lock, so a
+/// packet posted meanwhile either finds `draining` set or spawns its own task).
+fn next_move(gorc_id: GorcObjectId) -> Option<Value> {
+    let entry = mailboxes().get(&gorc_id)?;
+    {
+        let mut mailbox = entry.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        match mailbox.pending.take() {
+            Some(next) => return Some(next),
+            None => mailbox.draining = false,
+        }
+    }
+    drop(entry);
+    mailboxes().remove_if(&gorc_id, |_, m| {
+        let m = m.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        !m.draining && m.pending.is_none()
+    });
+    None
+}
+
+/// Movement intake since the last call: packets received, packets coalesced
+/// (replaced in a mailbox before being applied), players being drained now.
+pub fn intake_report() -> (u64, u64, usize) {
+    (
+        MOVES_RECEIVED.swap(0, std::sync::atomic::Ordering::Relaxed),
+        MOVES_COALESCED.swap(0, std::sync::atomic::Ordering::Relaxed),
+        mailboxes().len(),
+    )
+}
+
+#[cfg(test)]
+mod coalesce_tests {
+    use super::*;
+
+    fn packet(x: f64, extra: Value) -> Value {
+        let mut data = json!({ "position": { "x": x, "y": 0.0, "z": 0.0 } });
+        if let (Value::Object(target), Value::Object(extra)) = (&mut data, extra) {
+            target.extend(extra);
+        }
+        json!({ "object_uuid": "p", "object_data": data })
+    }
+
+    #[test]
+    fn first_packet_is_handed_back_and_the_rest_wait_in_the_mailbox() {
+        let id = GorcObjectId::new();
+        assert!(coalesce(id, packet(1.0, json!({}))).is_some(), "no drain task yet: caller spawns one");
+        assert!(coalesce(id, packet(2.0, json!({}))).is_none(), "drain task running: packet waits");
+        assert!(coalesce(id, packet(3.0, json!({}))).is_none());
+        // Only the newest one is left for the drain task.
+        let next = next_move(id).expect("one pending packet");
+        assert_eq!(next["object_data"]["position"]["x"], 3.0);
+        assert!(next_move(id).is_none(), "mailbox empty: the task stops");
+        assert!(mailboxes().get(&id).is_none(), "released mailbox");
+        // And the next packet spawns a task again.
+        assert!(coalesce(id, packet(4.0, json!({}))).is_some());
+        assert!(next_move(id).is_none());
+    }
+
+    #[test]
+    fn parent_id_and_out_of_zone_survive_the_packet_they_rode_on() {
+        let id = GorcObjectId::new();
+        assert!(coalesce(id, packet(1.0, json!({}))).is_some());
+        assert!(coalesce(id, packet(2.0, json!({ "parent_id": "planet", "out_of_zone": "srv" }))).is_none());
+        assert!(coalesce(id, packet(3.0, json!({ "out_of_zone": null }))).is_none());
+        let next = next_move(id).expect("one pending packet");
+        assert_eq!(next["object_data"]["position"]["x"], 3.0);
+        assert_eq!(next["object_data"]["parent_id"], "planet");
+        assert_eq!(next["object_data"]["out_of_zone"], "srv");
+        assert!(next_move(id).is_none());
+    }
+
+    #[test]
+    fn a_newer_parent_id_wins_over_the_replaced_one() {
+        let id = GorcObjectId::new();
+        assert!(coalesce(id, packet(1.0, json!({}))).is_some());
+        assert!(coalesce(id, packet(2.0, json!({ "parent_id": "old" }))).is_none());
+        assert!(coalesce(id, packet(3.0, json!({ "parent_id": "new" }))).is_none());
+        assert_eq!(next_move(id).unwrap()["object_data"]["parent_id"], "new");
+        assert!(next_move(id).is_none());
+    }
 }

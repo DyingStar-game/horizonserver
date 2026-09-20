@@ -64,6 +64,11 @@ versions can be dropped safely. Per-recipient bookkeeping guarantees the last
 version is always delivered — an object that stops moving never leaves a client
 on a stale position.
 
+The delivery loop logs one `[lod]` line every 10 s: updates queued per event
+name, streams evaluated and radius scans per second, messages and KB sent per
+second per event name, and the audience size per evaluation. This is the line to
+compare load tests against (`kubectl logs <horizon> | grep '\[lod\]'`).
+
 Two consequences worth keeping in mind when editing a definition:
 
 - `frequency` is now real. A channel declaring `1.0` really is limited to one

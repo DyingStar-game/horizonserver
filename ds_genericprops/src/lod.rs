@@ -28,6 +28,7 @@
 //! subscription sweep uses, so the two agree.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -58,6 +59,74 @@ const IDLE_RETENTION: Duration = Duration::from_secs(30);
 /// Ticks between two sweeps for expired streams. Cheap enough at this spacing
 /// that it need not be smarter than a full pass over the map.
 const GC_EVERY_TICKS: u64 = 500;
+
+/// Ticks between two `[lod]` report lines (10 s).
+const REPORT_EVERY_TICKS: u64 = 1000;
+
+/// What the delivery loop did since the last report, per event name. Queued
+/// counts come from the handlers' threads (atomics); the rest is the loop's own.
+#[derive(Default)]
+struct Counters {
+    /// Streams evaluated (pending and due) by the tick.
+    evaluated: u64,
+    /// Radius queries run for those evaluations.
+    radius_scans: u64,
+    /// Recipients considered over all evaluations (audience size, summed).
+    recipients: u64,
+    /// Messages handed to `send_to_client`, and their bytes.
+    sent: HashMap<String, u64>,
+    bytes: u64,
+    /// Largest audience a single evaluation saw.
+    max_recipients: u64,
+}
+
+fn queued_counters() -> &'static DashMap<String, AtomicU64> {
+    static QUEUED: OnceLock<DashMap<String, AtomicU64>> = OnceLock::new();
+    QUEUED.get_or_init(DashMap::new)
+}
+
+fn count_queued(event_name: &str) {
+    match queued_counters().get(event_name) {
+        Some(counter) => {
+            counter.fetch_add(1, Ordering::Relaxed);
+        }
+        None => {
+            queued_counters().entry(event_name.to_string()).or_default().fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+/// One `[lod]` line every `REPORT_EVERY_TICKS`: the numbers to compare a load
+/// test against (queued updates in, messages out, audience size). Rates are per
+/// second so runs of different lengths compare directly.
+fn report(counters: &mut Counters, streams_total: usize, elapsed: Duration) {
+    let secs = elapsed.as_secs_f64().max(f64::EPSILON);
+    let mut queued: Vec<String> = queued_counters()
+        .iter()
+        .map(|entry| format!("{}={:.0}/s", entry.key(), entry.value().swap(0, Ordering::Relaxed) as f64 / secs))
+        .collect();
+    queued.sort();
+    let mut sent: Vec<String> = counters
+        .sent
+        .iter()
+        .map(|(name, n)| format!("{}={:.0}/s", name, *n as f64 / secs))
+        .collect();
+    sent.sort();
+    let sent_total: u64 = counters.sent.values().sum();
+    info!(
+        "[lod] queued [{}] | streams={} evaluated={:.0}/s radius_scans={:.0}/s | sent [{}] total={:.0}/s {:.1} KB/s | recipients/eval avg={:.1} max={}",
+        queued.join(" "),
+        streams_total,
+        counters.evaluated as f64 / secs,
+        counters.radius_scans as f64 / secs,
+        sent.join(" "),
+        sent_total as f64 / secs,
+        counters.bytes as f64 / secs / 1024.0,
+        if counters.evaluated == 0 { 0.0 } else { counters.recipients as f64 / counters.evaluated as f64 },
+        counters.max_recipients,
+    );
+    *counters = Counters::default();
+}
 
 /// Identifies one payload stream: a channel of an object, per event name.
 ///
@@ -124,6 +193,7 @@ pub fn queue(
         }
     };
 
+    count_queued(event_name);
     let now = Instant::now();
     let key = (gorc_id, channel, event_name.to_string());
     let mut stream = streams().entry(key).or_insert_with(|| Stream {
@@ -169,11 +239,17 @@ pub fn start(events: Arc<EventSystem>, definitions: Arc<DashMap<String, ObjectDe
                 // pointless work.
                 ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                 let mut ticks: u64 = 0;
+                let mut counters = Counters::default();
+                let mut last_report = Instant::now();
                 loop {
                     ticker.tick().await;
-                    flush(&events, &definitions).await;
+                    flush(&events, &definitions, &mut counters).await;
 
                     ticks = ticks.wrapping_add(1);
+                    if ticks % REPORT_EVERY_TICKS == 0 {
+                        report(&mut counters, streams().len(), last_report.elapsed());
+                        last_report = Instant::now();
+                    }
                     if ticks % GC_EVERY_TICKS == 0 {
                         streams().retain(|_, stream| {
                             stream.pending || stream.last_queued.elapsed() <= IDLE_RETENTION
@@ -189,7 +265,7 @@ pub fn start(events: Arc<EventSystem>, definitions: Arc<DashMap<String, ObjectDe
     }
 }
 
-async fn flush(events: &Arc<EventSystem>, definitions: &Arc<DashMap<String, ObjectDefinition>>) {
+async fn flush(events: &Arc<EventSystem>, definitions: &Arc<DashMap<String, ObjectDefinition>>, counters: &mut Counters) {
     let Some(gorc_instances) = events.get_gorc_instances() else {
         return;
     };
@@ -209,7 +285,7 @@ async fn flush(events: &Arc<EventSystem>, definitions: &Arc<DashMap<String, Obje
     let slack = TICK / 2;
 
     for key in keys {
-        let (gorc_id, channel, _) = &key;
+        let (gorc_id, channel, event_name) = &key;
         let (gorc_id, channel) = (*gorc_id, *channel);
 
         // Snapshot what we need; the map is never held across an await.
@@ -247,6 +323,10 @@ async fn flush(events: &Arc<EventSystem>, definitions: &Arc<DashMap<String, Obje
         // the channel's zone and gets nothing, exactly as before.
         let outer = tiers.last().copied().unwrap_or(LodTier { distance: 0.0, frequency: 0.0 });
         let recipients = gorc_instances.find_players_in_radius(object_position, outer.distance).await;
+        counters.evaluated += 1;
+        counters.radius_scans += 1;
+        counters.recipients += recipients.len() as u64;
+        counters.max_recipients = counters.max_recipients.max(recipients.len() as u64);
 
         // Innermost tier containing a recipient decides its rate.
         let mut rates: HashMap<PlayerId, f64> = HashMap::with_capacity(recipients.len());
@@ -255,6 +335,7 @@ async fn flush(events: &Arc<EventSystem>, definitions: &Arc<DashMap<String, Obje
             if unassigned.is_empty() {
                 break;
             }
+            counters.radius_scans += 1;
             let inside: HashSet<PlayerId> = gorc_instances
                 .find_players_in_radius(object_position, tier.distance)
                 .await
@@ -326,6 +407,8 @@ async fn flush(events: &Arc<EventSystem>, definitions: &Arc<DashMap<String, Obje
             }
         }
 
+        *counters.sent.entry(event_name.clone()).or_default() += due.len() as u64;
+        counters.bytes += bytes.len() as u64 * due.len() as u64;
         for player_id in due {
             if let Err(e) = sender.send_to_client(player_id, (*bytes).clone()).await {
                 debug!("🚀 LOD: send to player {} for object {} ch{} failed: {}", player_id, gorc_id, channel, e);

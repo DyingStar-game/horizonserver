@@ -19,6 +19,17 @@
 //! leaves a client stuck on a stale position, which a plain "too soon, drop it"
 //! throttle would.
 //!
+//! The one exception is a key a handler sends **once**, on change, rather than
+//! in every payload — `parent_id` on a player `move`, which only the packet of
+//! the reparent carries. Overwritten by the next position before the tick
+//! delivered it, that packet was simply lost, and the client then applied
+//! planet-local coordinates under the building it still believed it was in.
+//! [`queue_sticky`] names such keys: the stream remembers their last value and
+//! every recipient that has not yet been served a payload carrying it gets it
+//! merged into whatever payload it is served next. Nobody else pays for it —
+//! the key goes out once per recipient and per change, exactly as if the
+//! original packet had been delivered.
+//!
 //! Recipients are computed here rather than read from
 //! `ObjectInstance::subscribers` on purpose: `GorcInstanceManager::get_object`
 //! deep-clones the whole instance (boxed object, zone manager, subscriber sets)
@@ -141,6 +152,14 @@ struct Stream {
     object_type: String,
     /// Client envelope, serialized once per update rather than once per recipient.
     bytes: Arc<Vec<u8>>,
+    /// Same envelope with the sticky keys merged into the payload, for the
+    /// recipients still owed them. `None` while no sticky key has been seen.
+    bytes_sticky: Option<Arc<Vec<u8>>>,
+    /// Last value of every sticky key ever queued on this stream.
+    sticky: serde_json::Map<String, serde_json::Value>,
+    /// Version at which a sticky key last changed. A recipient whose delivered
+    /// version is older has never been served that value and gets `bytes_sticky`.
+    sticky_version: u64,
     /// Last version delivered to each recipient, and when.
     sent: HashMap<PlayerId, (u64, Instant)>,
     /// Whether some recipient is still behind `version`. A settled stream is
@@ -164,7 +183,8 @@ fn streams() -> &'static DashMap<StreamKey, Stream> {
 /// Replaces a direct `emit_gorc_instance(..., Dest::Client)`. Cheap and
 /// synchronous: it serializes the envelope once and returns. If a payload for
 /// the same stream is still pending it is overwritten — latest wins, which is
-/// exactly right for snapshots.
+/// exactly right for snapshots. A key that is not in every payload must be
+/// declared through [`queue_sticky`] or it can be lost that way.
 pub fn queue(
     gorc_id: GorcObjectId,
     channel: u8,
@@ -172,25 +192,27 @@ pub fn queue(
     event_name: &str,
     data: &serde_json::Value,
 ) {
-    // Byte-for-byte the envelope Horizon's own emit_to_gorc_subscribers builds,
-    // including the `player_id` field that actually carries the object id —
-    // clients parse this shape and must not be able to tell the two apart.
-    let envelope = json!({
-        "event_type": event_name,
-        "object_id": gorc_id.to_string(),
-        "object_type": object_type,
-        "channel": channel,
-        "player_id": gorc_id.to_string(),
-        "data": data,
-        "timestamp": current_timestamp(),
-    });
+    queue_sticky(gorc_id, channel, object_type, event_name, data, &[]);
+}
 
-    let bytes = match serde_json::to_vec(&envelope) {
-        Ok(bytes) => Arc::new(bytes),
-        Err(e) => {
-            error!("🚀 LOD: ❌ Failed to serialize {} payload for object {}: {}", event_name, gorc_id, e);
-            return;
-        }
+/// [`queue`], with `sticky_keys` naming the keys of `data` that are sent on
+/// change only. Their last value is kept on the stream and merged into the
+/// next payload served to each recipient that has not seen it yet, so a
+/// one-shot key survives being overwritten before delivery. Keys absent from
+/// `data` keep the value they had; `data` must be a JSON object for the merge
+/// to apply.
+pub fn queue_sticky(
+    gorc_id: GorcObjectId,
+    channel: u8,
+    object_type: &str,
+    event_name: &str,
+    data: &serde_json::Value,
+    sticky_keys: &[&str],
+) {
+    // One timestamp for both variants: they are the same update.
+    let timestamp = current_timestamp();
+    let Some(bytes) = serialize_envelope(gorc_id, channel, object_type, event_name, data, timestamp) else {
+        return;
     };
 
     count_queued(event_name);
@@ -200,6 +222,9 @@ pub fn queue(
         version: 0,
         object_type: object_type.to_string(),
         bytes: Arc::clone(&bytes),
+        bytes_sticky: None,
+        sticky: serde_json::Map::new(),
+        sticky_version: 0,
         sent: HashMap::new(),
         pending: false,
         next_due: None,
@@ -210,6 +235,67 @@ pub fn queue(
     stream.bytes = bytes;
     stream.pending = true;
     stream.last_queued = now;
+
+    if let Some(payload) = data.as_object() {
+        for sticky_key in sticky_keys {
+            if let Some(value) = payload.get(*sticky_key) {
+                if stream.sticky.get(*sticky_key) != Some(value) {
+                    stream.sticky.insert(sticky_key.to_string(), value.clone());
+                    stream.sticky_version = stream.version;
+                }
+            }
+        }
+        if stream.sticky.is_empty() {
+            stream.bytes_sticky = None;
+        } else if stream.sticky.iter().all(|(k, v)| payload.get(k) == Some(v)) {
+            // The payload already carries every sticky value: one serialization
+            // serves both variants.
+            stream.bytes_sticky = Some(Arc::clone(&stream.bytes));
+        } else {
+            let mut merged = payload.clone();
+            for (k, v) in &stream.sticky {
+                merged.entry(k.clone()).or_insert_with(|| v.clone());
+            }
+            stream.bytes_sticky = serialize_envelope(
+                gorc_id,
+                channel,
+                object_type,
+                event_name,
+                &serde_json::Value::Object(merged),
+                timestamp,
+            );
+        }
+    }
+}
+
+/// The client envelope around a channel payload, serialized.
+fn serialize_envelope(
+    gorc_id: GorcObjectId,
+    channel: u8,
+    object_type: &str,
+    event_name: &str,
+    data: &serde_json::Value,
+    timestamp: u64,
+) -> Option<Arc<Vec<u8>>> {
+    // Byte-for-byte the envelope Horizon's own emit_to_gorc_subscribers builds,
+    // including the `player_id` field that actually carries the object id —
+    // clients parse this shape and must not be able to tell the two apart.
+    let envelope = json!({
+        "event_type": event_name,
+        "object_id": gorc_id.to_string(),
+        "object_type": object_type,
+        "channel": channel,
+        "player_id": gorc_id.to_string(),
+        "data": data,
+        "timestamp": timestamp,
+    });
+    match serde_json::to_vec(&envelope) {
+        Ok(bytes) => Some(Arc::new(bytes)),
+        Err(e) => {
+            error!("🚀 LOD: ❌ Failed to serialize {} payload for object {}: {}", event_name, gorc_id, e);
+            None
+        }
+    }
 }
 
 /// Start the delivery loop. Call once, at plugin startup.
@@ -289,7 +375,7 @@ async fn flush(events: &Arc<EventSystem>, definitions: &Arc<DashMap<String, Obje
         let (gorc_id, channel) = (*gorc_id, *channel);
 
         // Snapshot what we need; the map is never held across an await.
-        let (version, bytes, object_type) = {
+        let (version, bytes, bytes_sticky, sticky_version, object_type) = {
             let Some(stream) = streams().get(&key) else {
                 continue;
             };
@@ -299,7 +385,13 @@ async fn flush(events: &Arc<EventSystem>, definitions: &Arc<DashMap<String, Obje
             if stream.next_due.map_or(false, |due| now + slack < due) {
                 continue;
             }
-            (stream.version, Arc::clone(&stream.bytes), stream.object_type.clone())
+            (
+                stream.version,
+                Arc::clone(&stream.bytes),
+                stream.bytes_sticky.clone(),
+                stream.sticky_version,
+                stream.object_type.clone(),
+            )
         };
 
         let Some(tiers) = resolve_tiers(definitions, &object_type, channel) else {
@@ -354,7 +446,9 @@ async fn flush(events: &Arc<EventSystem>, definitions: &Arc<DashMap<String, Obje
             rates.insert(player_id, outer.frequency);
         }
 
-        let mut due: Vec<PlayerId> = Vec::new();
+        // Recipients to serve now, and whether each is still owed the sticky
+        // keys: never served, or served nothing since their last change.
+        let mut due: Vec<(PlayerId, bool)> = Vec::new();
         {
             let Some(mut stream) = streams().get_mut(&key) else {
                 continue;
@@ -365,25 +459,26 @@ async fn flush(events: &Arc<EventSystem>, definitions: &Arc<DashMap<String, Obje
             stream.sent.retain(|player_id, _| rates.contains_key(player_id));
 
             for (player_id, frequency) in &rates {
-                let send = match stream.sent.get(player_id) {
+                let (send, owed_sticky) = match stream.sent.get(player_id) {
                     // Never served: a player that just entered the zone gets the
                     // current state immediately, on top of the `gorc_zone_enter`
                     // snapshot Horizon already sent it.
-                    None => true,
-                    Some((sent_version, sent_at)) => {
+                    None => (true, true),
+                    Some((sent_version, sent_at)) => (
                         *sent_version < version
-                            && now.saturating_duration_since(*sent_at) + slack >= interval(*frequency)
-                    }
+                            && now.saturating_duration_since(*sent_at) + slack >= interval(*frequency),
+                        *sent_version < sticky_version,
+                    ),
                 };
                 if send {
-                    due.push(*player_id);
+                    due.push((*player_id, owed_sticky));
                 }
             }
 
             // Marked before the send: a failed send is not worth retrying at a
             // higher rate than the channel allows, and the next version will
             // carry the state anyway.
-            for player_id in &due {
+            for (player_id, _) in &due {
                 stream.sent.insert(*player_id, (version, now));
             }
 
@@ -408,9 +503,13 @@ async fn flush(events: &Arc<EventSystem>, definitions: &Arc<DashMap<String, Obje
         }
 
         *counters.sent.entry(event_name.clone()).or_default() += due.len() as u64;
-        counters.bytes += bytes.len() as u64 * due.len() as u64;
-        for player_id in due {
-            if let Err(e) = sender.send_to_client(player_id, (*bytes).clone()).await {
+        for (player_id, owed_sticky) in due {
+            let payload = match (&bytes_sticky, owed_sticky) {
+                (Some(sticky), true) => sticky,
+                _ => &bytes,
+            };
+            counters.bytes += payload.len() as u64;
+            if let Err(e) = sender.send_to_client(player_id, (**payload).clone()).await {
                 debug!("🚀 LOD: send to player {} for object {} ch{} failed: {}", player_id, gorc_id, channel, e);
             }
         }
@@ -438,4 +537,57 @@ fn resolve_tiers(
     let definition = definitions.get(object_type)?;
     let channel = definition.channel(channel)?;
     Some(channel.lod.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stream_of(gorc_id: GorcObjectId) -> (u64, Arc<Vec<u8>>, Option<Arc<Vec<u8>>>, u64) {
+        let stream = streams().get(&(gorc_id, 0, "move".to_string())).expect("stream queued");
+        (stream.version, Arc::clone(&stream.bytes), stream.bytes_sticky.clone(), stream.sticky_version)
+    }
+
+    fn data_of(bytes: &[u8]) -> serde_json::Value {
+        serde_json::from_slice::<serde_json::Value>(bytes).unwrap()["data"].clone()
+    }
+
+    #[test]
+    fn sticky_key_survives_being_overwritten_before_delivery() {
+        let id = GorcObjectId::new();
+        // The one packet of a reparent...
+        queue_sticky(id, 0, "player", "move", &json!({"position": 1, "parent_id": "planet"}), &["parent_id"]);
+        let (v1, bytes1, sticky1, sv1) = stream_of(id);
+        assert_eq!((v1, sv1), (1, 1));
+        // ...already carries the value: both variants are the same buffer.
+        assert!(Arc::ptr_eq(&bytes1, sticky1.as_ref().unwrap()));
+
+        // ...overwritten by the next position, which does not.
+        queue_sticky(id, 0, "player", "move", &json!({"position": 2}), &["parent_id"]);
+        let (v2, bytes2, sticky2, sv2) = stream_of(id);
+        assert_eq!((v2, sv2), (2, 1), "an unchanged sticky value does not bump sticky_version");
+        assert_eq!(data_of(&bytes2), json!({"position": 2}));
+        assert_eq!(data_of(sticky2.as_ref().unwrap()), json!({"position": 2, "parent_id": "planet"}));
+
+        // A new frame bumps the version recipients are measured against.
+        queue_sticky(id, 0, "player", "move", &json!({"position": 3, "parent_id": "city"}), &["parent_id"]);
+        let (_, _, _, sv3) = stream_of(id);
+        assert_eq!(sv3, 3);
+        queue_sticky(id, 0, "player", "move", &json!({"position": 4}), &["parent_id"]);
+        let (_, _, sticky4, _) = stream_of(id);
+        assert_eq!(data_of(sticky4.as_ref().unwrap())["parent_id"], json!("city"));
+        streams().remove(&(id, 0, "move".to_string()));
+    }
+
+    #[test]
+    fn plain_queue_has_no_sticky_variant() {
+        let id = GorcObjectId::new();
+        queue(id, 0, "player", "move", &json!({"position": 1, "parent_id": "planet"}));
+        queue(id, 0, "player", "move", &json!({"position": 2}));
+        let (_, bytes, sticky, sv) = stream_of(id);
+        assert!(sticky.is_none());
+        assert_eq!(sv, 0);
+        assert_eq!(data_of(&bytes), json!({"position": 2}));
+        streams().remove(&(id, 0, "move".to_string()));
+    }
 }

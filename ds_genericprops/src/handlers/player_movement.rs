@@ -369,13 +369,19 @@ pub fn handle_movement_request_sync(
                 // player_def.json asks for 30Hz on channel 0, so this is where
                 // that ceiling finally applies — and distant observers drop to
                 // whatever their lod tier allows.
+                // parent_id rides on the ONE packet of a reparent (Server._on_player_move
+                // sends it on change only), so it is declared sticky: overwritten in the
+                // queue before delivery, it would otherwise never reach the client, which
+                // then applies planet-local coordinates under the building it still
+                // believes it is in — and lands in space.
                 debug!("🚀 STEP 13: Queueing channel 0 movement payload");
-                crate::lod::queue(
+                crate::lod::queue_sticky(
                     gorc_id,
                     0, // Channel 0: Critical movement data
                     &object_instance.type_name,
                     "move",
                     &position_update,
+                    &["parent_id"],
                 );
 
                 // manage player out of godot server zone

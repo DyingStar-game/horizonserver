@@ -30,8 +30,8 @@ servers_mode = "development"
 #  * "players:10" => merge when the sum of their players is under 10
 #  * "tps:50"     => merge when both run above 50 ticks/s
 # A rule must hold for N consecutive 1 s samples before acting.
-split_rule = "players:30"
-merge_rule = "players:10"
+split_rule = "players:75"
+merge_rule = "players:25"
 split_after_samples = 10
 merge_after_samples = 15
 # Seconds to wait for the genericprops objects snapshot used to plan a split/merge.

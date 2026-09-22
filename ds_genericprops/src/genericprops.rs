@@ -37,13 +37,26 @@ impl GenericProps {
             uuid = Uuid::new_v4().to_string();
         }
 		let data = object_def.order_data(data).expect("REASON");
-        Self {
+        let this = Self {
 			object_def,
 			uuid,
 			global_position: Vec3::zero(),
 			data
-        }
+        };
+		crate::children::set_parent(&this.uuid, this.parent_id().as_deref());
+		this
     }
+
+	/// First non-empty `parent_id` across channels.
+	pub fn parent_id(&self) -> Option<String> {
+		self.data
+			.values()
+			.filter_map(|zone_data| zone_data.get("parent_id"))
+			.filter_map(|v| v.as_str())
+			.find(|s| !s.is_empty())
+			.map(|s| s.to_string())
+	}
+
 	pub fn update(&mut self, new_data: serde_json::Value) -> HashSet<u8> {
 		let mut out: HashSet<u8> = HashSet::new();
 		match new_data {
@@ -67,6 +80,11 @@ impl GenericProps {
 							}
 						}
 					}
+				}
+				// The index is keyed by uuid, so applying the same payload to a
+				// clone of this instance lands on the same entry: harmless.
+				if map.contains_key("parent_id") {
+					crate::children::set_parent(&self.uuid, self.parent_id().as_deref());
 				}
 				return out;
 			},

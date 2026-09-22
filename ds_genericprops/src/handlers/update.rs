@@ -81,69 +81,78 @@ async fn update_children_positions(
     events: Arc<EventSystem>,
 ) {
     let parent_id_str = parent_gorc_id.to_string();
-    
-    // Iterate through all objects to find children
-    for entry in props.iter() {
-        let child_gorc_id = *entry.value();
-        
-        // Skip if it's the parent itself
+
+    // Only the indexed children are visited, never the whole props map: this
+    // runs on every positioned update_property, and a scan of ~850 props at
+    // ~480 updates/s was enough to pin every handler thread on preprod.
+    for child_uuid in crate::children::children_of(&parent_id_str) {
+        let child_gorc_id = match props.get(&child_uuid) {
+            Some(gorc_id) => *gorc_id,
+            None => match GorcObjectId::from_str(&child_uuid) {
+                Ok(gorc_id) => gorc_id,
+                Err(_) => continue,
+            },
+        };
         if child_gorc_id == parent_gorc_id {
             continue;
         }
-        
-        // Get the child object instance
-        if let Some(mut child_instance) = gorc_instances.get_object(child_gorc_id).await {
-            if let Some(child_props) = child_instance.get_object_mut::<GenericProps>() {
-                // Check if this object has a parent_id property matching our parent
-                let has_matching_parent = child_props.data.values()
-                    .filter_map(|zone_data| zone_data.get("parent_id"))
-                    .any(|parent_id_value| {
-                        parent_id_value.as_str() == Some(&parent_id_str)
-                    });
-                
-                if has_matching_parent {
-                    // Get the child's local position from zone data (NOT global_position,
-                    // which would produce parent_new_pos + child_global_pos instead of
+
+        // Read what we need under the instance lock, without cloning the object.
+        let child = gorc_instances
+            .with_object_mut(child_gorc_id, |instance| {
+                instance.get_object::<GenericProps>().and_then(|child_props| {
+                    // The index is what brought us here; the stored parent_id is
+                    // the truth, so a stale entry is skipped rather than trusted.
+                    if child_props.parent_id().as_deref() != Some(parent_id_str.as_str()) {
+                        return None;
+                    }
+                    // The child's LOCAL position (NOT global_position, which would
+                    // produce parent_new_pos + child_global_pos instead of
                     // parent_new_pos + child_local_pos).
                     let child_local_position = child_props.data.values()
                         .filter_map(|zone_data| zone_data.get("position"))
                         .filter_map(|v| serde_json::from_value::<horizon_event_system::Vec3>(v.clone()).ok())
                         .next()
                         .unwrap_or(horizon_event_system::Vec3::zero());
-                    
-                    // Calculate the new global position
-                    let new_global_position = horizon_event_system::Vec3 {
-                        x: parent_position.x + child_local_position.x,
-                        y: parent_position.y + child_local_position.y,
-                        z: parent_position.z + child_local_position.z,
-                    };
-                    
-                    debug!(
-                        "🚀 GORC: Updating child object {} global position to {:?}",
-                        child_gorc_id.to_string(),
-                        new_global_position
-                    );
-                    
-                    // Update the child's position in the GORC system and send zone
-                    // entry/exit messages so nearby players get subscribed/unsubscribed.
-                    if let Err(e) = events.update_object_position(child_gorc_id, new_global_position).await {
-                        error!("🚀 GORC: ❌ Failed to update child object position with zone events: {}", e);
-                    }
+                    Some((child_local_position, child_props.type_name() == "player", child_props.uuid.clone()))
+                })
+            })
+            .await
+            .flatten();
+        let Some((child_local_position, is_player, uuid)) = child else {
+            continue;
+        };
 
-                    // A player riding this parent (seated in a vehicle) is also a VIEWER, and the
-                    // viewer position is a separate store (player_positions) that only
-                    // handle_player_movement refreshes — and a seated player, motionless in its
-                    // seat, sends no movement at all. Left alone, the viewer stayed at the
-                    // boarding point while the body drove away: 200 m later it "exited" the zone
-                    // of the very vehicle it sat in, and of its own body, and the client obeyed by
-                    // deleting both (a camera left behind a truck that stopped moving).
-                    if child_props.type_name() == "player" {
-                        if let Ok(player_id) = PlayerId::from_str(&child_props.uuid) {
-                            if let Err(e) = events.update_player_position(player_id, new_global_position).await {
-                                error!("🚀 GORC: ❌ Failed to update child player viewer position: {}", e);
-                            }
-                        }
-                    }
+        // Calculate the new global position
+        let new_global_position = horizon_event_system::Vec3 {
+            x: parent_position.x + child_local_position.x,
+            y: parent_position.y + child_local_position.y,
+            z: parent_position.z + child_local_position.z,
+        };
+
+        debug!(
+            "🚀 GORC: Updating child object {} global position to {:?}",
+            child_gorc_id.to_string(),
+            new_global_position
+        );
+
+        // Update the child's position in the GORC system and send zone
+        // entry/exit messages so nearby players get subscribed/unsubscribed.
+        if let Err(e) = events.update_object_position(child_gorc_id, new_global_position).await {
+            error!("🚀 GORC: ❌ Failed to update child object position with zone events: {}", e);
+        }
+
+        // A player riding this parent (seated in a vehicle) is also a VIEWER, and the
+        // viewer position is a separate store (player_positions) that only
+        // handle_player_movement refreshes — and a seated player, motionless in its
+        // seat, sends no movement at all. Left alone, the viewer stayed at the
+        // boarding point while the body drove away: 200 m later it "exited" the zone
+        // of the very vehicle it sat in, and of its own body, and the client obeyed by
+        // deleting both (a camera left behind a truck that stopped moving).
+        if is_player {
+            if let Ok(player_id) = PlayerId::from_str(&uuid) {
+                if let Err(e) = events.update_player_position(player_id, new_global_position).await {
+                    error!("🚀 GORC: ❌ Failed to update child player viewer position: {}", e);
                 }
             }
         }

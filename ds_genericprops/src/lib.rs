@@ -24,6 +24,7 @@ pub mod genericprops;
 pub mod events;
 pub mod objectdefinition;
 pub mod lod;
+pub mod children;
 // Internal imports
 mod handlers;
 use handlers::*;
@@ -532,6 +533,7 @@ impl GenericPropsPlugin {
 
                 gorc_instances.remove_player(event.player_id).await;
                 gorc_instances.unregister_object(gorc_id).await;
+                children::forget(&event.player_id.to_string());
 
                 // TODO create real delete event for servers
                 let mut prop_properties = HashMap::new();

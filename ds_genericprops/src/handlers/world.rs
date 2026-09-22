@@ -42,12 +42,7 @@ pub fn flatten_props(gp: &GenericProps) -> Map<String, Value> {
 
 /// First non-empty `parent_id` across channels (the idiom used everywhere in genericprops).
 pub fn read_parent_id(gp: &GenericProps) -> Option<String> {
-    gp.data
-        .values()
-        .filter_map(|zone_data| zone_data.get("parent_id"))
-        .filter_map(|v| v.as_str())
-        .find(|s| !s.is_empty())
-        .map(|s| s.to_string())
+    gp.parent_id()
 }
 
 /// Own local position + parent, as stored on the instance.
@@ -167,39 +162,12 @@ pub async fn full_item(gorc: &Arc<GorcInstanceManager>, uuid: &str) -> Option<Ge
 /// seated players, the crate on the shelf in the truck...), parents before their
 /// children so a receiver can create them in order.
 pub async fn descendants_of(
-    props: &DashMap<String, GorcObjectId>,
+    _props: &DashMap<String, GorcObjectId>,
     gorc: &Arc<GorcInstanceManager>,
     root_uuid: &str,
 ) -> Vec<GenericPropsRequest> {
-    let mut found: Vec<(usize, String)> = Vec::new();
-    let uuids: Vec<String> = props.iter().map(|e| e.key().clone()).collect();
-    for uuid in uuids {
-        if uuid == root_uuid {
-            continue;
-        }
-        let mut next = match GorcObjectId::from_str(&uuid) {
-            Ok(id) => gorc.with_object_mut(id, |i| i.get_object::<GenericProps>().and_then(read_parent_id)).await.flatten(),
-            Err(_) => None,
-        };
-        let mut depth = 1usize;
-        while let Some(pid) = next.take() {
-            if pid == root_uuid {
-                found.push((depth, uuid.clone()));
-                break;
-            }
-            if depth >= MAX_CHAIN_DEPTH {
-                break;
-            }
-            depth += 1;
-            next = match GorcObjectId::from_str(&pid) {
-                Ok(id) => gorc.with_object_mut(id, |i| i.get_object::<GenericProps>().and_then(read_parent_id)).await.flatten(),
-                Err(_) => None,
-            };
-        }
-    }
-    found.sort_by_key(|(depth, _)| *depth);
-    let mut items = Vec::with_capacity(found.len());
-    for (_, uuid) in found {
+    let mut items = Vec::new();
+    for (_, uuid) in crate::children::descendants_of(root_uuid, MAX_CHAIN_DEPTH) {
         if let Some(item) = full_item(gorc, &uuid).await {
             items.push(item);
         }

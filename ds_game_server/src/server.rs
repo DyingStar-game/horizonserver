@@ -15,7 +15,7 @@ use ds_common::world::{ObjectWorld, Point3};
 use ds_common::zone::{is_world_object, zone_containing, zones_contain, zones_label, Zone};
 use fake::{faker::lorem::en::Word, faker::number::en::NumberWithFormat, Fake};
 use horizon_event_system::{
-    ClientConnectionRef, ClientEventWrapper, EventSystem, GorcObjectId, PlayerId, PluginError, ServerContext, Vec3,
+    ClientConnectionRef, ClientEventWrapper, EventSystem, GorcObjectId, PlayerDisconnectedEvent, PlayerId, PluginError, ServerContext, Vec3,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -294,6 +294,35 @@ impl Server {
         self.managed_players.lock().unwrap().iter().any(|p| p == uuid)
     }
 
+    /// Tell Godot to remove a player this server manages, then forget it here.
+    /// `item` is the genericprops item of the player (`object_uuid` is what
+    /// Godot keys on). A player not managed here is skipped, so the same quit
+    /// can safely reach this server through several paths.
+    fn quit_player(&self, item: serde_json::Value) {
+        let object_uuid = item["object_uuid"].as_str().unwrap_or_default().to_string();
+        if !self.is_running() || !self.is_managed_player(&object_uuid) {
+            debug!("🔧 DsGameServerPlugin: Player {} is not on this server, skipping player_quit.", object_uuid);
+            return;
+        }
+        info!("🔧 DsGameServerPlugin: Received player_quit event: {:?}", item);
+
+        let server = self.clone();
+        crate::plugin_rt().spawn(async move {
+            let result = spawn_player::handle_player_quit(item, Arc::clone(&server.websocket_sender)).await;
+            if result.is_ok() {
+                let mut players = server.managed_players.lock().unwrap();
+                if let Some(pos) = players.iter().position(|x| x == &object_uuid) {
+                    players.remove(pos);
+                    info!("🔧 DsGameServerPlugin: Removed player {} from managed_players after quit", object_uuid);
+                }
+                server.managed_objects.lock().unwrap().remove(&object_uuid);
+                player_movement::forget_velocity(&object_uuid);
+            } else {
+                error!("🔧 DsGameServerPlugin: Failed to send remove_player for {}", object_uuid);
+            }
+        });
+    }
+
     pub async fn register_handlers(&self, context: Arc<dyn ServerContext>) -> Result<(), PluginError> {
         if self.handlers_registered.swap(true, Ordering::SeqCst) {
             debug!("🔧 DsGameServerPlugin: handlers already registered for {}", self.uuid);
@@ -465,30 +494,31 @@ impl Server {
         // --- gameserverplugin:player_quit
         {
             let server = self.clone();
-            let rt = crate::plugin_rt();
             events.on_plugin("gameserverplugin", "player_quit", move |event: serde_json::Value| {
-                let object_uuid = event["item"]["object_uuid"].as_str().unwrap_or_default().to_string();
-                if !server.is_running() || !server.is_managed_player(&object_uuid) {
-                    debug!("🔧 DsGameServerPlugin: Player {} is not on this server, skipping player_quit.", object_uuid);
-                    return Ok(());
-                }
-                info!("🔧 DsGameServerPlugin: Received player_quit event: {:?}", event);
+                server.quit_player(event["item"].clone());
+                Ok(())
+            }).await
+            .map_err(|e| PluginError::ExecutionError(e.to_string()))?;
+        }
 
-                let server = server.clone();
-                rt.spawn(async move {
-                    let result = spawn_player::handle_player_quit(event["item"].clone(), Arc::clone(&server.websocket_sender)).await;
-                    if result.is_ok() {
-                        let mut players = server.managed_players.lock().unwrap();
-                        if let Some(pos) = players.iter().position(|x| x == &object_uuid) {
-                            players.remove(pos);
-                            info!("🔧 DsGameServerPlugin: Removed player {} from managed_players after quit", object_uuid);
-                        }
-                        server.managed_objects.lock().unwrap().remove(&object_uuid);
-                        player_movement::forget_velocity(&object_uuid);
-                    } else {
-                        error!("🔧 DsGameServerPlugin: Failed to send remove_player for {}", object_uuid);
-                    }
-                });
+        // --- core:player_disconnected
+        //
+        // genericprops turns this core event into the `player_quit` above, but it
+        // does so from a task spawned on the luminal pool. When that pool is
+        // saturated (2026-09-21: ~480 update_property/s pinned every worker) the
+        // task never gets its turn, the player stays in managed_players and every
+        // serverinfo tick warns about a client that is gone. Handle the core event
+        // here as well: same cleanup, on this plugin's own runtime, and whichever
+        // of the two runs second is a no-op (`is_managed_player` is false by then).
+        {
+            let server = self.clone();
+            events.on_core("player_disconnected", move |event: PlayerDisconnectedEvent| {
+                server.quit_player(json!({
+                    "object_type": "player",
+                    "object_uuid": event.player_id.to_string(),
+                    "object_data": {},
+                    "broadcast_only": null,
+                }));
                 Ok(())
             }).await
             .map_err(|e| PluginError::ExecutionError(e.to_string()))?;

@@ -62,8 +62,9 @@ pub fn handle_object_delete(
 			};
 			
 			if let Some(gorc_id) = gorc_id_opt {
-				// Remove from props map
+				// Remove from props map and from the parent → children index
 				props_clone.remove(&req_data.object_uuid);
+				crate::children::forget(&req_data.object_uuid);
 				// Remove the object instance from GORC
 				if let Err(e) = events.emit_gorc_instance(
 					gorc_id,

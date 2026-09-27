@@ -37,7 +37,8 @@
 				"horn_special",
 				"mass",
 				"cargo_mass",
-				"suspension"
+				"suspension",
+				"odometer_km"
 			]
 		},
 		{

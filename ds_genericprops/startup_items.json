@@ -8834,5 +8834,24 @@
         },
         "object_type": "mining_depot",
         "object_uuid": null
+    },
+    {
+        "object_type": "station",
+        "object_uuid": "38db93fd-3046-5df0-1c23-0c58dcae9a74",
+        "object_data": {
+            "name": "Palaka-Pital",
+            "parent_id": "_planet_SandBox",
+            "scenename": "scenes/_universe/environment/space/stations/orbital_station.tscn",
+            "position": {
+                "x": 6525794.88240895,
+                "y": 1748581.46871263,
+                "z": 0.0
+            },
+            "rotation": {
+                "x": -0.85869387270554,
+                "y": -0.315631704542997,
+                "z": -1.16353628299157
+            }
+        }
     }
 ]

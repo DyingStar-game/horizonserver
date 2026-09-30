@@ -608,8 +608,8 @@ impl Server {
                 }
                 let server = server.clone();
                 rt.spawn(async move {
-                    // The prop itself: add_prop, which the Godot server treats as "adopt" when
-                    // it already holds a zone-frozen copy (pose + state re-applied, unfrozen).
+                    // The prop itself: add_prop. The Godot server creates it from this data (it
+                    // keeps no copy of out-of-zone props); an old copy it still held is adopted.
                     let _ = spawn_prop::handle_spawn_prop(initial_objects::item_on_wire(&item), Arc::clone(&server.websocket_sender)).await;
                     for child in &children {
                         if child.object_type == "player" {
@@ -755,8 +755,8 @@ impl Server {
                         // The player was moving when they crossed: give the new server the
                         // velocity the client will not send again until it changes.
                         let _ = player_movement::replay_velocity(&object_uuid, &server.websocket_sender);
-                        // Then what they carry, parented under them: the Godot server adopts
-                        // its zone-frozen copy and puts it back in the player's hands.
+                        // Then what they carry, parented under them: the Godot server creates it
+                        // in the player's hands (or adopts a copy it still held).
                         for child in &children {
                             server.managed_objects.lock().unwrap().insert(child.object_uuid.clone());
                             let _ = spawn_prop::handle_spawn_prop(initial_objects::item_on_wire(child), Arc::clone(&server.websocket_sender)).await;
@@ -842,6 +842,7 @@ impl Server {
                             objects_number: prop_data["objects_number"].as_u64().map(|v| v as u32).unwrap_or_default(),
                             players_number: prop_data["players_number"].as_u64().map(|v| v as u16).unwrap_or_default(),
                             scenes_number: prop_data["scenes_number"].as_u64().map(|v| v as u32).unwrap_or_default(),
+                            scenes_number_actives: prop_data["scenes_number_actives"].as_u64().map(|v| v as u32).unwrap_or_default(),
                             server_name: self.server_name.clone(),
                         };
                         *self.last_info.lock().unwrap() = Some((data.clone(), Instant::now()));

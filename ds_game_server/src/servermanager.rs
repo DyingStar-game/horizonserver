@@ -37,7 +37,10 @@ pub struct ServerInfo {
     pub chunks_loading: u32,
     pub objects_number: u32,
     pub players_number: u16,
+    /// Props the server holds, instantiated or asleep in its registry.
     pub scenes_number: u32,
+    /// Scenes actually instantiated (in the Godot tree).
+    pub scenes_number_actives: u32,
     pub server_name: String,
 }
 
@@ -859,6 +862,7 @@ impl ServerManager {
                 "objects_number": serverinfo.objects_number,
                 "players_number": serverinfo.players_number,
                 "scenes_number": serverinfo.scenes_number,
+                "scenes_number_actives": serverinfo.scenes_number_actives,
                 "zones": server.zones(),
                 "name": serverinfo.server_name,
             },
@@ -1002,9 +1006,8 @@ impl MeshWorker {
             error!("[mesh] split aborted: could not start {}", child.server_name);
             return result;
         }
-        // The child gets the whole world (props first, frozen when outside its
-        // zones, then the players once the ground is ready) and manages what is in
-        // its zones; only then does the parent shrink and freeze what it lost —
+        // The child gets what lies in its zones (props first, then the players once
+        // the ground is ready) and manages it; only then does the parent shrink and freeze what it lost —
         // judged on the snapshot the child's players came from, not the one taken
         // before the warm-up (see hand_over).
         let current = self.hand_over(child, &items, &plan.give, self.warmup()).await.unwrap_or(items);

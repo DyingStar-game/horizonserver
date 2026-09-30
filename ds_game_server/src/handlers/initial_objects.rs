@@ -4,6 +4,8 @@
 //! Every item carries `object_data["_world"]` (space / planet + local position),
 //! injected by ds_genericprops; membership is `zones_contain(zones, world)`.
 //! Planets and stars are worlds, not zone content: always sent, never frozen.
+//! Only the items inside the zones are sent: the Godot server keeps no copy of what
+//! another server simulates (its PropRegistry forgets out-of-zone items).
 
 use ds_common::events::GenericPropsRequest;
 use ds_common::world::ObjectWorld;
@@ -60,9 +62,14 @@ fn untrack(item: &GenericPropsRequest, server: &Server) {
     }
 }
 
-/// Sends every item to the server as `initial_object`; items outside `zones` are
-/// frozen right after (Godot needs them for collisions but must not simulate them),
-/// items inside become managed. Ends with `initial_object_end`.
+/// Sends the world objects and the items inside `zones` to the server as
+/// `initial_object` (those items become managed); items outside `zones` are not sent
+/// at all. Ends with `initial_object_end`.
+///
+/// Outside items used to be sent and then frozen, so Godot held a copy for
+/// collisions. Godot now drops them on arrival (PropRegistry), so sending them only
+/// cost bandwidth and JSON parsing, twice per item (initial_object + freeze_object),
+/// for most of the world on every server.
 pub fn handle_initial_object(
     items: &HashMap<String, GenericPropsRequest>,
     server: &Server,
@@ -72,29 +79,22 @@ pub fn handle_initial_object(
     info!("[initial_object] sending {} items, zones=[{}]", items.len(), zones_label(zones));
 
     let mut sent = 0usize;
-    let mut frozen = 0usize;
+    let mut skipped = 0usize;
     for item in items.values() {
-        let wire = item_on_wire(item);
+        let world_object = is_world_object(&item.object_type);
+        if !world_object && !is_member(item, zones) {
+            debug!("[initial_object] item {} ({}) is outside the zones, not sent", item.object_uuid, item.object_type);
+            skipped += 1;
+            continue;
+        }
         send_ws(&websocket, "initial_object", &json!({
             "namespace": "server",
             "event": "initial_object",
-            "data": wire,
+            "data": item_on_wire(item),
         }))?;
         sent += 1;
-
-        if is_world_object(&item.object_type) {
-            continue;
-        }
-        if is_member(item, zones) {
+        if !world_object {
             track(item, server);
-        } else {
-            debug!("[initial_object] item {} ({}) is outside the zones, freezing", item.object_uuid, item.object_type);
-            send_ws(&websocket, "freeze_object", &json!({
-                "namespace": "server",
-                "event": "freeze_object",
-                "data": wire,
-            }))?;
-            frozen += 1;
         }
     }
 
@@ -104,8 +104,8 @@ pub fn handle_initial_object(
         "data": {},
     }))?;
     info!(
-        "[initial_object] done: sent={} frozen={} players managed now: {:?}",
-        sent, frozen, server.managed_players.lock().unwrap()
+        "[initial_object] done: sent={} outside the zones (not sent)={} players managed now: {:?}",
+        sent, skipped, server.managed_players.lock().unwrap()
     );
     Ok(())
 }

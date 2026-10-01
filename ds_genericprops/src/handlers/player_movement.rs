@@ -203,8 +203,13 @@ pub fn handle_movement_request_sync(
             let move_data = match serde_json::from_value::<PlayerMoveRequest>(event["object_data"].clone()) {
                 Ok(data) => data,
                 Err(e) => {
+                    // Skip to the next packet: returning would leave the mailbox
+                    // marked `draining` forever and drop every later move of this player.
                     error!("🚀 STEP 4: ❌ Failed to parse PlayerMoveRequest: {}", e);
-                    return;
+                    match next_move(gorc_id) {
+                        Some(next) => { event = next; continue; }
+                        None => break,
+                    }
                 }
             };
             debug!("🚀 STEP 4: ✅ Parsed PlayerMoveRequest: {:?}", move_data);
@@ -464,7 +469,7 @@ pub fn handle_movement_request_sync(
                                         "children": children,
                                         "global_position": final_position,
                                     }),
-                                ).await.unwrap();
+                                ).await.unwrap_or_else(|e| error!("🚀 Failed to emit player_out_of_zone: {}", e));
                             }
                         }
 

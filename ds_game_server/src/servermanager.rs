@@ -173,6 +173,8 @@ const SERVER_SILENCE_TIMEOUT: Duration = Duration::from_secs(60);
 /// while: Godot grants 5 s of grace after a zone change, then erases the players
 /// it lost a few per second. Their samples are ignored that long.
 const SETTLE_AFTER_OP: Duration = Duration::from_secs(15);
+/// A serverinfo older than this (sent once a second) cannot back a merge.
+const MERGE_SAMPLE_MAX_AGE: Duration = Duration::from_secs(3);
 /// Time allowed for the websocket handshake of a reconnection attempt.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// How often the manager wakes up to check for silent servers when idle.
@@ -835,7 +837,19 @@ impl ServerManager {
                 continue;
             }
             let (Some(sp), Some(sc)) = (self.samples.get(&p.uuid), self.samples.get(&c.uuid)) else { continue };
-            let hit = rules.merge.merge_hit((sp.tps, sp.players), (sc.tps, sc.players));
+            // A stale sample says nothing about now: a Godot server absorbing a
+            // hand-over burst stops reporting for tens of seconds.
+            let fresh = |s: &ServerSamples| s.last_seen.map_or(false, |at| at.elapsed() < MERGE_SAMPLE_MAX_AGE);
+            if !fresh(sp) || !fresh(sc) {
+                self.split_history[idx].merge_hits = 0;
+                continue;
+            }
+            // Godot counts a player once it has instantiated it, which lags the
+            // hand-over by up to two minutes under a props burst: its count alone
+            // reads ~0 right after a split and merged 200+ players back onto one
+            // server (preprod, 2026-10-01). Horizon's own count is what was handed over.
+            let players = |s: &ServerSamples, server: &Server| s.players.max(server.players_count().min(u16::MAX as usize) as u16);
+            let hit = rules.merge.merge_hit((sp.tps, players(sp, &p)), (sc.tps, players(sc, &c)));
             let record = &mut self.split_history[idx];
             record.merge_hits = if hit { record.merge_hits + 1 } else { 0 };
             if record.merge_hits >= rules.merge_after && to_merge.is_none() {

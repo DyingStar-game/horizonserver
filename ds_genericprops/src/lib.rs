@@ -388,8 +388,11 @@ impl GenericPropsPlugin {
             handle_snapshot.spawn(async move {
                 let mut items: HashMap<String, GenericPropsRequest> = HashMap::new();
 
-                for entry in props.iter() {
-                    let prop_uuid = entry.key().clone();
+                // Keys first: iterating the DashMap holds a shard read lock, and the
+                // loop awaits on GORC — any insert/remove of a prop on that shard
+                // (a create, a player joining) would block its thread until then.
+                let uuids: Vec<String> = props.iter().map(|entry| entry.key().clone()).collect();
+                for prop_uuid in uuids {
                     let Ok(gorc_id) = GorcObjectId::from_str(&prop_uuid) else { continue };
                     // Snapshot the instance data under the lock, resolve the world after
                     // (resolve_world awaits on GORC for every ancestor).

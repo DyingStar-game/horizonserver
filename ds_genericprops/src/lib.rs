@@ -155,6 +155,16 @@ impl SimplePlugin for GenericPropsPlugin {
             "trace" => tracing::Level::TRACE,
             _ => tracing::Level::INFO,
         };
+
+        let defaults = new_player::VillageConfig::default();
+        new_player::set_village_config(new_player::VillageConfig {
+            max_players_per_village: config.get_value("max_players_per_village")
+                .and_then(|v| v.as_integer())
+                .map_or(defaults.max_players_per_village, |v| v.max(0) as usize),
+            prespawn_ratio: config.get_value("village_prespawn_ratio")
+                .and_then(|v| v.as_float())
+                .unwrap_or(defaults.prespawn_ratio),
+        });
         tracing_subscriber::fmt()
             .with_max_level(filter_level)
             .try_init()

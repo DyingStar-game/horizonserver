@@ -48,10 +48,12 @@ split_ready_tps = 58
 log_level = "info"
 # First connection: a new player gets an apartment in a mining village holding at
 # most max_players_per_village players (the buildings may physically hold more).
-# Once a village reaches village_prespawn_ratio of that cap and no other spawned
-# village has room, Godot is asked to spawn the habs of the closest unspawned one.
+# village_free_reserve places (under that cap) are kept ahead of the arrivals: when
+# the villages spawned or requested offer fewer, Godot is asked to spawn the habs of
+# the closest unspawned ones (several at once if needed). A village takes Godot
+# ~15 s to minutes to build: players arriving with no room get no apartment.
 max_players_per_village = 50
-village_prespawn_ratio = 0.8
+village_free_reserve = 100
 
 [ds_player_authentication]
 log_level = "info"

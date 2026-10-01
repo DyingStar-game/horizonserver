@@ -20,14 +20,16 @@ fn apartment_lock() -> &'static Mutex<()> {
 pub struct VillageConfig {
     /// Players a village takes from solo players, whatever room its buildings physically have.
     pub max_players_per_village: usize,
-    /// Fill ratio of that cap from which the next village is requested to Godot, so its habs
-    /// exist before the current village is full.
-    pub prespawn_ratio: f64,
+    /// Places (under the cap) kept ahead of the arrivals: whenever the villages already
+    /// spawned or requested offer fewer, the closest unspawned ones are requested to Godot.
+    /// Godot needs from ~15 s to minutes (during a mesh hand-over) to create a village's
+    /// habs; every player arriving meanwhile with no room gets no apartment.
+    pub free_reserve: usize,
 }
 
 impl Default for VillageConfig {
     fn default() -> Self {
-        Self { max_players_per_village: 50, prespawn_ratio: 0.8 }
+        Self { max_players_per_village: 50, free_reserve: 100 }
     }
 }
 
@@ -160,19 +162,53 @@ fn last_full_village(villages: &[VillageState]) -> Option<&VillageState> {
         .max_by(|a, b| a.occupancy.cmp(&b.occupancy).then_with(|| b.name.cmp(&a.name)))
 }
 
-/// The closest village to `reference` whose habs were neither spawned nor requested yet.
-/// None while a requested village is still waiting for its habs: one village at a time.
-fn village_to_spawn<'a>(villages: &'a [VillageState], reference: &VillageState) -> Option<&'a VillageState> {
-    if villages.iter().any(VillageState::is_spawn_pending) {
-        return None;
-    }
+/// Places solo players can still get: the room under the cap of the villages with habs,
+/// plus a full cap for each village whose habs were requested and have not arrived yet.
+fn free_reserve(villages: &[VillageState], max: usize) -> usize {
     villages
         .iter()
-        .filter(|v| v.uuid != reference.uuid && !v.is_spawn_pending_or_done())
-        .min_by(|a, b| {
-            distance_squared(a.position, reference.position)
-                .total_cmp(&distance_squared(b.position, reference.position))
+        .map(|v| {
+            if !v.buildings.is_empty() {
+                v.free.min(max.saturating_sub(v.occupancy))
+            } else if v.is_spawn_pending() {
+                max
+            } else {
+                0
+            }
         })
+        .sum()
+}
+
+/// The unspawned villages to request so the reserve gets back to `target`, closest to
+/// `reference` first. Several can be requested at once: a wave of arrivals outruns one
+/// village at a time (preprod, 2026-10-01: 16 players without apartment in 14 s).
+fn villages_to_request<'a>(
+    villages: &'a [VillageState],
+    reference: &VillageState,
+    max: usize,
+    target: usize,
+) -> Vec<&'a VillageState> {
+    let mut reserve = free_reserve(villages, max);
+    if reserve >= target || max == 0 {
+        return Vec::new();
+    }
+    let mut candidates: Vec<&VillageState> = villages
+        .iter()
+        .filter(|v| v.uuid != reference.uuid && !v.is_spawn_pending_or_done())
+        .collect();
+    candidates.sort_by(|a, b| {
+        distance_squared(a.position, reference.position)
+            .total_cmp(&distance_squared(b.position, reference.position))
+    });
+    let mut chosen = Vec::new();
+    for village in candidates {
+        if reserve >= target {
+            break;
+        }
+        reserve += max;
+        chosen.push(village);
+    }
+    chosen
 }
 
 /// Every poi_village with the occupancy of the spawnbuildings linked to it by `poi_uuid`.
@@ -231,56 +267,58 @@ async fn collect_villages(gorc_instances: &GorcInstanceManager) -> Vec<VillageSt
     villages
 }
 
-/// Mark the closest unspawned village to `reference` as `spawn_requested`: Godot (the server
-/// owning its zone) then spawns its habs, which come back as spawnbuildings with its poi_uuid.
-async fn request_next_village(
+/// Keep `free_reserve` places ahead of the arrivals: mark the closest unspawned villages to
+/// `reference` as `spawn_requested`. Godot (the server owning each zone) then spawns their
+/// habs, which come back as spawnbuildings with the village's poi_uuid.
+async fn request_villages(
     gorc_instances: &GorcInstanceManager,
     events: &EventSystem,
     villages: &[VillageState],
     reference: &VillageState,
 ) {
-    if let Some(pending) = villages.iter().find(|v| v.is_spawn_pending()) {
-        debug!(
-            "plugin genericprops (new_player): village {} already requested, waiting for its habs",
-            pending.name
-        );
+    let config = village_config();
+    let targets = villages_to_request(villages, reference, config.max_players_per_village, config.free_reserve);
+    if targets.is_empty() {
+        let reserve = free_reserve(villages, config.max_players_per_village);
+        if reserve < config.free_reserve {
+            warn!(
+                "plugin genericprops (new_player): no unspawned poi_village left to request near {} ({} free places, reserve {})",
+                reference.name, reserve, config.free_reserve
+            );
+        }
         return;
     }
-    let Some(target) = village_to_spawn(villages, reference) else {
-        warn!(
-            "plugin genericprops (new_player): no unspawned poi_village left to request near {}",
-            reference.name
+    for target in targets {
+        info!(
+            "plugin genericprops (new_player): requesting the habs of village {} ({}) near {} (free places: {}, reserve: {})",
+            target.name, target.uuid, reference.name,
+            free_reserve(villages, config.max_players_per_village), config.free_reserve
         );
-        return;
-    };
-    info!(
-        "plugin genericprops (new_player): requesting the habs of village {} ({}) near {}",
-        target.name, target.uuid, reference.name
-    );
 
-    // In-memory first, still under the assignment lock: the next player sees the request
-    // and does not send it again.
-    if let Some(gorc_id) = target.gorc_id {
-        gorc_instances
-            .with_object_mut(gorc_id, |instance| {
-                if let Some(village) = instance.get_object_mut::<GenericProps>() {
-                    village.update(serde_json::json!({ "spawn_requested": true }));
-                }
-            })
-            .await;
-    }
+        // In-memory first, still under the assignment lock: the next player sees the request
+        // and does not send it again.
+        if let Some(gorc_id) = target.gorc_id {
+            gorc_instances
+                .with_object_mut(gorc_id, |instance| {
+                    if let Some(village) = instance.get_object_mut::<GenericProps>() {
+                        village.update(serde_json::json!({ "spawn_requested": true }));
+                    }
+                })
+                .await;
+        }
 
-    // Persisted, and forwarded to the Godot server owning the village's zone.
-    if let Err(e) = events.emit_plugin(
-        "genericprops",
-        "update_object_from_external",
-        &serde_json::json!({
-            "object_type": "poi_village",
-            "object_uuid": target.uuid,
-            "object_data": { "spawn_requested": true },
-        }),
-    ).await {
-        error!("plugin genericprops (new_player): failed to request village {}: {}", target.name, e);
+        // Persisted, and forwarded to the Godot server owning the village's zone.
+        if let Err(e) = events.emit_plugin(
+            "genericprops",
+            "update_object_from_external",
+            &serde_json::json!({
+                "object_type": "poi_village",
+                "object_uuid": target.uuid,
+                "object_data": { "spawn_requested": true },
+            }),
+        ).await {
+            error!("plugin genericprops (new_player): failed to request village {}: {}", target.name, e);
+        }
     }
 }
 
@@ -448,23 +486,26 @@ pub async fn handle_new_player(
                     }
                 }
 
-                // Request the next village before this one is full, so its habs exist
-                // by the time it is.
-                let filling = (village.occupancy + 1) as f64 >= max as f64 * config.prespawn_ratio;
-                let other_room = villages.iter().any(|v| v.uuid != village.uuid && v.has_room_under_cap(max));
-                if found && filling && !other_room {
-                    request_next_village(&gorc_instances, &events, &villages, village).await;
+                // Keep the reserve of places ahead of the next arrivals, counting the
+                // apartment just given.
+                let mut after = villages.clone();
+                if found {
+                    if let Some(v) = after.iter_mut().find(|v| v.uuid == village.uuid) {
+                        v.occupancy += 1;
+                        v.free = v.free.saturating_sub(1);
+                    }
                 }
+                request_villages(&gorc_instances, &events, &after, village).await;
             }
             None => {
                 // Solo players never go past the cap: the room left in the buildings is
                 // kept for players joining their friends / group.
                 match last_full_village(&villages) {
-                    Some(reference) => request_next_village(&gorc_instances, &events, &villages, reference).await,
+                    Some(reference) => request_villages(&gorc_instances, &events, &villages, reference).await,
                     None => warn!("plugin genericprops (new_player): no poi_village with spawnbuildings"),
                 }
                 warn!(
-                    "plugin genericprops (new_player): every village is at its cap of {} players, player {} gets no apartment (raise village_prespawn_ratio?)",
+                    "plugin genericprops (new_player): every village is at its cap of {} players, player {} gets no apartment (raise village_free_reserve?)",
                     max, player_uuid
                 );
             }
@@ -571,22 +612,38 @@ mod tests {
     }
 
     #[test]
-    fn requests_closest_unspawned_village() {
-        let mut requested = village("mining_village_02", 0, 0, 5.0);
-        requested.spawn_requested = true;
+    fn requests_closest_unspawned_villages_until_the_reserve_is_met() {
         let villages = [
-            village("mining_village_01", 50, 10, 0.0),
-            requested,
+            village("mining_village_01", 45, 10, 0.0),
+            village("mining_village_02", 0, 0, 5.0),
             village("mining_village_03", 0, 0, 20.0),
             village("mining_village_04", 0, 0, 8.0),
         ];
         let reference = last_full_village(&villages).unwrap();
         assert_eq!(reference.name, "mining_village_01");
-        // mining_village_02 is still waiting for its habs: nothing else is requested meanwhile.
-        assert!(village_to_spawn(&villages, reference).is_none());
+        assert_eq!(free_reserve(&villages, 50), 5);
+        // 5 free places, 100 wanted: two villages at once, closest first.
+        let names: Vec<&str> = villages_to_request(&villages, reference, 50, 100).iter().map(|v| v.name.as_str()).collect();
+        assert_eq!(names, ["mining_village_02", "mining_village_04"]);
+        // Reserve already met: nothing.
+        assert!(villages_to_request(&villages, reference, 50, 5).is_empty());
+    }
 
-        let mut arrived = villages.clone();
-        arrived[1].buildings.push(GorcObjectId::new());
-        assert_eq!(village_to_spawn(&arrived, reference).unwrap().name, "mining_village_04");
+    #[test]
+    fn requested_village_counts_as_a_full_cap_until_its_habs_arrive() {
+        let mut requested = village("mining_village_02", 0, 0, 5.0);
+        requested.spawn_requested = true;
+        let villages = [
+            village("mining_village_01", 45, 10, 0.0),
+            requested,
+            village("mining_village_03", 0, 0, 20.0),
+            village("mining_village_04", 0, 0, 8.0),
+        ];
+        assert_eq!(free_reserve(&villages, 50), 55);
+        let reference = &villages[0];
+        // 55 < 100: one more, never the one already requested.
+        let names: Vec<&str> = villages_to_request(&villages, reference, 50, 100).iter().map(|v| v.name.as_str()).collect();
+        assert_eq!(names, ["mining_village_04"]);
+        assert!(villages_to_request(&villages, reference, 50, 50).is_empty());
     }
 }

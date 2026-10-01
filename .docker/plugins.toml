@@ -46,6 +46,12 @@ split_ready_tps = 58
 
 [ds_genericprops]
 log_level = "info"
+# A new player gets an apartment in a mining village holding at most
+# max_players_per_village players; village_free_reserve places are kept ahead of
+# the arrivals by asking Godot for the closest unspawned villages (see the root
+# plugins.toml).
+max_players_per_village = 50
+village_free_reserve = 100
 
 [ds_player_authentication]
 log_level = "info"

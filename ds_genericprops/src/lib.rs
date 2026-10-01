@@ -161,9 +161,9 @@ impl SimplePlugin for GenericPropsPlugin {
             max_players_per_village: config.get_value("max_players_per_village")
                 .and_then(|v| v.as_integer())
                 .map_or(defaults.max_players_per_village, |v| v.max(0) as usize),
-            prespawn_ratio: config.get_value("village_prespawn_ratio")
-                .and_then(|v| v.as_float())
-                .unwrap_or(defaults.prespawn_ratio),
+            free_reserve: config.get_value("village_free_reserve")
+                .and_then(|v| v.as_integer())
+                .map_or(defaults.free_reserve, |v| v.max(0) as usize),
         });
         tracing_subscriber::fmt()
             .with_max_level(filter_level)

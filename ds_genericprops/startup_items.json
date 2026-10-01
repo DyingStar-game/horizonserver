@@ -5,6 +5,7 @@
         "object_data": {
             "name": "tarsis_4-1001",
             "parent_id": "_planet_SandBox",
+            "poi_uuid": "4d4cd92f-75c1-49d7-9aa9-462b4b486e2f",
             "scenename": "scenes/_universe/structures/buildings/spawn_building.tscn",
             "position": {
                 "x": 4450602.998,
@@ -34,6 +35,7 @@
         "object_data": {
             "name": "tarsis_4-1002",
             "parent_id": "_planet_SandBox",
+            "poi_uuid": "4d4cd92f-75c1-49d7-9aa9-462b4b486e2f",
             "scenename": "scenes/_universe/structures/buildings/spawn_building.tscn",
             "position": {
                 "x": 4450600.271,
@@ -63,6 +65,7 @@
         "object_data": {
             "name": "tarsis_4-1003",
             "parent_id": "_planet_SandBox",
+            "poi_uuid": "4d4cd92f-75c1-49d7-9aa9-462b4b486e2f",
             "scenename": "scenes/_universe/structures/buildings/spawn_building.tscn",
             "position": {
                 "x": 4450597.544,
@@ -92,6 +95,7 @@
         "object_data": {
             "name": "tarsis_4-1004",
             "parent_id": "_planet_SandBox",
+            "poi_uuid": "4d4cd92f-75c1-49d7-9aa9-462b4b486e2f",
             "scenename": "scenes/_universe/structures/buildings/spawn_building.tscn",
             "position": {
                 "x": 4450609.892,
@@ -121,6 +125,7 @@
         "object_data": {
             "name": "tarsis_4-1005",
             "parent_id": "_planet_SandBox",
+            "poi_uuid": "4d4cd92f-75c1-49d7-9aa9-462b4b486e2f",
             "scenename": "scenes/_universe/structures/buildings/spawn_building.tscn",
             "position": {
                 "x": 4450611.851,
@@ -151,6 +156,7 @@
         "object_data": {
             "name": "tarsis_4-1008",
             "parent_id": "_planet_SandBox",
+            "poi_uuid": "4d4cd92f-75c1-49d7-9aa9-462b4b486e2f",
             "scenename": "scenes/_universe/structures/buildings/spawn_building.tscn",
             "position": {
                 "x": 4450621.172,
@@ -180,6 +186,7 @@
         "object_data": {
             "name": "tarsis_4-1009",
             "parent_id": "_planet_SandBox",
+            "poi_uuid": "4d4cd92f-75c1-49d7-9aa9-462b4b486e2f",
             "scenename": "scenes/_universe/structures/buildings/spawn_building.tscn",
             "position": {
                 "x": 4450617.158,
@@ -209,6 +216,7 @@
         "object_data": {
             "name": "tarsis_4-1010",
             "parent_id": "_planet_SandBox",
+            "poi_uuid": "4d4cd92f-75c1-49d7-9aa9-462b4b486e2f",
             "scenename": "scenes/_universe/structures/buildings/spawn_building.tscn",
             "position": {
                 "x": 4450611.731,
@@ -238,6 +246,7 @@
         "object_data": {
             "name": "tarsis_4-1011",
             "parent_id": "_planet_SandBox",
+            "poi_uuid": "4d4cd92f-75c1-49d7-9aa9-462b4b486e2f",
             "scenename": "scenes/_universe/structures/buildings/spawn_building.tscn",
             "position": {
                 "x": 4450609.379,
@@ -276,6 +285,7 @@
                 "y": 0.212,
                 "z": -0.9369
             },
+            "poi_uuid": "4d4cd92f-75c1-49d7-9aa9-462b4b486e2f",
             "scenename": "scenes/_universe/structures/buildings/spawn_building.tscn",
             "rows": 2,
             "apartments": [],
@@ -314,6 +324,7 @@
                 "z": -0.9369
             },
             "rows": 2,
+            "poi_uuid": "4d4cd92f-75c1-49d7-9aa9-462b4b486e2f",
             "scenename": "scenes/_universe/structures/buildings/spawn_building.tscn",
             "spawn_point": {
                 "x": -1.934,
@@ -342,6 +353,7 @@
                 "y": 0.212,
                 "z": -0.9369
             },
+            "poi_uuid": "4d4cd92f-75c1-49d7-9aa9-462b4b486e2f",
             "scenename": "scenes/_universe/structures/buildings/spawn_building.tscn",
             "rows": 2,
             "apartments": [],
@@ -375,6 +387,7 @@
                 "y": 0.213,
                 "z": -0.9369
             },
+            "poi_uuid": "4d4cd92f-75c1-49d7-9aa9-462b4b486e2f",
             "scenename": "scenes/_universe/structures/buildings/spawn_building.tscn",
             "rows": 2,
             "apartments": [],
@@ -408,6 +421,7 @@
                 "y": 0.212,
                 "z": -0.9369
             },
+            "poi_uuid": "4d4cd92f-75c1-49d7-9aa9-462b4b486e2f",
             "scenename": "scenes/_universe/structures/buildings/spawn_building.tscn",
             "rows": 2,
             "apartments": [],
@@ -441,6 +455,7 @@
                 "y": 0.213,
                 "z": -0.9369
             },
+            "poi_uuid": "4d4cd92f-75c1-49d7-9aa9-462b4b486e2f",
             "scenename": "scenes/_universe/structures/buildings/spawn_building.tscn",
             "rows": 2,
             "apartments": [],
@@ -474,6 +489,7 @@
                 "y": 0.212,
                 "z": -0.9369
             },
+            "poi_uuid": "4d4cd92f-75c1-49d7-9aa9-462b4b486e2f",
             "scenename": "scenes/_universe/structures/buildings/spawn_building.tscn",
             "rows": 2,
             "apartments": [],
@@ -507,6 +523,7 @@
                 "y": 0.212,
                 "z": -0.9369
             },
+            "poi_uuid": "4d4cd92f-75c1-49d7-9aa9-462b4b486e2f",
             "scenename": "scenes/_universe/structures/buildings/spawn_building.tscn",
             "rows": 2,
             "apartments": [],
@@ -540,6 +557,7 @@
                 "y": 0.212,
                 "z": -0.9369
             },
+            "poi_uuid": "4d4cd92f-75c1-49d7-9aa9-462b4b486e2f",
             "scenename": "scenes/_universe/structures/buildings/spawn_building.tscn",
             "rows": 2,
             "apartments": [],
@@ -573,6 +591,7 @@
                 "y": 0.212,
                 "z": -0.9369
             },
+            "poi_uuid": "4d4cd92f-75c1-49d7-9aa9-462b4b486e2f",
             "scenename": "scenes/_universe/structures/buildings/spawn_building.tscn",
             "rows": 2,
             "apartments": [],
@@ -606,6 +625,7 @@
                 "y": 0.213,
                 "z": -0.9369
             },
+            "poi_uuid": "4d4cd92f-75c1-49d7-9aa9-462b4b486e2f",
             "scenename": "scenes/_universe/structures/buildings/spawn_building.tscn",
             "rows": 2,
             "apartments": [],
@@ -639,6 +659,7 @@
                 "y": 0.212,
                 "z": -0.9369
             },
+            "poi_uuid": "4d4cd92f-75c1-49d7-9aa9-462b4b486e2f",
             "scenename": "scenes/_universe/structures/buildings/spawn_building.tscn",
             "rows": 2,
             "apartments": [],
@@ -672,6 +693,7 @@
                 "y": 0.212,
                 "z": -0.9369
             },
+            "poi_uuid": "4d4cd92f-75c1-49d7-9aa9-462b4b486e2f",
             "scenename": "scenes/_universe/structures/buildings/spawn_building.tscn",
             "rows": 2,
             "apartments": [],
@@ -705,6 +727,7 @@
                 "y": 0.213,
                 "z": -0.9369
             },
+            "poi_uuid": "4d4cd92f-75c1-49d7-9aa9-462b4b486e2f",
             "scenename": "scenes/_universe/structures/buildings/spawn_building.tscn",
             "rows": 2,
             "apartments": [],
@@ -8853,5 +8876,105 @@
                 "z": -1.16353628299157
             }
         }
+    },
+    {
+        "object_data": {
+            "parent_id": "_planet_SandBox",
+            "position": {
+                "x": 4450527.551,
+                "y": 2674096.493,
+                "z": -3675918.78
+            },
+            "rotation": {
+                "x": 1.137,
+                "y": 2.261,
+                "z": 0.0
+            },
+            "scenename": "scenes/_universe/structures/urban/poi_villages.tscn",
+            "is_spawned": true,
+            "spawn_requested": false,
+            "spawn_scene": "scenes/_universe/structures/urban/villages/ares_village_mining.tscn",
+            "radius_m": 1000,
+            "population": 250,
+            "type": "mining",
+            "name": "mining_village_01"
+        },
+        "object_type": "poi_village",
+        "object_uuid": "4d4cd92f-75c1-49d7-9aa9-462b4b486e2f"
+    },
+    {
+        "object_data": {
+            "parent_id": "_planet_SandBox",
+            "position": {
+                "x": 4464613.947,
+                "y": 2667284.115,
+                "z": -3668506.259
+            },
+            "rotation": {
+                "x": -0.3,
+                "y": 0.545,
+                "z": -1.117
+            },
+            "scenename": "scenes/_universe/structures/urban/poi_villages.tscn",
+            "is_spawned": false,
+            "spawn_requested": false,
+            "spawn_scene": "scenes/_universe/structures/urban/villages/ares_village_mining.tscn",
+            "radius_m": 1000,
+            "population": 250,
+            "type": "mining",
+            "name": "mining_village_02"
+        },
+        "object_type": "poi_village",
+        "object_uuid": "3191c971-4c3e-4b97-ac1a-3b8bba44f9cd"
+    },
+    {
+        "object_data": {
+            "parent_id": "_planet_SandBox",
+            "position": {
+                "x": 4446544.157,
+                "y": 2665706.437,
+                "z": -3691527.417
+            },
+            "rotation": {
+                "x": 1.139,
+                "y": 2.264,
+                "z": 0.0
+            },
+            "scenename": "scenes/_universe/structures/urban/poi_villages.tscn",
+            "is_spawned": false,
+            "spawn_requested": false,
+            "spawn_scene": "scenes/_universe/structures/urban/villages/ares_village_mining.tscn",
+            "radius_m": 1000,
+            "population": 250,
+            "type": "mining",
+            "name": "mining_village_03"
+        },
+        "object_type": "poi_village",
+        "object_uuid": "f1e32234-34d9-4845-b791-ebbdc5fd02a7"
+    },
+    {
+        "object_data": {
+            "parent_id": "_planet_SandBox",
+            "position": {
+                "x": 4459370.84,
+                "y": 2647195.632,
+                "z": -3689374.936
+            },
+            "rotation": {
+                "x": 1.142,
+                "y": 2.262,
+                "z": 0.0
+            },
+            "scenename": "scenes/_universe/structures/urban/poi_villages.tscn",
+            "is_spawned": false,
+            "spawn_requested": false,
+            "spawn_scene": "scenes/_universe/structures/urban/villages/ares_village_mining.tscn",
+            "radius_m": 1000,
+            "population": 250,
+            "type": "mining",
+            "name": "mining_village_04"
+        },
+        "object_type": "poi_village",
+        "object_uuid": "6dc675ff-dce2-4733-949f-8a40d97a429a"
     }
 ]

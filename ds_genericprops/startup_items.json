@@ -8976,5 +8976,1280 @@
         },
         "object_type": "poi_village",
         "object_uuid": "6dc675ff-dce2-4733-949f-8a40d97a429a"
+    },
+    {
+        "object_data": {
+            "parent_id": "_planet_SandBox",
+            "position": {
+                "x": 4419116.674,
+                "y": 2527570.539,
+                "z": -3819412.94
+            },
+            "rotation": {
+                "x": 1.162,
+                "y": 2.284,
+                "z": 0.0
+            },
+            "scenename": "scenes/_universe/structures/urban/poi_villages.tscn",
+            "is_spawned": false,
+            "spawn_requested": false,
+            "spawn_scene": "scenes/_universe/structures/urban/villages/ares_village_mining.tscn",
+            "radius_m": 1000,
+            "population": 250,
+            "type": "mining",
+            "name": "mining_village_39"
+        },
+        "object_type": "poi_village",
+        "object_uuid": "75af1f86-9f0a-526a-b9e7-cc46ae6fc8a2"
+    },
+    {
+        "object_data": {
+            "parent_id": "_planet_SandBox",
+            "position": {
+                "x": 4412485.136,
+                "y": 2525292.683,
+                "z": -3828575.715
+            },
+            "rotation": {
+                "x": 1.163,
+                "y": 2.285,
+                "z": 0.0
+            },
+            "scenename": "scenes/_universe/structures/urban/poi_villages.tscn",
+            "is_spawned": false,
+            "spawn_requested": false,
+            "spawn_scene": "scenes/_universe/structures/urban/villages/ares_village_mining.tscn",
+            "radius_m": 1000,
+            "population": 250,
+            "type": "mining",
+            "name": "mining_village_40"
+        },
+        "object_type": "poi_village",
+        "object_uuid": "55d0e87d-1817-5e40-9e96-885b6b08e819"
+    },
+    {
+        "object_data": {
+            "parent_id": "_planet_SandBox",
+            "position": {
+                "x": 4410571.283,
+                "y": 2513532.85,
+                "z": -3838506.713
+            },
+            "rotation": {
+                "x": 1.165,
+                "y": 2.287,
+                "z": 0.0
+            },
+            "scenename": "scenes/_universe/structures/urban/poi_villages.tscn",
+            "is_spawned": false,
+            "spawn_requested": false,
+            "spawn_scene": "scenes/_universe/structures/urban/villages/ares_village_mining.tscn",
+            "radius_m": 1000,
+            "population": 250,
+            "type": "mining",
+            "name": "mining_village_41"
+        },
+        "object_type": "poi_village",
+        "object_uuid": "24f0e061-a08c-58c6-9250-96b0d57168ec"
+    },
+    {
+        "object_data": {
+            "parent_id": "_planet_SandBox",
+            "position": {
+                "x": 4442265.602,
+                "y": 2502919.001,
+                "z": -3808778.415
+            },
+            "rotation": {
+                "x": 1.167,
+                "y": 2.28,
+                "z": 0.0
+            },
+            "scenename": "scenes/_universe/structures/urban/poi_villages.tscn",
+            "is_spawned": false,
+            "spawn_requested": false,
+            "spawn_scene": "scenes/_universe/structures/urban/villages/ares_village_mining.tscn",
+            "radius_m": 1000,
+            "population": 250,
+            "type": "mining",
+            "name": "mining_village_42"
+        },
+        "object_type": "poi_village",
+        "object_uuid": "5223a365-5903-5527-963b-2660e1b72e6c"
+    },
+    {
+        "object_data": {
+            "parent_id": "_planet_SandBox",
+            "position": {
+                "x": 4433885.875,
+                "y": 2519155.748,
+                "z": -3807838.046
+            },
+            "rotation": {
+                "x": 1.164,
+                "y": 2.28,
+                "z": 0.0
+            },
+            "scenename": "scenes/_universe/structures/urban/poi_villages.tscn",
+            "is_spawned": false,
+            "spawn_requested": false,
+            "spawn_scene": "scenes/_universe/structures/urban/villages/ares_village_mining.tscn",
+            "radius_m": 1000,
+            "population": 250,
+            "type": "mining",
+            "name": "mining_village_43"
+        },
+        "object_type": "poi_village",
+        "object_uuid": "22387868-a7ab-5295-a58b-300756adaae6"
+    },
+    {
+        "object_data": {
+            "parent_id": "_planet_SandBox",
+            "position": {
+                "x": 4454566.769,
+                "y": 2296675.145,
+                "z": -3922657.057
+            },
+            "rotation": {
+                "x": 1.202,
+                "y": 2.293,
+                "z": 0.0
+            },
+            "scenename": "scenes/_universe/structures/urban/poi_villages.tscn",
+            "is_spawned": false,
+            "spawn_requested": false,
+            "spawn_scene": "scenes/_universe/structures/urban/villages/ares_village_mining.tscn",
+            "radius_m": 1000,
+            "population": 250,
+            "type": "mining",
+            "name": "mining_village_44"
+        },
+        "object_type": "poi_village",
+        "object_uuid": "7f669fca-be66-502e-a46c-0d8e891f9fdb"
+    },
+    {
+        "object_data": {
+            "parent_id": "_planet_SandBox",
+            "position": {
+                "x": 4461087.016,
+                "y": 2272955.926,
+                "z": -3929057.675
+            },
+            "rotation": {
+                "x": 1.206,
+                "y": 2.293,
+                "z": 0.0
+            },
+            "scenename": "scenes/_universe/structures/urban/poi_villages.tscn",
+            "is_spawned": false,
+            "spawn_requested": false,
+            "spawn_scene": "scenes/_universe/structures/urban/villages/ares_village_mining.tscn",
+            "radius_m": 1000,
+            "population": 250,
+            "type": "mining",
+            "name": "mining_village_45"
+        },
+        "object_type": "poi_village",
+        "object_uuid": "75020679-df63-557c-8e2d-cc5ace44a477"
+    },
+    {
+        "object_data": {
+            "parent_id": "_planet_SandBox",
+            "position": {
+                "x": 4473097.864,
+                "y": 2240530.68,
+                "z": -3934023.13
+            },
+            "rotation": {
+                "x": 1.211,
+                "y": 2.292,
+                "z": 0.0
+            },
+            "scenename": "scenes/_universe/structures/urban/poi_villages.tscn",
+            "is_spawned": false,
+            "spawn_requested": false,
+            "spawn_scene": "scenes/_universe/structures/urban/villages/ares_village_mining.tscn",
+            "radius_m": 1000,
+            "population": 250,
+            "type": "mining",
+            "name": "mining_village_46"
+        },
+        "object_type": "poi_village",
+        "object_uuid": "883ed92b-3f1e-51fd-88b1-7bec313b2608"
+    },
+    {
+        "object_data": {
+            "parent_id": "_planet_SandBox",
+            "position": {
+                "x": 4500332.512,
+                "y": 2256380.392,
+                "z": -3893696.833
+            },
+            "rotation": {
+                "x": 1.208,
+                "y": 2.284,
+                "z": 0.0
+            },
+            "scenename": "scenes/_universe/structures/urban/poi_villages.tscn",
+            "is_spawned": false,
+            "spawn_requested": false,
+            "spawn_scene": "scenes/_universe/structures/urban/villages/ares_village_mining.tscn",
+            "radius_m": 1000,
+            "population": 250,
+            "type": "mining",
+            "name": "mining_village_47"
+        },
+        "object_type": "poi_village",
+        "object_uuid": "7f08342c-e873-57f3-870e-09d51fc51b74"
+    },
+    {
+        "object_data": {
+            "parent_id": "_planet_SandBox",
+            "position": {
+                "x": 4489148.511,
+                "y": 2299143.798,
+                "z": -3881572.317
+            },
+            "rotation": {
+                "x": 1.201,
+                "y": 2.284,
+                "z": 0.0
+            },
+            "scenename": "scenes/_universe/structures/urban/poi_villages.tscn",
+            "is_spawned": false,
+            "spawn_requested": false,
+            "spawn_scene": "scenes/_universe/structures/urban/villages/ares_village_mining.tscn",
+            "radius_m": 1000,
+            "population": 250,
+            "type": "mining",
+            "name": "mining_village_48"
+        },
+        "object_type": "poi_village",
+        "object_uuid": "fe3cc372-26da-5ec7-bc07-4c98327b9131"
+    },
+    {
+        "object_data": {
+            "parent_id": "_planet_SandBox",
+            "position": {
+                "x": 4431333.685,
+                "y": 2144043.643,
+                "z": -4033792.116
+            },
+            "rotation": {
+                "x": 1.227,
+                "y": 2.309,
+                "z": 0.0
+            },
+            "scenename": "scenes/_universe/structures/urban/poi_villages.tscn",
+            "is_spawned": false,
+            "spawn_requested": false,
+            "spawn_scene": "scenes/_universe/structures/urban/villages/ares_village_mining.tscn",
+            "radius_m": 1000,
+            "population": 250,
+            "type": "mining",
+            "name": "mining_village_49"
+        },
+        "object_type": "poi_village",
+        "object_uuid": "9459bf3a-530f-5ef9-95c7-3bea4add7064"
+    },
+    {
+        "object_data": {
+            "parent_id": "_planet_SandBox",
+            "position": {
+                "x": 4409094.267,
+                "y": 2102492.648,
+                "z": -4079771.149
+            },
+            "rotation": {
+                "x": 1.234,
+                "y": 2.317,
+                "z": 0.0
+            },
+            "scenename": "scenes/_universe/structures/urban/poi_villages.tscn",
+            "is_spawned": false,
+            "spawn_requested": false,
+            "spawn_scene": "scenes/_universe/structures/urban/villages/ares_village_mining.tscn",
+            "radius_m": 1000,
+            "population": 250,
+            "type": "mining",
+            "name": "mining_village_50"
+        },
+        "object_type": "poi_village",
+        "object_uuid": "522be9b2-2ae5-5aa3-90a8-234e0c70ec41"
+    },
+    {
+        "object_data": {
+            "parent_id": "_planet_SandBox",
+            "position": {
+                "x": 4473661.427,
+                "y": 2064346.903,
+                "z": -4028640.654
+            },
+            "rotation": {
+                "x": 1.24,
+                "y": 2.304,
+                "z": 0.0
+            },
+            "scenename": "scenes/_universe/structures/urban/poi_villages.tscn",
+            "is_spawned": false,
+            "spawn_requested": false,
+            "spawn_scene": "scenes/_universe/structures/urban/villages/ares_village_mining.tscn",
+            "radius_m": 1000,
+            "population": 250,
+            "type": "mining",
+            "name": "mining_village_51"
+        },
+        "object_type": "poi_village",
+        "object_uuid": "9c67d824-906d-555e-9aeb-298e99d5ac6c"
+    },
+    {
+        "object_data": {
+            "parent_id": "_planet_SandBox",
+            "position": {
+                "x": 4466296.316,
+                "y": 2104616.33,
+                "z": -4015956.616
+            },
+            "rotation": {
+                "x": 1.234,
+                "y": 2.303,
+                "z": 0.0
+            },
+            "scenename": "scenes/_universe/structures/urban/poi_villages.tscn",
+            "is_spawned": false,
+            "spawn_requested": false,
+            "spawn_scene": "scenes/_universe/structures/urban/villages/ares_village_mining.tscn",
+            "radius_m": 1000,
+            "population": 250,
+            "type": "mining",
+            "name": "mining_village_52"
+        },
+        "object_type": "poi_village",
+        "object_uuid": "2f9fc17d-2aa9-5629-ab74-76834b94f77b"
+    },
+    {
+        "object_data": {
+            "parent_id": "_planet_SandBox",
+            "position": {
+                "x": 4416919.854,
+                "y": 1963996.218,
+                "z": -4139886.239
+            },
+            "rotation": {
+                "x": 1.257,
+                "y": 2.324,
+                "z": 0.0
+            },
+            "scenename": "scenes/_universe/structures/urban/poi_villages.tscn",
+            "is_spawned": false,
+            "spawn_requested": false,
+            "spawn_scene": "scenes/_universe/structures/urban/villages/ares_village_mining.tscn",
+            "radius_m": 1000,
+            "population": 250,
+            "type": "mining",
+            "name": "mining_village_53"
+        },
+        "object_type": "poi_village",
+        "object_uuid": "6d14c85d-7f1d-51b1-bb1b-1604dc19896f"
+    },
+    {
+        "object_data": {
+            "parent_id": "_planet_SandBox",
+            "position": {
+                "x": 4351080.085,
+                "y": 1940753.022,
+                "z": -4219798.575
+            },
+            "rotation": {
+                "x": 1.261,
+                "y": 2.341,
+                "z": 0.0
+            },
+            "scenename": "scenes/_universe/structures/urban/poi_villages.tscn",
+            "is_spawned": false,
+            "spawn_requested": false,
+            "spawn_scene": "scenes/_universe/structures/urban/villages/ares_village_mining.tscn",
+            "radius_m": 1000,
+            "population": 250,
+            "type": "mining",
+            "name": "mining_village_54"
+        },
+        "object_type": "poi_village",
+        "object_uuid": "cab3f8d6-bc37-59ab-83d1-bae08cf19fcb"
+    },
+    {
+        "object_data": {
+            "parent_id": "_planet_SandBox",
+            "position": {
+                "x": 4421208.558,
+                "y": 1778699.564,
+                "z": -4218324.663
+            },
+            "rotation": {
+                "x": 1.288,
+                "y": 2.333,
+                "z": 0.0
+            },
+            "scenename": "scenes/_universe/structures/urban/poi_villages.tscn",
+            "is_spawned": false,
+            "spawn_requested": false,
+            "spawn_scene": "scenes/_universe/structures/urban/villages/ares_village_mining.tscn",
+            "radius_m": 1000,
+            "population": 250,
+            "type": "mining",
+            "name": "mining_village_55"
+        },
+        "object_type": "poi_village",
+        "object_uuid": "80ef662d-1ac5-58c4-8e24-1853bdac25f2"
+    },
+    {
+        "object_data": {
+            "parent_id": "_planet_SandBox",
+            "position": {
+                "x": 4421595.946,
+                "y": 1740921.034,
+                "z": -4233651.315
+            },
+            "rotation": {
+                "x": 1.294,
+                "y": 2.334,
+                "z": 0.0
+            },
+            "scenename": "scenes/_universe/structures/urban/poi_villages.tscn",
+            "is_spawned": false,
+            "spawn_requested": false,
+            "spawn_scene": "scenes/_universe/structures/urban/villages/ares_village_mining.tscn",
+            "radius_m": 1000,
+            "population": 250,
+            "type": "mining",
+            "name": "mining_village_56"
+        },
+        "object_type": "poi_village",
+        "object_uuid": "b20e2b6e-b449-54f4-8b61-bd63150a067d"
+    },
+    {
+        "object_data": {
+            "parent_id": "_planet_SandBox",
+            "position": {
+                "x": 4442952.466,
+                "y": 1739138.578,
+                "z": -4211969.92
+            },
+            "rotation": {
+                "x": 1.294,
+                "y": 2.33,
+                "z": 0.0
+            },
+            "scenename": "scenes/_universe/structures/urban/poi_villages.tscn",
+            "is_spawned": false,
+            "spawn_requested": false,
+            "spawn_scene": "scenes/_universe/structures/urban/villages/ares_village_mining.tscn",
+            "radius_m": 1000,
+            "population": 250,
+            "type": "mining",
+            "name": "mining_village_57"
+        },
+        "object_type": "poi_village",
+        "object_uuid": "b4f90c05-b0e4-53a0-aa73-f63f2a11c789"
+    },
+    {
+        "object_data": {
+            "parent_id": "_planet_SandBox",
+            "position": {
+                "x": 4450328.211,
+                "y": 1758355.834,
+                "z": -4196174.9
+            },
+            "rotation": {
+                "x": 1.291,
+                "y": 2.327,
+                "z": 0.0
+            },
+            "scenename": "scenes/_universe/structures/urban/poi_villages.tscn",
+            "is_spawned": false,
+            "spawn_requested": false,
+            "spawn_scene": "scenes/_universe/structures/urban/villages/ares_village_mining.tscn",
+            "radius_m": 1000,
+            "population": 250,
+            "type": "mining",
+            "name": "mining_village_58"
+        },
+        "object_type": "poi_village",
+        "object_uuid": "ed42e738-9671-5c3d-885e-cbb205233084"
+    },
+    {
+        "object_data": {
+            "parent_id": "_planet_SandBox",
+            "position": {
+                "x": 4373172.798,
+                "y": 1657499.826,
+                "z": -4316616.061
+            },
+            "rotation": {
+                "x": 1.307,
+                "y": 2.35,
+                "z": 0.0
+            },
+            "scenename": "scenes/_universe/structures/urban/poi_villages.tscn",
+            "is_spawned": false,
+            "spawn_requested": false,
+            "spawn_scene": "scenes/_universe/structures/urban/villages/ares_village_mining.tscn",
+            "radius_m": 1000,
+            "population": 250,
+            "type": "mining",
+            "name": "mining_village_59"
+        },
+        "object_type": "poi_village",
+        "object_uuid": "d88f9a63-5daf-521e-a7ae-bed5e41759f6"
+    },
+    {
+        "object_data": {
+            "parent_id": "_planet_SandBox",
+            "position": {
+                "x": 4371362.771,
+                "y": 1670147.883,
+                "z": -4313573.203
+            },
+            "rotation": {
+                "x": 1.305,
+                "y": 2.35,
+                "z": 0.0
+            },
+            "scenename": "scenes/_universe/structures/urban/poi_villages.tscn",
+            "is_spawned": false,
+            "spawn_requested": false,
+            "spawn_scene": "scenes/_universe/structures/urban/villages/ares_village_mining.tscn",
+            "radius_m": 1000,
+            "population": 250,
+            "type": "mining",
+            "name": "mining_village_60"
+        },
+        "object_type": "poi_village",
+        "object_uuid": "07a60f8b-d564-5af6-b22d-2b633e348abb"
+    },
+    {
+        "object_data": {
+            "parent_id": "_planet_SandBox",
+            "position": {
+                "x": 4359878.214,
+                "y": 1635124.995,
+                "z": -4338542.201
+            },
+            "rotation": {
+                "x": 1.311,
+                "y": 2.354,
+                "z": 0.0
+            },
+            "scenename": "scenes/_universe/structures/urban/poi_villages.tscn",
+            "is_spawned": false,
+            "spawn_requested": false,
+            "spawn_scene": "scenes/_universe/structures/urban/villages/ares_village_mining.tscn",
+            "radius_m": 1000,
+            "population": 250,
+            "type": "mining",
+            "name": "mining_village_61"
+        },
+        "object_type": "poi_village",
+        "object_uuid": "edd3143b-407a-5108-87cb-12e77cc0efa9"
+    },
+    {
+        "object_data": {
+            "parent_id": "_planet_SandBox",
+            "position": {
+                "x": 4368667.988,
+                "y": 1627704.543,
+                "z": -4332486.37
+            },
+            "rotation": {
+                "x": 1.312,
+                "y": 2.352,
+                "z": 0.0
+            },
+            "scenename": "scenes/_universe/structures/urban/poi_villages.tscn",
+            "is_spawned": false,
+            "spawn_requested": false,
+            "spawn_scene": "scenes/_universe/structures/urban/villages/ares_village_mining.tscn",
+            "radius_m": 1000,
+            "population": 250,
+            "type": "mining",
+            "name": "mining_village_62"
+        },
+        "object_type": "poi_village",
+        "object_uuid": "60f5f21a-1e7d-54a9-83cd-c4e86396d081"
+    },
+    {
+        "object_data": {
+            "parent_id": "_planet_SandBox",
+            "position": {
+                "x": 4381715.085,
+                "y": 1617401.546,
+                "z": -4323159.188
+            },
+            "rotation": {
+                "x": 1.314,
+                "y": 2.349,
+                "z": 0.0
+            },
+            "scenename": "scenes/_universe/structures/urban/poi_villages.tscn",
+            "is_spawned": false,
+            "spawn_requested": false,
+            "spawn_scene": "scenes/_universe/structures/urban/villages/ares_village_mining.tscn",
+            "radius_m": 1000,
+            "population": 250,
+            "type": "mining",
+            "name": "mining_village_63"
+        },
+        "object_type": "poi_village",
+        "object_uuid": "6ffe2785-a6a0-57fd-bc6b-a9736dafd686"
+    },
+    {
+        "object_data": {
+            "parent_id": "_planet_SandBox",
+            "position": {
+                "x": 4390168.453,
+                "y": 1622841.583,
+                "z": -4312531.318
+            },
+            "rotation": {
+                "x": 1.313,
+                "y": 2.347,
+                "z": 0.0
+            },
+            "scenename": "scenes/_universe/structures/urban/poi_villages.tscn",
+            "is_spawned": false,
+            "spawn_requested": false,
+            "spawn_scene": "scenes/_universe/structures/urban/villages/ares_village_mining.tscn",
+            "radius_m": 1000,
+            "population": 250,
+            "type": "mining",
+            "name": "mining_village_64"
+        },
+        "object_type": "poi_village",
+        "object_uuid": "03261d6c-1eea-5f90-9e58-f81e25ec61fd"
+    },
+    {
+        "object_data": {
+            "parent_id": "_planet_SandBox",
+            "position": {
+                "x": 4343008.774,
+                "y": 1550098.196,
+                "z": -4386409.76
+            },
+            "rotation": {
+                "x": 1.325,
+                "y": 2.361,
+                "z": 0.0
+            },
+            "scenename": "scenes/_universe/structures/urban/poi_villages.tscn",
+            "is_spawned": false,
+            "spawn_requested": false,
+            "spawn_scene": "scenes/_universe/structures/urban/villages/ares_village_mining.tscn",
+            "radius_m": 1000,
+            "population": 250,
+            "type": "mining",
+            "name": "mining_village_65"
+        },
+        "object_type": "poi_village",
+        "object_uuid": "7bfdfae6-99ec-5354-a381-0755fb7ab00a"
+    },
+    {
+        "object_data": {
+            "parent_id": "_planet_SandBox",
+            "position": {
+                "x": 4319038.356,
+                "y": 1528007.757,
+                "z": -4417716.626
+            },
+            "rotation": {
+                "x": 1.328,
+                "y": 2.367,
+                "z": 0.0
+            },
+            "scenename": "scenes/_universe/structures/urban/poi_villages.tscn",
+            "is_spawned": false,
+            "spawn_requested": false,
+            "spawn_scene": "scenes/_universe/structures/urban/villages/ares_village_mining.tscn",
+            "radius_m": 1000,
+            "population": 250,
+            "type": "mining",
+            "name": "mining_village_66"
+        },
+        "object_type": "poi_village",
+        "object_uuid": "573ee322-80b0-5d5a-b4d1-87b0552d5710"
+    },
+    {
+        "object_data": {
+            "parent_id": "_planet_SandBox",
+            "position": {
+                "x": 4319507.543,
+                "y": 1552152.117,
+                "z": -4408831.887
+            },
+            "rotation": {
+                "x": 1.324,
+                "y": 2.366,
+                "z": 0.0
+            },
+            "scenename": "scenes/_universe/structures/urban/poi_villages.tscn",
+            "is_spawned": false,
+            "spawn_requested": false,
+            "spawn_scene": "scenes/_universe/structures/urban/villages/ares_village_mining.tscn",
+            "radius_m": 1000,
+            "population": 250,
+            "type": "mining",
+            "name": "mining_village_67"
+        },
+        "object_type": "poi_village",
+        "object_uuid": "8e9daaf5-ebb3-595b-a150-500d66e95802"
+    },
+    {
+        "object_data": {
+            "parent_id": "_planet_SandBox",
+            "position": {
+                "x": 4332510.161,
+                "y": 1535459.058,
+                "z": -4401913.38
+            },
+            "rotation": {
+                "x": 1.327,
+                "y": 2.364,
+                "z": 0.0
+            },
+            "scenename": "scenes/_universe/structures/urban/poi_villages.tscn",
+            "is_spawned": false,
+            "spawn_requested": false,
+            "spawn_scene": "scenes/_universe/structures/urban/villages/ares_village_mining.tscn",
+            "radius_m": 1000,
+            "population": 250,
+            "type": "mining",
+            "name": "mining_village_68"
+        },
+        "object_type": "poi_village",
+        "object_uuid": "6b1da2fa-e11f-57e3-9368-643c135141d0"
+    },
+    {
+        "object_data": {
+            "parent_id": "_planet_SandBox",
+            "position": {
+                "x": 4335702.087,
+                "y": 1466515.095,
+                "z": -4422232.593
+            },
+            "rotation": {
+                "x": 1.338,
+                "y": 2.366,
+                "z": 0.0
+            },
+            "scenename": "scenes/_universe/structures/urban/poi_villages.tscn",
+            "is_spawned": false,
+            "spawn_requested": false,
+            "spawn_scene": "scenes/_universe/structures/urban/villages/ares_village_mining.tscn",
+            "radius_m": 1000,
+            "population": 250,
+            "type": "mining",
+            "name": "mining_village_69"
+        },
+        "object_type": "poi_village",
+        "object_uuid": "e219d6ca-6da0-518c-8335-25ca715be611"
+    },
+    {
+        "object_data": {
+            "parent_id": "_planet_SandBox",
+            "position": {
+                "x": 4353075.973,
+                "y": 1482223.892,
+                "z": -4399870.694
+            },
+            "rotation": {
+                "x": 1.336,
+                "y": 2.362,
+                "z": 0.0
+            },
+            "scenename": "scenes/_universe/structures/urban/poi_villages.tscn",
+            "is_spawned": false,
+            "spawn_requested": false,
+            "spawn_scene": "scenes/_universe/structures/urban/villages/ares_village_mining.tscn",
+            "radius_m": 1000,
+            "population": 250,
+            "type": "mining",
+            "name": "mining_village_70"
+        },
+        "object_type": "poi_village",
+        "object_uuid": "8234b67a-ddaf-51d7-a6d5-02cf537f9dfb"
+    },
+    {
+        "object_data": {
+            "parent_id": "_planet_SandBox",
+            "position": {
+                "x": 4305542.54,
+                "y": 1419977.597,
+                "z": -4466663.998
+            },
+            "rotation": {
+                "x": 1.346,
+                "y": 2.375,
+                "z": 0.0
+            },
+            "scenename": "scenes/_universe/structures/urban/poi_villages.tscn",
+            "is_spawned": false,
+            "spawn_requested": false,
+            "spawn_scene": "scenes/_universe/structures/urban/villages/ares_village_mining.tscn",
+            "radius_m": 1000,
+            "population": 250,
+            "type": "mining",
+            "name": "mining_village_71"
+        },
+        "object_type": "poi_village",
+        "object_uuid": "fee4ddd2-f753-574d-8bd8-fca80487b790"
+    },
+    {
+        "object_data": {
+            "parent_id": "_planet_SandBox",
+            "position": {
+                "x": 4280779.106,
+                "y": 1429910.683,
+                "z": -4487249.257
+            },
+            "rotation": {
+                "x": 1.344,
+                "y": 2.38,
+                "z": 0.0
+            },
+            "scenename": "scenes/_universe/structures/urban/poi_villages.tscn",
+            "is_spawned": false,
+            "spawn_requested": false,
+            "spawn_scene": "scenes/_universe/structures/urban/villages/ares_village_mining.tscn",
+            "radius_m": 1000,
+            "population": 250,
+            "type": "mining",
+            "name": "mining_village_72"
+        },
+        "object_type": "poi_village",
+        "object_uuid": "899e9c85-d8d6-55a2-bf6e-2892b331cd22"
+    },
+    {
+        "object_data": {
+            "parent_id": "_planet_SandBox",
+            "position": {
+                "x": 4271927.002,
+                "y": 1411976.881,
+                "z": -4501342.154
+            },
+            "rotation": {
+                "x": 1.347,
+                "y": 2.382,
+                "z": 0.0
+            },
+            "scenename": "scenes/_universe/structures/urban/poi_villages.tscn",
+            "is_spawned": false,
+            "spawn_requested": false,
+            "spawn_scene": "scenes/_universe/structures/urban/villages/ares_village_mining.tscn",
+            "radius_m": 1000,
+            "population": 250,
+            "type": "mining",
+            "name": "mining_village_73"
+        },
+        "object_type": "poi_village",
+        "object_uuid": "621e6b4d-0e02-5c2f-9249-b89a09231b6d"
+    },
+    {
+        "object_data": {
+            "parent_id": "_planet_SandBox",
+            "position": {
+                "x": 4288272.498,
+                "y": 1392287.739,
+                "z": -4491923.202
+            },
+            "rotation": {
+                "x": 1.35,
+                "y": 2.379,
+                "z": 0.0
+            },
+            "scenename": "scenes/_universe/structures/urban/poi_villages.tscn",
+            "is_spawned": false,
+            "spawn_requested": false,
+            "spawn_scene": "scenes/_universe/structures/urban/villages/ares_village_mining.tscn",
+            "radius_m": 1000,
+            "population": 250,
+            "type": "mining",
+            "name": "mining_village_74"
+        },
+        "object_type": "poi_village",
+        "object_uuid": "7db2047d-b448-5740-b9c9-18aef22cde5b"
+    },
+    {
+        "object_data": {
+            "parent_id": "_planet_SandBox",
+            "position": {
+                "x": 4304855.745,
+                "y": 1403715.615,
+                "z": -4472462.376
+            },
+            "rotation": {
+                "x": 1.348,
+                "y": 2.375,
+                "z": 0.0
+            },
+            "scenename": "scenes/_universe/structures/urban/poi_villages.tscn",
+            "is_spawned": false,
+            "spawn_requested": false,
+            "spawn_scene": "scenes/_universe/structures/urban/villages/ares_village_mining.tscn",
+            "radius_m": 1000,
+            "population": 250,
+            "type": "mining",
+            "name": "mining_village_75"
+        },
+        "object_type": "poi_village",
+        "object_uuid": "314e1da3-c61f-595d-995f-c66486b40ea6"
+    },
+    {
+        "object_data": {
+            "parent_id": "_planet_SandBox",
+            "position": {
+                "x": 4293159.989,
+                "y": 1404361.116,
+                "z": -4483488.305
+            },
+            "rotation": {
+                "x": 1.348,
+                "y": 2.378,
+                "z": 0.0
+            },
+            "scenename": "scenes/_universe/structures/urban/poi_villages.tscn",
+            "is_spawned": false,
+            "spawn_requested": false,
+            "spawn_scene": "scenes/_universe/structures/urban/villages/ares_village_mining.tscn",
+            "radius_m": 1000,
+            "population": 250,
+            "type": "mining",
+            "name": "mining_village_76"
+        },
+        "object_type": "poi_village",
+        "object_uuid": "888a1702-3d00-5d3c-90e9-bee1e51e7a09"
+    },
+    {
+        "object_data": {
+            "parent_id": "_planet_SandBox",
+            "position": {
+                "x": 4212438.536,
+                "y": 1373004.64,
+                "z": -4568953.934
+            },
+            "rotation": {
+                "x": 1.353,
+                "y": 2.397,
+                "z": 0.0
+            },
+            "scenename": "scenes/_universe/structures/urban/poi_villages.tscn",
+            "is_spawned": false,
+            "spawn_requested": false,
+            "spawn_scene": "scenes/_universe/structures/urban/villages/ares_village_mining.tscn",
+            "radius_m": 1000,
+            "population": 250,
+            "type": "mining",
+            "name": "mining_village_77"
+        },
+        "object_type": "poi_village",
+        "object_uuid": "a64e23ea-637f-57eb-b47d-f2a3942b134d"
+    },
+    {
+        "object_data": {
+            "parent_id": "_planet_SandBox",
+            "position": {
+                "x": 4198976.288,
+                "y": 1351574.245,
+                "z": -4587697.179
+            },
+            "rotation": {
+                "x": 1.357,
+                "y": 2.4,
+                "z": 0.0
+            },
+            "scenename": "scenes/_universe/structures/urban/poi_villages.tscn",
+            "is_spawned": false,
+            "spawn_requested": false,
+            "spawn_scene": "scenes/_universe/structures/urban/villages/ares_village_mining.tscn",
+            "radius_m": 1000,
+            "population": 250,
+            "type": "mining",
+            "name": "mining_village_78"
+        },
+        "object_type": "poi_village",
+        "object_uuid": "7ce01f8f-64f1-55a7-a04e-e7a38802243f"
+    },
+    {
+        "object_data": {
+            "parent_id": "_planet_SandBox",
+            "position": {
+                "x": 4219907.397,
+                "y": 1336437.223,
+                "z": -4572902.505
+            },
+            "rotation": {
+                "x": 1.359,
+                "y": 2.396,
+                "z": 0.0
+            },
+            "scenename": "scenes/_universe/structures/urban/poi_villages.tscn",
+            "is_spawned": false,
+            "spawn_requested": false,
+            "spawn_scene": "scenes/_universe/structures/urban/villages/ares_village_mining.tscn",
+            "radius_m": 1000,
+            "population": 250,
+            "type": "mining",
+            "name": "mining_village_79"
+        },
+        "object_type": "poi_village",
+        "object_uuid": "ee7895c9-efb8-541d-81d6-09cfb77c684e"
+    },
+    {
+        "object_data": {
+            "parent_id": "_planet_SandBox",
+            "position": {
+                "x": 4240364.465,
+                "y": 1335272.508,
+                "z": -4554281.145
+            },
+            "rotation": {
+                "x": 1.359,
+                "y": 2.392,
+                "z": 0.0
+            },
+            "scenename": "scenes/_universe/structures/urban/poi_villages.tscn",
+            "is_spawned": false,
+            "spawn_requested": false,
+            "spawn_scene": "scenes/_universe/structures/urban/villages/ares_village_mining.tscn",
+            "radius_m": 1000,
+            "population": 250,
+            "type": "mining",
+            "name": "mining_village_80"
+        },
+        "object_type": "poi_village",
+        "object_uuid": "f069b066-58c0-5d80-993e-78e4a529c726"
+    },
+    {
+        "object_data": {
+            "parent_id": "_planet_SandBox",
+            "position": {
+                "x": 4235110.489,
+                "y": 1351671.252,
+                "z": -4554332.464
+            },
+            "rotation": {
+                "x": 1.357,
+                "y": 2.392,
+                "z": 0.0
+            },
+            "scenename": "scenes/_universe/structures/urban/poi_villages.tscn",
+            "is_spawned": false,
+            "spawn_requested": false,
+            "spawn_scene": "scenes/_universe/structures/urban/villages/ares_village_mining.tscn",
+            "radius_m": 1000,
+            "population": 250,
+            "type": "mining",
+            "name": "mining_village_81"
+        },
+        "object_type": "poi_village",
+        "object_uuid": "ef0bd9a6-f331-5537-92bf-855c0f6a0e91"
+    },
+    {
+        "object_data": {
+            "parent_id": "_planet_SandBox",
+            "position": {
+                "x": 4206684.514,
+                "y": 1327603.634,
+                "z": -4587634.925
+            },
+            "rotation": {
+                "x": 1.361,
+                "y": 2.399,
+                "z": 0.0
+            },
+            "scenename": "scenes/_universe/structures/urban/poi_villages.tscn",
+            "is_spawned": false,
+            "spawn_requested": false,
+            "spawn_scene": "scenes/_universe/structures/urban/villages/ares_village_mining.tscn",
+            "radius_m": 1000,
+            "population": 250,
+            "type": "mining",
+            "name": "mining_village_82"
+        },
+        "object_type": "poi_village",
+        "object_uuid": "907ebecd-da05-5a44-a7c8-4ae91d19d7e5"
+    },
+    {
+        "object_data": {
+            "parent_id": "_planet_SandBox",
+            "position": {
+                "x": 4073862.675,
+                "y": 1314056.846,
+                "z": -4709778.946
+            },
+            "rotation": {
+                "x": 1.363,
+                "y": 2.428,
+                "z": 0.0
+            },
+            "scenename": "scenes/_universe/structures/urban/poi_villages.tscn",
+            "is_spawned": false,
+            "spawn_requested": false,
+            "spawn_scene": "scenes/_universe/structures/urban/villages/ares_village_mining.tscn",
+            "radius_m": 1000,
+            "population": 250,
+            "type": "mining",
+            "name": "mining_village_83"
+        },
+        "object_type": "poi_village",
+        "object_uuid": "cc452071-3fe0-5394-ade5-5e3bd13dc385"
+    },
+    {
+        "object_data": {
+            "parent_id": "_planet_SandBox",
+            "position": {
+                "x": 4034952.115,
+                "y": 1290152.767,
+                "z": -4749714.463
+            },
+            "rotation": {
+                "x": 1.367,
+                "y": 2.437,
+                "z": 0.0
+            },
+            "scenename": "scenes/_universe/structures/urban/poi_villages.tscn",
+            "is_spawned": false,
+            "spawn_requested": false,
+            "spawn_scene": "scenes/_universe/structures/urban/villages/ares_village_mining.tscn",
+            "radius_m": 1000,
+            "population": 250,
+            "type": "mining",
+            "name": "mining_village_84"
+        },
+        "object_type": "poi_village",
+        "object_uuid": "52cd804f-8ed5-56a9-ac19-0d45ac01869a"
+    },
+    {
+        "object_data": {
+            "parent_id": "_planet_SandBox",
+            "position": {
+                "x": 4059161.808,
+                "y": 1300503.836,
+                "z": -4726205.18
+            },
+            "rotation": {
+                "x": 1.365,
+                "y": 2.432,
+                "z": 0.0
+            },
+            "scenename": "scenes/_universe/structures/urban/poi_villages.tscn",
+            "is_spawned": false,
+            "spawn_requested": false,
+            "spawn_scene": "scenes/_universe/structures/urban/villages/ares_village_mining.tscn",
+            "radius_m": 1000,
+            "population": 250,
+            "type": "mining",
+            "name": "mining_village_85"
+        },
+        "object_type": "poi_village",
+        "object_uuid": "d4af5e8f-4eb4-5865-b453-ee408c0a1fd0"
+    },
+    {
+        "object_data": {
+            "parent_id": "_planet_SandBox",
+            "position": {
+                "x": 4099112.894,
+                "y": 1245938.817,
+                "z": -4706381.854
+            },
+            "rotation": {
+                "x": 1.374,
+                "y": 2.425,
+                "z": 0.0
+            },
+            "scenename": "scenes/_universe/structures/urban/poi_villages.tscn",
+            "is_spawned": false,
+            "spawn_requested": false,
+            "spawn_scene": "scenes/_universe/structures/urban/villages/ares_village_mining.tscn",
+            "radius_m": 1000,
+            "population": 250,
+            "type": "mining",
+            "name": "mining_village_86"
+        },
+        "object_type": "poi_village",
+        "object_uuid": "d2199102-a852-533a-9a3c-5419f5f52761"
+    },
+    {
+        "object_data": {
+            "parent_id": "_planet_SandBox",
+            "position": {
+                "x": 3967543.027,
+                "y": 1197604.165,
+                "z": -4830058.675
+            },
+            "rotation": {
+                "x": 1.381,
+                "y": 2.454,
+                "z": 0.0
+            },
+            "scenename": "scenes/_universe/structures/urban/poi_villages.tscn",
+            "is_spawned": false,
+            "spawn_requested": false,
+            "spawn_scene": "scenes/_universe/structures/urban/villages/ares_village_mining.tscn",
+            "radius_m": 1000,
+            "population": 250,
+            "type": "mining",
+            "name": "mining_village_87"
+        },
+        "object_type": "poi_village",
+        "object_uuid": "7a5b2295-0395-54f7-92c5-3362315c623f"
+    },
+    {
+        "object_data": {
+            "parent_id": "_planet_SandBox",
+            "position": {
+                "x": 3953111.863,
+                "y": 1220191.359,
+                "z": -4836234.058
+            },
+            "rotation": {
+                "x": 1.378,
+                "y": 2.456,
+                "z": 0.0
+            },
+            "scenename": "scenes/_universe/structures/urban/poi_villages.tscn",
+            "is_spawned": false,
+            "spawn_requested": false,
+            "spawn_scene": "scenes/_universe/structures/urban/villages/ares_village_mining.tscn",
+            "radius_m": 1000,
+            "population": 250,
+            "type": "mining",
+            "name": "mining_village_88"
+        },
+        "object_type": "poi_village",
+        "object_uuid": "e53aed95-03b0-5072-8918-56ba235daae6"
+    },
+    {
+        "object_data": {
+            "parent_id": "_planet_SandBox",
+            "position": {
+                "x": 3961322.107,
+                "y": 1191900.058,
+                "z": -4836571.268
+            },
+            "rotation": {
+                "x": 1.382,
+                "y": 2.455,
+                "z": 0.0
+            },
+            "scenename": "scenes/_universe/structures/urban/poi_villages.tscn",
+            "is_spawned": false,
+            "spawn_requested": false,
+            "spawn_scene": "scenes/_universe/structures/urban/villages/ares_village_mining.tscn",
+            "radius_m": 1000,
+            "population": 250,
+            "type": "mining",
+            "name": "mining_village_89"
+        },
+        "object_type": "poi_village",
+        "object_uuid": "80f08e0a-d82a-50a0-8cb8-5369d61a9071"
     }
 ]

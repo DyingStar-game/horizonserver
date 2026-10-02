@@ -8487,8 +8487,8 @@
             },
             "scenename": "scenes/_universe/vehicles/ground/trucks/truck.tscn",
             "seats": {
-            "SeatDriver": "",
-            "SeatPassenger": ""
+            "seat_driver": "",
+            "seat_passenger": ""
             },
             "speed": 0.0
         },
@@ -8510,8 +8510,8 @@
             },
             "scenename": "scenes/_universe/vehicles/ground/trucks/truck.tscn",
             "seats": {
-            "SeatDriver": "",
-            "SeatPassenger": ""
+            "seat_driver": "",
+            "seat_passenger": ""
             },
             "speed": 0.0
         },
@@ -8533,8 +8533,8 @@
             },
             "scenename": "scenes/_universe/vehicles/ground/trucks/truck.tscn",
             "seats": {
-            "SeatDriver": "",
-            "SeatPassenger": ""
+            "seat_driver": "",
+            "seat_passenger": ""
             },
             "speed": 0.0
         },
@@ -8556,8 +8556,8 @@
             },
             "scenename": "scenes/_universe/vehicles/ground/trucks/truck.tscn",
             "seats": {
-            "SeatDriver": "",
-            "SeatPassenger": ""
+            "seat_driver": "",
+            "seat_passenger": ""
             },
             "speed": 0.0
         },
@@ -8579,8 +8579,8 @@
             },
             "scenename": "scenes/_universe/vehicles/ground/trucks/truck.tscn",
             "seats": {
-            "SeatDriver": "",
-            "SeatPassenger": ""
+            "seat_driver": "",
+            "seat_passenger": ""
             },
             "speed": 0.0
         },
@@ -8602,8 +8602,8 @@
             },
             "scenename": "scenes/_universe/vehicles/ground/trucks/truck.tscn",
             "seats": {
-            "SeatDriver": "",
-            "SeatPassenger": ""
+            "seat_driver": "",
+            "seat_passenger": ""
             },
             "speed": 0.0
         },
@@ -8625,8 +8625,8 @@
             },
             "scenename": "scenes/_universe/vehicles/ground/trucks/truck.tscn",
             "seats": {
-            "SeatDriver": "",
-            "SeatPassenger": ""
+            "seat_driver": "",
+            "seat_passenger": ""
             },
             "speed": 0.0
         },
@@ -8648,8 +8648,8 @@
             },
             "scenename": "scenes/_universe/vehicles/ground/trucks/truck.tscn",
             "seats": {
-            "SeatDriver": "",
-            "SeatPassenger": ""
+            "seat_driver": "",
+            "seat_passenger": ""
             },
             "speed": 0.0
         },
@@ -8671,8 +8671,8 @@
             },
             "scenename": "scenes/_universe/vehicles/ground/trucks/truck.tscn",
             "seats": {
-            "SeatDriver": "",
-            "SeatPassenger": ""
+            "seat_driver": "",
+            "seat_passenger": ""
             },
             "speed": 0.0
         },
@@ -8694,8 +8694,8 @@
             },
             "scenename": "scenes/_universe/vehicles/ground/trucks/truck.tscn",
             "seats": {
-            "SeatDriver": "",
-            "SeatPassenger": ""
+            "seat_driver": "",
+            "seat_passenger": ""
             },
             "speed": 0.0
         },
@@ -8717,8 +8717,8 @@
             },
             "scenename": "scenes/_universe/vehicles/ground/trucks/truck.tscn",
             "seats": {
-            "SeatDriver": "",
-            "SeatPassenger": ""
+            "seat_driver": "",
+            "seat_passenger": ""
             },
             "speed": 0.0
         },
@@ -8740,8 +8740,8 @@
             },
             "scenename": "scenes/_universe/vehicles/ground/trucks/truck.tscn",
             "seats": {
-            "SeatDriver": "",
-            "SeatPassenger": ""
+            "seat_driver": "",
+            "seat_passenger": ""
             },
             "speed": 0.0
         },
@@ -8763,8 +8763,8 @@
             },
             "scenename": "scenes/_universe/vehicles/ground/trucks/truck.tscn",
             "seats": {
-            "SeatDriver": "",
-            "SeatPassenger": ""
+            "seat_driver": "",
+            "seat_passenger": ""
             },
             "speed": 0.0
         },
@@ -8786,8 +8786,8 @@
             },
             "scenename": "scenes/_universe/vehicles/ground/trucks/truck.tscn",
             "seats": {
-            "SeatDriver": "",
-            "SeatPassenger": ""
+            "seat_driver": "",
+            "seat_passenger": ""
             },
             "speed": 0.0
         },
@@ -8809,8 +8809,8 @@
             },
             "scenename": "scenes/_universe/vehicles/ground/trucks/truck.tscn",
             "seats": {
-            "SeatDriver": "",
-            "SeatPassenger": ""
+            "seat_driver": "",
+            "seat_passenger": ""
             },
             "speed": 0.0
         },
@@ -8832,8 +8832,8 @@
             },
             "scenename": "scenes/_universe/vehicles/ground/trucks/truck.tscn",
             "seats": {
-            "SeatDriver": "",
-            "SeatPassenger": ""
+            "seat_driver": "",
+            "seat_passenger": ""
             },
             "speed": 0.0
         },

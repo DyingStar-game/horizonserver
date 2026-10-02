@@ -217,6 +217,7 @@ impl Server {
         let sent = self.send_zones("release");
         self.managed_objects.lock().unwrap().clear();
         self.managed_players.lock().unwrap().clear();
+        crate::ownership::release_all(&self.uuid);
         self.transferring_players.lock().unwrap().clear();
         self.set_state(if sent { ServerState::Online } else { ServerState::Offline });
     }
@@ -226,6 +227,7 @@ impl Server {
     pub fn retire(&self) {
         self.set_state(ServerState::Maintenance);
         *self.websocket_sender.lock().unwrap() = None;
+        crate::ownership::release_all(&self.uuid);
     }
 
     /// Marks the socket dead and tells the manager. Called by the reader task.
@@ -300,6 +302,9 @@ impl Server {
     /// can safely reach this server through several paths.
     fn quit_player(&self, item: serde_json::Value) {
         let object_uuid = item["object_uuid"].as_str().unwrap_or_default().to_string();
+        // The player is gone whatever Godot answers: never leave a stale owner, it
+        // would keep the same uuid (a returning account) from being spawned anywhere.
+        crate::ownership::release(&object_uuid, &self.uuid);
         if !self.is_running() || !self.is_managed_player(&object_uuid) {
             debug!("🔧 DsGameServerPlugin: Player {} is not on this server, skipping player_quit.", object_uuid);
             return;
@@ -310,11 +315,14 @@ impl Server {
         crate::plugin_rt().spawn(async move {
             let result = spawn_player::handle_player_quit(item, Arc::clone(&server.websocket_sender)).await;
             if result.is_ok() {
-                let mut players = server.managed_players.lock().unwrap();
-                if let Some(pos) = players.iter().position(|x| x == &object_uuid) {
-                    players.remove(pos);
-                    info!("🔧 DsGameServerPlugin: Removed player {} from managed_players after quit", object_uuid);
+                {
+                    let mut players = server.managed_players.lock().unwrap();
+                    if let Some(pos) = players.iter().position(|x| x == &object_uuid) {
+                        players.remove(pos);
+                        info!("🔧 DsGameServerPlugin: Removed player {} from managed_players after quit", object_uuid);
+                    }
                 }
+                crate::ownership::release(&object_uuid, &server.uuid);
                 server.managed_objects.lock().unwrap().remove(&object_uuid);
                 player_movement::forget_velocity(&object_uuid);
             } else {
@@ -432,14 +440,28 @@ impl Server {
                     );
                     return Ok(());
                 }
-                if server.is_managed_player(&object_uuid) {
-                    debug!("🔧 DsGameServerPlugin: player {} already managed, skipping duplicate new_player", object_uuid);
-                    return Ok(());
+                // Two servers hold the same zones during a split / merge: the first
+                // one to claim the player gets it, the other must not spawn it too.
+                match crate::ownership::claim(&object_uuid, &server.uuid, &server.managed_players, None) {
+                    crate::ownership::Claim::Taken => {}
+                    crate::ownership::Claim::AlreadyMine => {
+                        debug!("🔧 DsGameServerPlugin: player {} already managed, skipping duplicate new_player", object_uuid);
+                        return Ok(());
+                    }
+                    crate::ownership::Claim::Other(owner) => {
+                        info!("🔧 DsGameServerPlugin: player {} already owned by server {}, not spawned on {}", object_uuid, owner, server.server_name);
+                        return Ok(());
+                    }
                 }
 
                 info!("🔧 DsGameServerPlugin: New player event: {:?}", event);
                 server.seed_player_parent(&object_uuid, &event["object_data"]);
-                server.managed_players.lock().unwrap().push(object_uuid);
+                {
+                    let mut players = server.managed_players.lock().unwrap();
+                    if !players.contains(&object_uuid) {
+                        players.push(object_uuid);
+                    }
+                }
 
                 let websocket_sender = Arc::clone(&server.websocket_sender);
                 rt.spawn(async move {
@@ -572,10 +594,13 @@ impl Server {
                     for obj in &all {
                         server.managed_objects.lock().unwrap().remove(&obj.object_uuid);
                         if obj.object_type == "player" {
-                            let mut players = server.managed_players.lock().unwrap();
-                            if let Some(pos) = players.iter().position(|x| x == &obj.object_uuid) {
-                                players.remove(pos);
+                            {
+                                let mut players = server.managed_players.lock().unwrap();
+                                if let Some(pos) = players.iter().position(|x| x == &obj.object_uuid) {
+                                    players.remove(pos);
+                                }
                             }
+                            crate::ownership::release(&obj.object_uuid, &server.uuid);
                             server.player_parents.lock().unwrap().remove(&obj.object_uuid);
                         }
                     }
@@ -615,12 +640,7 @@ impl Server {
                         if child.object_type == "player" {
                             let spawned = spawn_player::handle_spawn_player(serde_json::to_value(child).unwrap_or_default(), Arc::clone(&server.websocket_sender)).await;
                             if spawned.is_ok() {
-                                {
-                                    let mut players = server.managed_players.lock().unwrap();
-                                    if !players.contains(&child.object_uuid) {
-                                        players.push(child.object_uuid.clone());
-                                    }
-                                }
+                                crate::ownership::take(&child.object_uuid, &server.uuid, &server.managed_players);
                                 let _ = player_movement::replay_velocity(&child.object_uuid, &server.websocket_sender);
                             }
                             server.transferring_players.lock().unwrap().remove(&child.object_uuid);
@@ -666,6 +686,7 @@ impl Server {
                             info!("🔧 DsGameServerPlugin: Removed player {} from managed_players on source server before freeze", object_uuid);
                         }
                     }
+                    crate::ownership::release(&object_uuid, &server.uuid);
                     server.managed_objects.lock().unwrap().remove(&object_uuid);
                     for child in &children {
                         server.managed_objects.lock().unwrap().remove(&child.object_uuid);
@@ -702,9 +723,18 @@ impl Server {
                         object_uuid, world.world, world.planet_name, zones_label(&zones));
                     return Ok(());
                 };
-                if server.is_managed_player(&object_uuid) {
-                    debug!("🔧 DsGameServerPlugin: player {} already managed here, ignoring out_of_zone", object_uuid);
-                    return Ok(());
+                // Only one destination takes the player, even where two servers hold the
+                // zone (mesh transition). The source may not have let go yet: allowed.
+                match crate::ownership::claim(&object_uuid, &server.uuid, &server.managed_players, Some(source_uuid.as_str())) {
+                    crate::ownership::Claim::Taken => {}
+                    crate::ownership::Claim::AlreadyMine => {
+                        debug!("🔧 DsGameServerPlugin: player {} already managed here, ignoring out_of_zone", object_uuid);
+                        return Ok(());
+                    }
+                    crate::ownership::Claim::Other(owner) => {
+                        info!("🔧 DsGameServerPlugin: player {} out of zone already taken by server {}, not spawned on {}", object_uuid, owner, server.server_name);
+                        return Ok(());
+                    }
                 }
                 info!("🔧 DsGameServerPlugin: player {} lands in zone {} of {}", object_uuid, zone.label(), server.server_name);
 
@@ -762,6 +792,7 @@ impl Server {
                             let _ = spawn_prop::handle_spawn_prop(initial_objects::item_on_wire(child), Arc::clone(&server.websocket_sender)).await;
                         }
                     } else {
+                        crate::ownership::release(&object_uuid, &server.uuid);
                         error!("🔧 DsGameServerPlugin: Failed to spawn player {}, not adding to managed_players", object_uuid);
                     }
                     server.transferring_players.lock().unwrap().remove(&object_uuid);

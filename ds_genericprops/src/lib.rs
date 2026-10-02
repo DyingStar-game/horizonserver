@@ -745,6 +745,16 @@ impl GenericPropsPlugin {
         }).await
         .map_err(|e| PluginError::ExecutionError(e.to_string()))?;
         
+        // Load of the Godot servers, from ds_game_server every 5 s: where new players go.
+        events.on_plugin("genericprops", "servers_load", move |event: serde_json::Value| {
+            match serde_json::from_value::<ds_common::mesh_load::PoolLoad>(event) {
+                Ok(load) => handlers::mesh_load::set(load),
+                Err(e) => warn!("plugin genericprops (servers_load): unreadable load: {}", e),
+            }
+            Ok(())
+        }).await
+        .map_err(|e| PluginError::ExecutionError(e.to_string()))?;
+
         let events_new_player = Arc::clone(&events);
         let handle_new_player = luminal_handle.clone();
         events.on_plugin("genericprops", "new_player", move |event: serde_json::Value| {

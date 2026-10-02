@@ -17,6 +17,7 @@ use crate::mesh::{plan_split, MeshRules, Rule};
 use crate::server::{Server, ServerState};
 
 use ds_common::events::GenericPropsRequest;
+use ds_common::mesh_load::{PoolLoad, ServerLoad};
 use ds_common::world::{ObjectWorld, Point3};
 use ds_common::zone::{is_world_object, zones_contain, zones_label, Zone};
 use horizon_event_system::{utils, PlayerId, ServerContext};
@@ -71,6 +72,9 @@ struct ServerSamples {
     /// Until then the samples describe the layout before a transition (Godot
     /// erases the players it lost one by one after `update_zones`): ignored.
     settle_until: Option<Instant>,
+    /// Zones were (re)assigned and no serverinfo came back since: Godot is still
+    /// loading them, its main loop blocked. Held to `LOADING_SILENCE_TIMEOUT`.
+    loading: bool,
 }
 
 /// One split, kept so the pair can be merged back in reverse order.
@@ -163,12 +167,20 @@ struct InFlight {
 }
 
 const RECONNECT_DELAY: Duration = Duration::from_secs(10);
-/// A running server sends serverinfo every second; after this much silence it is
-/// declared dead and its zones are re-homed. Generous on purpose: a Godot server
-/// that just received zones stalls its main loop for tens of seconds while it
-/// creates the objects, and a false positive re-homes its players onto another
-/// cold server — a cascade far worse than waiting for a real hang.
-const SERVER_SILENCE_TIMEOUT: Duration = Duration::from_secs(60);
+/// A running server sends serverinfo every second. Silent this long, it is taken
+/// for overloaded, not dead: its main loop is stuck in long frames (village
+/// spawns, navmesh bakes: 16-40 s each on minikube, 2026-10-02) and the cure is
+/// to give part of its zones away. A split only writes to it, it needs no answer.
+const OVERLOAD_SILENCE: Duration = Duration::from_secs(60);
+/// Silent this long, it is declared dead and its zones are re-homed. Generous on
+/// purpose: re-homing a whole universe onto a cold server froze that one too
+/// (100-300 s to load), and the zones bounced from server to server without a
+/// single split; a real hang only costs the wait.
+const SERVER_SILENCE_TIMEOUT: Duration = Duration::from_secs(300);
+/// Same, for a server that has not reported since it was handed zones: loading
+/// SandBox and its villages took 93 s, the whole universe 305 s (minikube,
+/// 2026-10-02).
+const LOADING_SILENCE_TIMEOUT: Duration = Duration::from_secs(420);
 /// After a transition the servers involved report the previous layout for a
 /// while: Godot grants 5 s of grace after a zone change, then erases the players
 /// it lost a few per second. Their samples are ignored that long.
@@ -183,6 +195,15 @@ const WATCHDOG_TICK: Duration = Duration::from_secs(5);
 const PLANET_BURST_WINDOW: Duration = Duration::from_millis(500);
 /// How often the pool name is resolved again (see `Discovery`).
 const DISCOVERY_INTERVAL: Duration = Duration::from_secs(60);
+/// How often the whole pool is logged as one `[mesh] state` JSON line (players
+/// per server as Godot and Horizon count them, zones with their bounds), for the
+/// load tests to plot the meshing over time.
+const STATE_LOG_INTERVAL: Duration = Duration::from_secs(5);
+/// A running server silent longer than this takes no new player (`servers_load`).
+const ACCEPT_SILENCE: Duration = Duration::from_secs(10);
+/// A server with more messages than this waiting to be written to it is not
+/// reading its socket (frozen): it takes no new player.
+const OUTBOX_BACKLOG: usize = 1000;
 /// Port of a Godot server when `GAME_SERVER_HOST` gives only a host.
 const GAME_SERVER_PORT: u16 = 8980;
 
@@ -256,6 +277,7 @@ pub struct ServerManager {
     static_pool: Vec<String>,
     discovery: Option<Discovery>,
     last_discovery: Option<Instant>,
+    last_state_log: Option<Instant>,
 }
 
 impl ServerManager {
@@ -276,6 +298,7 @@ impl ServerManager {
             static_pool: Vec::new(),
             discovery: None,
             last_discovery: None,
+            last_state_log: None,
         }
     }
 
@@ -374,6 +397,7 @@ impl ServerManager {
                 // (Horizon may have loaded the world before the Godot server showed up).
                 let zones = self.initial_zones();
                 if first.start(zones.clone(), context.clone()) {
+                    self.touch_loading(&first.uuid);
                     self.queue.push_back(MeshOp::Adopt { server: first, zones });
                 } else {
                     error!("[mesh] could not start {} on [{}]", first.server_name, zones_label(&zones));
@@ -388,6 +412,10 @@ impl ServerManager {
                 self.refresh_pool(&context).await;
             }
             self.check_silent_servers(&context).await;
+            if self.last_state_log.map_or(true, |at| at.elapsed() >= STATE_LOG_INTERVAL) {
+                self.log_state();
+                self.publish_load(&context);
+            }
             self.start_next_op();
             let message = match backlog.pop() {
                 Some(message) => message,
@@ -558,16 +586,21 @@ impl ServerManager {
     }
 
     fn on_op_done(&mut self, result: OpResult) {
+        let mut sent_nothing = false;
         if let Some(op) = self.in_flight.take() {
             info!("[mesh] op done: {} after {:?}", op.label, op.started.elapsed());
+            // A split skipped or aborted before the child started sent nothing to
+            // anyone: no burst to absorb, and the parent's silence must keep
+            // counting (a hung server would be "split" every minute forever).
+            sent_nothing = op.label.starts_with("split ") && matches!(result.outcome, OpOutcome::Nothing);
         }
         for (uuid, name) in result.planets {
             self.remember_planet(uuid, name);
         }
         // The Godot servers involved just absorbed an object burst and are still
         // shedding what they lost: neither silence nor their numbers mean anything yet.
-        for uuid in &result.servers {
-            self.touch(uuid);
+        for uuid in result.servers.iter().filter(|_| !sent_nothing) {
+            self.touch_loading(uuid);
             self.settle(uuid);
         }
         for uuid in &result.released {
@@ -626,7 +659,14 @@ impl ServerManager {
         let samples = self.samples.entry(info.uuid.clone()).or_default();
         samples.tps = info.tps;
         samples.players = info.players_number;
+        // Seconds this sample stands for: 1 normally, the whole gap when Godot was
+        // stuck in long frames (one sample every 40-50 s under load, 2026-10-02).
+        let covers = samples.last_seen.map_or(1, |seen| now.duration_since(seen).as_secs().clamp(1, u32::MAX as u64) as u32);
         samples.last_seen = Some(now);
+        // Godot's count lags (stuck at 68 while 91 players were assigned to it,
+        // 2026-10-02): judge the split on the larger of the two counts.
+        let players = info.players_number.max(server.players_count().min(u16::MAX as usize) as u16);
+        samples.loading = false;
 
         let Some(rules) = self.rules.clone() else { return };
         // While zones move around, every count describes a layout that is about
@@ -636,8 +676,10 @@ impl ServerManager {
             samples.split_hits = 0;
             return;
         }
-        if rules.split.split_hit(info.tps, info.players_number) {
-            samples.split_hits += 1;
+        // `split_after` is in seconds of overload, not in samples: counted per
+        // sample, 10 hits took 7 minutes on a server reporting twice a minute.
+        if rules.split.split_hit(info.tps, players) {
+            samples.split_hits = samples.split_hits.saturating_add(covers);
         } else {
             samples.split_hits = 0;
         }
@@ -652,8 +694,89 @@ impl ServerManager {
         self.evaluate_merge(&rules);
     }
 
-    fn touch(&mut self, uuid: &str) {
-        self.samples.entry(uuid.to_string()).or_default().last_seen = Some(Instant::now());
+    /// One JSON line describing every server of the pool; see `STATE_LOG_INTERVAL`.
+    fn log_state(&mut self) {
+        self.last_state_log = Some(Instant::now());
+        let servers: Vec<serde_json::Value> = self
+            .servers
+            .iter()
+            .map(|s| {
+                let samples = self.samples.get(&s.uuid);
+                json!({
+                    "name": s.server_name,
+                    "uuid": s.uuid,
+                    "address": s.address,
+                    "state": format!("{:?}", s.state()),
+                    "tps": samples.map(|x| x.tps),
+                    "players_godot": samples.map(|x| x.players),
+                    "players_horizon": s.players_count(),
+                    "pending": s.pending.load(std::sync::atomic::Ordering::Relaxed),
+                    "outbox": s.outbox_pending.load(std::sync::atomic::Ordering::Relaxed),
+                    "split_hits": samples.map(|x| x.split_hits),
+                    "settling": self.settling(&s.uuid),
+                    "loading": samples.map_or(false, |x| x.loading),
+                    "last_seen_ms": samples.and_then(|x| x.last_seen).map(|t| t.elapsed().as_millis() as u64),
+                    "zones": s.zones(),
+                })
+            })
+            .collect();
+        let state = json!({
+            "in_flight": self.in_flight.as_ref().map(|op| op.label.clone()),
+            "queued": self.queue.len(),
+            "splits": self.split_history.len(),
+            "servers": servers,
+        });
+        info!("[mesh] state {}", state);
+    }
+
+    /// Sends the load of the running servers to genericprops, which places the new
+    /// players in the villages of the least loaded server that can take them.
+    fn publish_load(&self, context: &Arc<dyn ServerContext>) {
+        let servers: Vec<ServerLoad> = self
+            .running_servers()
+            .into_iter()
+            .map(|s| {
+                let samples = self.samples.get(&s.uuid);
+                let godot = samples.map_or(0, |x| x.players);
+                let players = godot.max(s.players_count().min(u16::MAX as usize) as u16);
+                let reporting = samples
+                    .and_then(|x| x.last_seen)
+                    .map_or(false, |seen| seen.elapsed() <= ACCEPT_SILENCE);
+                let loading = samples.map_or(false, |x| x.loading);
+                let overloaded = match (&self.rules, samples) {
+                    (Some(rules), Some(x)) => rules.split.split_hit(x.tps, players),
+                    _ => false,
+                };
+                ServerLoad {
+                    uuid: s.uuid.clone(),
+                    name: s.server_name.clone(),
+                    players: players as u32,
+                    accepting: reporting && !loading && !overloaded
+                        && s.outbox_pending.load(std::sync::atomic::Ordering::Relaxed) < OUTBOX_BACKLOG,
+                    zones: s.zones(),
+                }
+            })
+            .collect();
+        let capacity = match self.rules.as_ref().map(|r| r.split) {
+            Some(Rule::Players(n)) => Some(n as u32),
+            _ => None,
+        };
+        let load = PoolLoad { servers, capacity };
+        let events = context.events();
+        crate::plugin_rt().spawn(async move {
+            if let Err(e) = events.emit_plugin("genericprops", "servers_load", &load).await {
+                error!("[mesh] failed to publish servers_load: {}", e);
+            }
+        });
+    }
+
+    /// `uuid` was just handed zones: its silence clock restarts, with the loading
+    /// allowance until its first serverinfo. An idle server never reports, so
+    /// without this its last sample is minutes old the moment it is started.
+    fn touch_loading(&mut self, uuid: &str) {
+        let samples = self.samples.entry(uuid.to_string()).or_default();
+        samples.last_seen = Some(Instant::now());
+        samples.loading = true;
     }
 
     fn settle(&mut self, uuid: &str) {
@@ -677,16 +800,44 @@ impl ServerManager {
             .into_iter()
             .filter(|s| !busy.contains(&s.uuid))
             .filter(|s| {
-                self.samples
-                    .get(&s.uuid)
-                    .and_then(|x| x.last_seen)
-                    .map_or(false, |seen| now.duration_since(seen) > SERVER_SILENCE_TIMEOUT)
+                self.samples.get(&s.uuid).map_or(false, |x| {
+                    let timeout = if x.loading { LOADING_SILENCE_TIMEOUT } else { SERVER_SILENCE_TIMEOUT };
+                    x.last_seen.map_or(false, |seen| now.duration_since(seen) > timeout)
+                })
             })
             .collect();
+        // Silent but not dead yet: overloaded, give part of its zones away (one at
+        // a time, and only if the pool has room; the op makes it busy meanwhile).
+        if self.rules.is_some() && self.in_flight.is_none() && self.queue.is_empty() {
+            let overloaded = self
+                .running_servers()
+                .into_iter()
+                .filter(|s| !silent.iter().any(|d| d.uuid == s.uuid))
+                // Nobody to relieve it of (still loading what it was handed).
+                .filter(|s| s.players_count() > 0)
+                .find(|s| {
+                    self.samples
+                        .get(&s.uuid)
+                        .and_then(|x| x.last_seen)
+                        .map_or(false, |seen| now.duration_since(seen) > OVERLOAD_SILENCE)
+                });
+            if let Some(server) = overloaded {
+                match self.idle_server(&server.uuid) {
+                    Some(child) => {
+                        warn!(
+                            "[mesh] {} sent no serverinfo for {:?}: overloaded, splitting it onto {}",
+                            server.server_name, OVERLOAD_SILENCE, child.server_name
+                        );
+                        self.queue.push_back(MeshOp::Split { parent: server, child });
+                    }
+                    None => debug!("[mesh] {} is silent but no idle server is available in the pool", server.server_name),
+                }
+            }
+        }
         for server in silent {
             error!(
-                "[mesh] {} ({}) sent no serverinfo for {:?}: declaring it dead",
-                server.server_name, server.address, SERVER_SILENCE_TIMEOUT
+                "[mesh] {} ({}) sent no serverinfo for too long (loading={}): declaring it dead",
+                server.server_name, server.address, self.samples.get(&server.uuid).map_or(false, |x| x.loading)
             );
             // Dropping the writer makes every later send fail; the blocked reader ends
             // whenever the socket finally closes and mark_offline is idempotent.
@@ -726,6 +877,10 @@ impl ServerManager {
                     // The idle server is reserved now so that a split queued behind
                     // does not pick it up; the objects follow when the op runs.
                     if idle.start(zones.clone(), context.clone()) {
+                        // Running from now on: without a fresh clock the next watchdog
+                        // pass declared it dead at once, and re-homed onto the next idle
+                        // server, through the whole pool in 1 ms (2026-10-02).
+                        self.touch_loading(&idle.uuid);
                         self.queue.push_back(MeshOp::Adopt { server: idle, zones: zones.clone() });
                         rehomed = true;
                     } else {
@@ -752,12 +907,16 @@ impl ServerManager {
             // redeploy) must not elect several servers before the op runs.
             let zones = if zones.is_empty() { self.initial_zones() } else { zones };
             if server.start(zones.clone(), context.clone()) {
+                self.touch_loading(&server.uuid);
                 self.queue.push_back(MeshOp::Adopt { server, zones });
             } else {
                 error!("[mesh] could not start {} on [{}]", server.server_name, zones_label(&zones));
             }
         } else {
-            // Back in the pool: keep it warm with the planets.
+            // Back in the pool: keep it warm with the planets. A server declared
+            // dead may only have been frozen: it still simulates the zones it had
+            // (and their players, now owned by someone else) until told otherwise.
+            server.release();
             self.queue.push_back(MeshOp::Reseed { server });
         }
     }

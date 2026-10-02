@@ -111,6 +111,33 @@ Horizon forwards it to the players of that server as an `update_property` of
 `data.universe.{players_number, godotservers_number}` (schema
 `horizon-to-client/serverinfo.update_property.schema.json`).
 
+## Horizon → genericprops `servers_load`
+
+Every 5 s (with the `[mesh] state` log line) ds_game_server publishes the load of
+the running servers (`ds_common::mesh_load::PoolLoad`):
+
+```json
+{"capacity": 75, "servers": [{"uuid": "…", "name": "vitae-33386", "players": 52,
+  "accepting": true, "zones": [{"id": "…", "world": "planet", "planet_uuid": "…", "planet_name": "SandBox", "bounds": {…}}]}]}
+```
+
+`players` is the larger of Godot's and Horizon's counts; `accepting` = reported
+within 10 s, not loading zones it was just handed, and under its split rule;
+`capacity` is N of a `players:N` split rule.
+
+genericprops places each new player in the villages of the **least loaded server
+that accepts** (then the fullest village of that server, so villages stay compact),
+counting the players it placed since the last update. Its reserve of free places is
+kept in the zones of accepting servers only (when one of them owns a village at all:
+an accepting server holding space and the other planets cannot take arrivals), and
+new villages are requested there first, never more than 2 waiting to be spawned per
+server (Godot freezes 16-20 s per village; 40+ requests in a row kept one frozen). A refusing server still gets players when no accepting one has room, and
+without a fresh load (none yet, or older than 30 s) the placement is the historical
+one: the fullest village under the cap, the next villages requested near the last.
+Why: filling villages in line sent every arrival to the server owning the next
+village, faster than splits could take them away (228 players on one server,
+minikube load test 2026-10-02).
+
 ## Configuration (`plugins.toml`, `[ds_game_server]`)
 
 ```toml
@@ -187,8 +214,23 @@ consuming `serverinfo` meanwhile and applies the `OpResult` when it lands
 (split record, released server, planets seen in the snapshot). Consequences:
 
 - **Silence check**: a running server that sent no `serverinfo` for 60 s is
-  declared dead and re-homed. The servers of the op in flight are exempt (they
-  are busy instantiating what it sent) and are "touched" when it ends. Before
+  taken for *overloaded* (its main loop is stuck in long frames) and split onto
+  an idle server, if any; silent for 300 s (420 s while it loads zones it was
+  just handed, i.e. before its first `serverinfo`) it is declared dead and
+  re-homed. A server that reconnects after that gets a `release` first, so a
+  Godot that was only frozen drops the zones it still simulates. The servers of
+  the op in flight are exempt (they are busy instantiating what it sent) and are
+  "touched" when it ends. `serverinfo` is handled by the socket reader itself,
+  never queued behind the positions (a burst of those delayed it for minutes).
+  Writes to a Godot server go through a per-connection queue drained by its own
+  thread (`handlers::Outbox`): a frozen server stops reading, its TCP buffer fills
+  and a blocking write used to hold the sender mutex until every worker of the
+  plugin runtime was stuck on it and the manager loop stopped. Its backlog is the
+  `outbox` field of `[mesh] state`; over 1000 the server takes no new player.
+  The `players:N` split rule uses the larger of Godot's `players_number` and
+  Horizon's own count (Godot's lags), and `split_after_samples` counts seconds
+  of overload: a sample stands for the time since the previous one, so a server
+  that reports twice a minute still splits after ~10 s over the rule. Before
   the ops were moved off the loop, a 70 s split stalled the loop itself and
   every *other* server came out of it "silent" — a false death that re-homed
   the players onto a third cold server.

@@ -42,10 +42,8 @@ fn is_member(item: &GenericPropsRequest, zones: &[Zone]) -> bool {
 fn track(item: &GenericPropsRequest, server: &Server) {
     server.managed_objects.lock().unwrap().insert(item.object_uuid.clone());
     if item.object_type == "player" {
-        let mut players = server.managed_players.lock().unwrap();
-        if !players.contains(&item.object_uuid) {
-            players.push(item.object_uuid.clone());
-        }
+        // A hand-over decided by the ServerManager: this server owns the player now.
+        crate::ownership::take(&item.object_uuid, &server.uuid, &server.managed_players);
         let parent = item.object_data.get("parent_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
         server.player_parents.lock().unwrap().insert(item.object_uuid.clone(), parent);
     }
@@ -54,10 +52,13 @@ fn track(item: &GenericPropsRequest, server: &Server) {
 fn untrack(item: &GenericPropsRequest, server: &Server) {
     server.managed_objects.lock().unwrap().remove(&item.object_uuid);
     if item.object_type == "player" {
-        let mut players = server.managed_players.lock().unwrap();
-        if let Some(pos) = players.iter().position(|x| x == &item.object_uuid) {
-            players.remove(pos);
+        {
+            let mut players = server.managed_players.lock().unwrap();
+            if let Some(pos) = players.iter().position(|x| x == &item.object_uuid) {
+                players.remove(pos);
+            }
         }
+        crate::ownership::release(&item.object_uuid, &server.uuid);
         server.player_parents.lock().unwrap().remove(&item.object_uuid);
     }
 }

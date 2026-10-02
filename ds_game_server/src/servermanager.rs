@@ -716,6 +716,7 @@ impl ServerManager {
         *server.zones.write().unwrap() = Vec::new();
         server.managed_objects.lock().unwrap().clear();
         server.managed_players.lock().unwrap().clear();
+        crate::ownership::release_all(&server.uuid);
 
         let mut rehomed = false;
         if was_running {
@@ -881,7 +882,8 @@ impl ServerManager {
                 "name": serverinfo.server_name,
             },
             "universe": {
-                "players_number": self.servers.iter().map(|s| s.players_count() as u32).sum::<u32>(),
+                // Distinct players: a player listed by two servers (mesh transition) counts once.
+                "players_number": crate::ownership::count(),
                 "godotservers_number": self.servers.iter().filter(|s| s.is_running()).count(),
             }
         });

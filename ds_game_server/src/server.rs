@@ -6,7 +6,7 @@
 //! position) and the server owns a list of `Zone`s, see `ds_common::zone`.
 
 use crate::handlers::{
-    initial_objects, player_action, player_movement, send_ws, spawn_player, spawn_prop, update_prop, WsWriter,
+    initial_objects, player_action, player_movement, send_ws, spawn_player, spawn_prop, update_prop, Outbox, WsWriter,
 };
 use crate::servermanager::{ManagerMessage, ServerInfo};
 
@@ -22,7 +22,7 @@ use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 use std::net::TcpStream;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
@@ -95,6 +95,13 @@ pub struct Server {
     /// it was created for (a hung server can be reconnected while its old reader is
     /// still blocked on the dead socket).
     pub connection_generation: Arc<AtomicU64>,
+    /// Messages read from the socket and not processed yet (positions, props).
+    /// Grows when the processor cannot keep up, e.g. the burst a Godot server
+    /// flushes after a long frame.
+    pub pending: Arc<AtomicUsize>,
+    /// Messages queued towards the Godot server and not written yet (see `Outbox`):
+    /// grows while it is frozen.
+    pub outbox_pending: Arc<AtomicUsize>,
 }
 
 impl Server {
@@ -117,6 +124,8 @@ impl Server {
             transferring_players: Arc::new(Mutex::new(HashSet::new())),
             handlers_registered: Arc::new(AtomicBool::new(false)),
             connection_generation: Arc::new(AtomicU64::new(0)),
+            pending: Arc::new(AtomicUsize::new(0)),
+            outbox_pending: Arc::new(AtomicUsize::new(0)),
             player_parents: Arc::new(Mutex::new(HashMap::new())),
             prewarm_sent: Arc::new(Mutex::new(HashMap::new())),
             last_info: Arc::new(Mutex::new(None)),
@@ -156,7 +165,7 @@ impl Server {
     pub fn connect(&mut self) -> Result<(), WebSocketError> {
         let client = websocket::client::ClientBuilder::new(&self.address).unwrap().connect_insecure()?;
         let (receiver, sender) = client.split().unwrap();
-        *self.websocket_sender.lock().unwrap() = Some(sender);
+        *self.websocket_sender.lock().unwrap() = Some(Outbox::spawn(sender, &self.server_name, Arc::clone(&self.outbox_pending)));
         *self.websocket_receiver.lock().unwrap() = Some(receiver);
         self.connection_generation.fetch_add(1, Ordering::SeqCst);
         self.set_state(ServerState::Online);
@@ -810,13 +819,12 @@ impl Server {
         &self,
         mut rx: UnboundedReceiver<GameServerMessage>,
         events_processor: Arc<EventSystem>,
-        manager_tx: mpsc::Sender<ManagerMessage>,
     ) {
         info!("🔧 DsGameServerPlugin: Async processor task started for {}", self.server_name);
         let mut message_count = 0u64;
-        let mut warned_fps_alias = false;
 
         while let Some(msg) = rx.recv().await {
+            self.pending.fetch_sub(1, Ordering::Relaxed);
             message_count += 1;
             if message_count % 100 == 0 {
                 debug!("Async processor: processed {} messages", message_count);
@@ -852,36 +860,7 @@ impl Server {
                     }
                 }
                 GameServerMessage::PropPosition(prop_data) => {
-                    if prop_data["type"] == "serverinfo" {
-                        debug!("🔧 DsGameServerPlugin: Updating server info: {:?}", prop_data);
-                        // `tps` = achieved physics ticks per second. `fps` is the pre-rename
-                        // field, accepted during the transition.
-                        let tps = match prop_data.get("tps").and_then(|v| v.as_u64()) {
-                            Some(tps) => tps,
-                            None => {
-                                if !warned_fps_alias {
-                                    warn!("serverinfo from {} has no `tps` field, falling back to deprecated `fps`", self.server_name);
-                                    warned_fps_alias = true;
-                                }
-                                prop_data["fps"].as_u64().unwrap_or_default()
-                            }
-                        };
-                        let data = ServerInfo {
-                            uuid: self.uuid.clone(),
-                            tps: tps.min(u8::MAX as u64) as u8,
-                            chunks_loading: prop_data["chunks_loading"].as_u64().map(|v| v as u32).unwrap_or_default(),
-                            objects_number: prop_data["objects_number"].as_u64().map(|v| v as u32).unwrap_or_default(),
-                            players_number: prop_data["players_number"].as_u64().map(|v| v as u16).unwrap_or_default(),
-                            scenes_number: prop_data["scenes_number"].as_u64().map(|v| v as u32).unwrap_or_default(),
-                            scenes_number_actives: prop_data["scenes_number_actives"].as_u64().map(|v| v as u32).unwrap_or_default(),
-                            server_name: self.server_name.clone(),
-                        };
-                        *self.last_info.lock().unwrap() = Some((data.clone(), Instant::now()));
-                        // Use try_send to avoid blocking if channel is full - this is not critical data
-                        if let Err(e) = manager_tx.try_send(ManagerMessage::ServerInfo(data)) {
-                            debug!("ServerInfo channel full or closed, dropping update: {}", e);
-                        }
-                    } else if let Err(e) = events_processor.emit_plugin("genericprops", "update_object", &json!({
+                    if let Err(e) = events_processor.emit_plugin("genericprops", "update_object", &json!({
                         "object_type": prop_data["type"],
                         "object_uuid": prop_data["uuid"],
                         "object_data": prop_data,
@@ -959,7 +938,47 @@ impl Server {
         position_updates
     }
 
-    fn dispatch_text(&self, s: &str, tx: &UnboundedSender<GameServerMessage>) {
+    /// `serverinfo` goes straight to the manager from the reader: queued behind
+    /// the positions it waited for the processor, which a burst of positions
+    /// (flushed by Godot after a long frame) kept busy long enough to make a live
+    /// server look silent and get declared dead (minikube 2026-10-02).
+    fn report_server_info(&self, prop_data: &serde_json::Value, manager_tx: &mpsc::Sender<ManagerMessage>) {
+        // `tps` = achieved physics ticks per second. `fps` is the pre-rename
+        // field, accepted during the transition.
+        let tps = match prop_data.get("tps").and_then(|v| v.as_u64()) {
+            Some(tps) => tps,
+            None => {
+                debug!("serverinfo from {} has no `tps` field, falling back to deprecated `fps`", self.server_name);
+                prop_data["fps"].as_u64().unwrap_or_default()
+            }
+        };
+        let data = ServerInfo {
+            uuid: self.uuid.clone(),
+            tps: tps.min(u8::MAX as u64) as u8,
+            chunks_loading: prop_data["chunks_loading"].as_u64().map(|v| v as u32).unwrap_or_default(),
+            objects_number: prop_data["objects_number"].as_u64().map(|v| v as u32).unwrap_or_default(),
+            players_number: prop_data["players_number"].as_u64().map(|v| v as u16).unwrap_or_default(),
+            scenes_number: prop_data["scenes_number"].as_u64().map(|v| v as u32).unwrap_or_default(),
+            scenes_number_actives: prop_data["scenes_number_actives"].as_u64().map(|v| v as u32).unwrap_or_default(),
+            server_name: self.server_name.clone(),
+        };
+        *self.last_info.lock().unwrap() = Some((data.clone(), Instant::now()));
+        // try_send: never block the reader; a dropped sample is replaced next second.
+        if let Err(e) = manager_tx.try_send(ManagerMessage::ServerInfo(data)) {
+            debug!("ServerInfo channel full or closed, dropping update: {}", e);
+        }
+    }
+
+    fn enqueue(&self, tx: &UnboundedSender<GameServerMessage>, msg: GameServerMessage) -> bool {
+        self.pending.fetch_add(1, Ordering::Relaxed);
+        if tx.send(msg).is_err() {
+            self.pending.fetch_sub(1, Ordering::Relaxed);
+            return false;
+        }
+        true
+    }
+
+    fn dispatch_text(&self, s: &str, tx: &UnboundedSender<GameServerMessage>, manager_tx: &mpsc::Sender<ManagerMessage>) {
         debug!("[message][from][gamesever]: {}", s);
         let Ok(value) = serde_json::from_str::<serde_json::Value>(s) else {
             debug!("Failed to parse incoming JSON: {}", s);
@@ -971,8 +990,8 @@ impl Server {
             ("players", "position") => {
                 let position_updates = Self::parse_player_positions(&value);
                 if !position_updates.is_empty() {
-                    if let Err(e) = tx.send(GameServerMessage::PlayerPositions(position_updates)) {
-                        error!("Failed to send position updates to processor: {}", e);
+                    if !self.enqueue(tx, GameServerMessage::PlayerPositions(position_updates)) {
+                        error!("Failed to send position updates to processor of {}", self.server_name);
                     }
                 }
             }
@@ -982,14 +1001,18 @@ impl Server {
                     return;
                 };
                 for item in items {
+                    if event == "position" && item["type"] == "serverinfo" {
+                        self.report_server_info(item, manager_tx);
+                        continue;
+                    }
                     let msg = match event {
                         "position" => GameServerMessage::PropPosition(item.clone()),
                         "create_object" => GameServerMessage::PropCreate(item.clone()),
                         "delete_object" => GameServerMessage::PropDelete(item.clone()),
                         _ => GameServerMessage::ObjectUpdate(item.clone()),
                     };
-                    if let Err(e) = tx.send(msg) {
-                        error!("Failed to send props/{} to processor: {}", event, e);
+                    if !self.enqueue(tx, msg) {
+                        error!("Failed to send props/{} to processor of {}", event, self.server_name);
                     }
                 }
             }
@@ -1007,10 +1030,10 @@ impl Server {
         };
         for msg in receiver.incoming_messages() {
             match msg {
-                Ok(OwnedMessage::Text(s)) => self.dispatch_text(&s, &tx),
+                Ok(OwnedMessage::Text(s)) => self.dispatch_text(&s, &tx, &manager_tx),
                 Ok(OwnedMessage::Binary(b)) => {
                     if let Ok(s) = String::from_utf8(b) {
-                        self.dispatch_text(&s, &tx);
+                        self.dispatch_text(&s, &tx, &manager_tx);
                     }
                 }
                 Ok(_) => { /* ignore ping/pong/close frames */ }
@@ -1038,9 +1061,8 @@ impl Server {
 
         let events = context.events();
         let server = self.clone();
-        let processor_tx = manager_tx.clone();
         crate::plugin_rt().spawn(async move {
-            server.received_queue_processing(rx, events, processor_tx).await;
+            server.received_queue_processing(rx, events).await;
         });
 
         let server = self.clone();

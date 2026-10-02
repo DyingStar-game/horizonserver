@@ -51,7 +51,8 @@ impl Rule {
 pub struct MeshRules {
     pub split: Rule,
     pub merge: Rule,
-    /// Consecutive 1 s samples the split rule must hold before acting.
+    /// Seconds the split rule must hold before acting (a sample counts for the
+    /// time since the previous one: Godot reports late when it is overloaded).
     pub split_after: u32,
     pub merge_after: u32,
     pub snapshot_timeout: Duration,

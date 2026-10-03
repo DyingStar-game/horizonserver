@@ -4,15 +4,20 @@
 			"zone": 0,
 			"distance": 400.0,
 			"frequency": 30.0,
+			"lod": [
+				{
+					"distance": 200.0,
+					"frequency": 30.0
+				},
+				{
+					"distance": 300.0,
+					"frequency": 10.0
+				}
+			],
 			"properties": [
 				"position",
 				"rotation",
-				"parent_id",
-				"reception_players",
-				"reception_owner",
-				"storage_shelves",
-				"pnj_reception_deposited_item",
-				"pnj_box_temp_zones"
+				"parent_id"
 			]
 		},
 		{
@@ -21,10 +26,7 @@
 			"frequency": 1.0,
 			"properties": [
 				"scenename",
-				"max_distance_to_reception",
-				"pnj_zones",
-				"is_pnj_workplace",
-				"terrain_settled"
+				"is_platform_spawned"
 			]
 		}
 	]

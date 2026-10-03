@@ -34,17 +34,20 @@
 //! `ObjectInstance::subscribers` on purpose: `GorcInstanceManager::get_object`
 //! deep-clones the whole instance (boxed object, zone manager, subscriber sets)
 //! and doing that on every tick for every moving object is far more expensive
-//! than re-evaluating the radius predicate. `find_players_in_radius` applies the
-//! exact same test against the exact same `player_positions` map that GORC's own
-//! subscription sweep uses, so the two agree.
+//! than re-evaluating the radius predicate. The test is the one
+//! `find_players_in_radius` applies (distance² <= radius²) against the same
+//! `player_positions` map GORC's own subscription sweep uses, so the two agree —
+//! but on one copy of that map per flush, bucketed in a [`PlayerGrid`]: one full
+//! scan of every player per stream and per tier was the whole cost of the loop at
+//! 1248 players (preprod 2026-10-04, the single delivery thread at 100 %).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
-use horizon_event_system::{current_timestamp, EventSystem, GorcObjectId, PlayerId};
+use horizon_event_system::{current_timestamp, EventSystem, GorcObjectId, PlayerId, Vec3};
 use serde_json::json;
 use tracing::{debug, error, info};
 
@@ -71,8 +74,70 @@ const IDLE_RETENTION: Duration = Duration::from_secs(30);
 /// that it need not be smarter than a full pass over the map.
 const GC_EVERY_TICKS: u64 = 500;
 
-/// Ticks between two `[lod]` report lines (10 s).
-const REPORT_EVERY_TICKS: u64 = 1000;
+/// Time between two `[lod]` report lines. Measured in time, not in ticks: a loop
+/// running late is exactly when the line is needed, and 1000 slow ticks once
+/// kept it silent for minutes.
+const REPORT_EVERY: Duration = Duration::from_secs(10);
+
+/// Side of a [`PlayerGrid`] cell: the outer radius of the player channel, so a
+/// player's audience is the 27 cells around it.
+const GRID_CELL: f64 = 200.0;
+
+/// The players of one flush bucketed by position, so a radius query only looks at
+/// the cells it overlaps instead of every player.
+struct PlayerGrid {
+    cells: HashMap<(i64, i64, i64), Vec<(PlayerId, Vec3)>>,
+}
+
+impl PlayerGrid {
+    fn new(players: Vec<(PlayerId, Vec3)>) -> Self {
+        let mut cells: HashMap<(i64, i64, i64), Vec<(PlayerId, Vec3)>> = HashMap::new();
+        for (player_id, position) in players {
+            cells.entry(Self::cell_of(position)).or_default().push((player_id, position));
+        }
+        Self { cells }
+    }
+
+    fn cell_of(position: Vec3) -> (i64, i64, i64) {
+        (
+            (position.x / GRID_CELL).floor() as i64,
+            (position.y / GRID_CELL).floor() as i64,
+            (position.z / GRID_CELL).floor() as i64,
+        )
+    }
+
+    /// Calls `found` with each player within `radius` of `center` (inclusive, like
+    /// `find_players_in_radius`) and its squared distance.
+    fn within(&self, center: Vec3, radius: f64, mut found: impl FnMut(PlayerId, f64)) {
+        let radius_sq = radius * radius;
+        let mut visit = |players: &Vec<(PlayerId, Vec3)>| {
+            for (player_id, position) in players {
+                let distance_sq = position.distance_squared(center);
+                if distance_sq <= radius_sq {
+                    found(*player_id, distance_sq);
+                }
+            }
+        };
+        let span = (radius / GRID_CELL).ceil() as i64;
+        let side = 2 * span + 1;
+        // A huge radius (a 10 km village zone) spans more cells than are occupied:
+        // walking the occupied ones is then the cheaper of the two.
+        if side.saturating_mul(side).saturating_mul(side) > self.cells.len() as i64 {
+            self.cells.values().for_each(|players| visit(players));
+            return;
+        }
+        let (cx, cy, cz) = Self::cell_of(center);
+        for x in cx - span..=cx + span {
+            for y in cy - span..=cy + span {
+                for z in cz - span..=cz + span {
+                    if let Some(players) = self.cells.get(&(x, y, z)) {
+                        visit(players);
+                    }
+                }
+            }
+        }
+    }
+}
 
 /// What the delivery loop did since the last report, per event name. Queued
 /// counts come from the handlers' threads (atomics); the rest is the loop's own.
@@ -107,7 +172,7 @@ fn count_queued(event_name: &str) {
     }
 }
 
-/// One `[lod]` line every `REPORT_EVERY_TICKS`: the numbers to compare a load
+/// One `[lod]` line every `REPORT_EVERY`: the numbers to compare a load
 /// test against (queued updates in, messages out, audience size). Rates are per
 /// second so runs of different lengths compare directly.
 fn report(counters: &mut Counters, streams_total: usize, elapsed: Duration) {
@@ -340,7 +405,7 @@ pub fn start(events: Arc<EventSystem>, definitions: Arc<DashMap<String, ObjectDe
                     flush(&events, &definitions, &mut counters).await;
 
                     ticks = ticks.wrapping_add(1);
-                    if ticks % REPORT_EVERY_TICKS == 0 {
+                    if last_report.elapsed() >= REPORT_EVERY {
                         report(&mut counters, streams().len(), last_report.elapsed());
                         last_report = Instant::now();
                     }
@@ -371,6 +436,10 @@ async fn flush(events: &Arc<EventSystem>, definitions: &Arc<DashMap<String, Obje
     if keys.is_empty() {
         return;
     }
+
+    // One copy of every player position for the whole flush, built on the first
+    // stream that is due (most ticks have none).
+    let mut grid: Option<PlayerGrid> = None;
 
     let now = Instant::now();
     // Half a tick of tolerance. Without it a rate is rounded up to the next
@@ -420,39 +489,22 @@ async fn flush(events: &Arc<EventSystem>, definitions: &Arc<DashMap<String, Obje
         };
 
         // The outermost tier is the whole audience. Anything past it is out of
-        // the channel's zone and gets nothing, exactly as before.
+        // the channel's zone and gets nothing, exactly as before. The innermost
+        // tier containing a recipient decides its rate.
         let outer = tiers.last().copied().unwrap_or(LodTier { distance: 0.0, frequency: 0.0 });
-        let recipients = gorc_instances.find_players_in_radius(object_position, outer.distance).await;
+        let grid = grid.get_or_insert_with(|| PlayerGrid::new(gorc_instances.player_positions_snapshot()));
+        let mut rates: HashMap<PlayerId, f64> = HashMap::new();
+        grid.within(object_position, outer.distance, |player_id, distance_sq| {
+            let frequency = tiers
+                .iter()
+                .find(|tier| distance_sq <= tier.distance * tier.distance)
+                .map_or(outer.frequency, |tier| tier.frequency);
+            rates.insert(player_id, frequency);
+        });
         counters.evaluated += 1;
         counters.radius_scans += 1;
-        counters.recipients += recipients.len() as u64;
-        counters.max_recipients = counters.max_recipients.max(recipients.len() as u64);
-
-        // Innermost tier containing a recipient decides its rate.
-        let mut rates: HashMap<PlayerId, f64> = HashMap::with_capacity(recipients.len());
-        let mut unassigned = recipients;
-        for tier in &tiers[..tiers.len().saturating_sub(1)] {
-            if unassigned.is_empty() {
-                break;
-            }
-            counters.radius_scans += 1;
-            let inside: HashSet<PlayerId> = gorc_instances
-                .find_players_in_radius(object_position, tier.distance)
-                .await
-                .into_iter()
-                .collect();
-            unassigned.retain(|player_id| {
-                if inside.contains(player_id) {
-                    rates.insert(*player_id, tier.frequency);
-                    false
-                } else {
-                    true
-                }
-            });
-        }
-        for player_id in unassigned {
-            rates.insert(player_id, outer.frequency);
-        }
+        counters.recipients += rates.len() as u64;
+        counters.max_recipients = counters.max_recipients.max(rates.len() as u64);
 
         // Recipients to serve now, and whether each is still owed the sticky
         // keys: never served, or served nothing since their last change.
@@ -550,6 +602,39 @@ fn resolve_tiers(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn player_grid_finds_what_a_full_scan_finds() {
+        // Players spread over a few km, some on cell edges and in negative cells.
+        let mut players = Vec::new();
+        let mut seed: u64 = 7;
+        for _ in 0..500 {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let coord = |shift: u32| ((seed >> shift) % 3000) as f64 - 1500.0;
+            players.push((PlayerId::new(), Vec3::new(coord(1), coord(21), coord(41))));
+        }
+        players.push((PlayerId::new(), Vec3::new(200.0, -200.0, 0.0)));
+        let grid = PlayerGrid::new(players.clone());
+
+        for (center, radius) in [
+            (Vec3::new(0.0, 0.0, 0.0), 30.0),
+            (Vec3::new(10.0, -390.0, 5.0), 200.0),
+            (Vec3::new(0.0, 0.0, 0.0), 282.9), // reaches the edge player exactly
+            (Vec3::new(-1400.0, 1400.0, 0.0), 450.0),
+            (Vec3::new(0.0, 0.0, 0.0), 10_000.0), // falls back to the occupied cells
+        ] {
+            let mut expected: Vec<PlayerId> = players
+                .iter()
+                .filter(|(_, p)| p.distance_squared(center) <= radius * radius)
+                .map(|(id, _)| *id)
+                .collect();
+            let mut found = Vec::new();
+            grid.within(center, radius, |id, _| found.push(id));
+            expected.sort_by_key(|id| id.to_string());
+            found.sort_by_key(|id| id.to_string());
+            assert_eq!(found, expected, "radius {} around {:?}", radius, center);
+        }
+    }
 
     fn stream_of(gorc_id: GorcObjectId) -> (u64, Arc<Vec<u8>>, Option<Arc<Vec<u8>>>, u64) {
         let stream = streams().get(&(gorc_id, 0, "move".to_string())).expect("stream queued");

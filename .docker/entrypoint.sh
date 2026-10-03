@@ -29,5 +29,11 @@ install_plugins_config() {
 
 install_plugins_config
 
+# One file descriptor per client WebSocket: the default soft limit (1024) capped the
+# preprod at ~895 players (2026-10-03), and the accept() failure then stopped the
+# listener. Raise it to the hard limit the container allows.
+ulimit -n "$(ulimit -Hn)"
+echo "Open files limit: $(ulimit -n)"
+
 # Execute the main application
 exec /app/server "$@"

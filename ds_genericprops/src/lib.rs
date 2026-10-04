@@ -376,10 +376,16 @@ impl GenericPropsPlugin {
         // and `_world` (space / planet + local position). Request/response pair used
         // by ds_game_server's ServerManager to plan a split or a merge: it emits
         // `genericprops:get_objects_snapshot {request_id}` and awaits
-        // `gameserver:objects_snapshot {request_id, items}`.
+        // `gameserver:objects_snapshot {request_id, items}`. With `uuids`, only those
+        // objects (the players and vehicles of a hand-over, refreshed after its
+        // warm-up: the whole world took ~2.5 s under load).
         events.on_plugin("genericprops", "get_objects_snapshot", move |event: serde_json::Value| {
             let request_id = event.get("request_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            info!("plugin genericprops (get_objects_snapshot): request {} for {} props", request_id, props.len());
+            let only: Option<Vec<String>> = event.get("uuids").and_then(|v| v.as_array()).map(|uuids| {
+                uuids.iter().filter_map(|u| u.as_str().map(str::to_string)).collect()
+            });
+            info!("plugin genericprops (get_objects_snapshot): request {} for {} props", request_id,
+                only.as_ref().map_or(props.len(), |u| u.len()));
 
             let props = Arc::clone(&props);
             let gorc_instances = Arc::clone(&gorc_instances);
@@ -391,7 +397,10 @@ impl GenericPropsPlugin {
                 // Keys first: iterating the DashMap holds a shard read lock, and the
                 // loop awaits on GORC — any insert/remove of a prop on that shard
                 // (a create, a player joining) would block its thread until then.
-                let uuids: Vec<String> = props.iter().map(|entry| entry.key().clone()).collect();
+                let uuids: Vec<String> = match only {
+                    Some(only) => only.into_iter().filter(|uuid| props.contains_key(uuid)).collect(),
+                    None => props.iter().map(|entry| entry.key().clone()).collect(),
+                };
                 for prop_uuid in uuids {
                     let Ok(gorc_id) = GorcObjectId::from_str(&prop_uuid) else { continue };
                     // Snapshot the instance data under the lock, resolve the world after

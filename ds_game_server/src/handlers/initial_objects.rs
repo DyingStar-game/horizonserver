@@ -137,11 +137,34 @@ pub fn handle_freeze_object(
     let websocket = server.websocket_sender.clone();
     info!("[freeze_object] checking {} items against zones=[{}]", items.len(), zones_label(zones));
 
-    let mut frozen = 0usize;
-    for item in items.values() {
-        if is_world_object(&item.object_type) || is_member(item, zones) {
-            continue;
+    // Players first, then what seated players ride, then the rest: a split freezes
+    // ~20k objects here, in no order, and the server erased a handed-over player
+    // only when its turn came — 3 s later on preprod (2026-10-04), while the new
+    // server already simulated it: the client got positions from both, and saw its
+    // truck jump back and freeze.
+    let ridden: HashSet<&str> = items
+        .values()
+        .filter(|i| i.object_type == "player")
+        .filter(|i| i.object_data.get("seat").and_then(|v| v.as_str()).map_or(false, |seat| !seat.is_empty()))
+        .filter_map(|i| i.object_data.get("parent_id").and_then(|v| v.as_str()))
+        .collect();
+    let rank = |item: &GenericPropsRequest| -> u8 {
+        if item.object_type == "player" {
+            0
+        } else if ridden.contains(item.object_uuid.as_str()) {
+            1
+        } else {
+            2
         }
+    };
+    let mut ordered: Vec<&GenericPropsRequest> = items
+        .values()
+        .filter(|item| !is_world_object(&item.object_type) && !is_member(item, zones))
+        .collect();
+    ordered.sort_by_key(|item| rank(item));
+
+    let mut frozen = 0usize;
+    for item in ordered {
         untrack(item, server);
         debug!("[freeze_object] item {} ({}) leaves this server", item.object_uuid, item.object_type);
         send_ws(&websocket, "freeze_object", &json!({

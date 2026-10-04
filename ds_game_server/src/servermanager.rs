@@ -1166,6 +1166,49 @@ fn ridden_objects(items: &SnapshotItems) -> HashSet<String> {
         .collect()
 }
 
+/// `base` with the objects of `fresh` replacing theirs (and added when new).
+fn overlay(mut base: SnapshotItems, fresh: Option<SnapshotItems>) -> SnapshotItems {
+    if let Some(fresh) = fresh {
+        base.extend(fresh);
+    }
+    base
+}
+
+/// Measure only (2026-10-04): would freezing only what Horizon believes `parent`
+/// simulates (`managed_objects` / `managed_players`) miss anything? Logs how many
+/// objects the split freezes, how many of those lie in the zones `parent` gives
+/// away, and how many of those are NOT in its managed sets — with a sample. If
+/// that last count stays ~0, the freeze can be cut down to the managed sets.
+/// Must run before the freeze, which empties the sets.
+fn log_freeze_coverage(parent: &Server, items: &SnapshotItems, before: &[Zone], keep: &[Zone]) {
+    let managed = parent.managed_objects.lock().unwrap().clone();
+    let players: HashSet<String> = parent.managed_players.lock().unwrap().iter().cloned().collect();
+    let (mut frozen, mut in_lost, mut managed_frozen) = (0usize, 0usize, 0usize);
+    let mut missed: Vec<String> = Vec::new();
+    for item in items.values().filter(|i| !is_world_object(&i.object_type)) {
+        let Some(world) = ObjectWorld::from_object_data(&item.object_data) else { continue };
+        if zones_contain(keep, &world) {
+            continue;
+        }
+        frozen += 1;
+        let is_managed = managed.contains(&item.object_uuid) || players.contains(&item.object_uuid);
+        if is_managed {
+            managed_frozen += 1;
+        }
+        if zones_contain(before, &world) {
+            in_lost += 1;
+            if !is_managed {
+                missed.push(format!("{}:{}", item.object_type, item.object_uuid));
+            }
+        }
+    }
+    let sample: Vec<&String> = missed.iter().take(10).collect();
+    info!(
+        "[mesh] freeze coverage on {}: freezing {} objects, {} managed, {} in the zones given away, {} of those NOT managed (sample {:?})",
+        parent.server_name, frozen, managed_frozen, in_lost, missed.len(), sample
+    );
+}
+
 fn planets_in(items: &SnapshotItems) -> Vec<(String, String)> {
     items
         .values()
@@ -1206,12 +1249,23 @@ impl MeshWorker {
 
     /// Asks genericprops for every object (with `_world`) and waits for the answer.
     async fn request_snapshot(&self) -> Result<SnapshotItems, String> {
+        self.request_snapshot_of(None).await
+    }
+
+    /// Same, for the listed objects only (`None`: every object). Building the whole
+    /// world took ~2.5 s under load (20k objects): a hand-over refreshing only its
+    /// players and their vehicles from it spawned them 2-3 s in the past.
+    async fn request_snapshot_of(&self, uuids: Option<Vec<String>>) -> Result<SnapshotItems, String> {
         let request_id = uuid::Uuid::new_v4().to_string();
         let (tx, rx) = oneshot::channel::<SnapshotItems>();
         self.pending_snapshots.lock().unwrap().insert(request_id.clone(), tx);
 
         let timeout = self.rules.as_ref().map(|r| r.snapshot_timeout).unwrap_or(Duration::from_secs(5));
-        if let Err(e) = self.context.events().emit_plugin("genericprops", "get_objects_snapshot", &json!({ "request_id": request_id })).await {
+        let request = match uuids {
+            Some(uuids) => json!({ "request_id": request_id, "uuids": uuids }),
+            None => json!({ "request_id": request_id }),
+        };
+        if let Err(e) = self.context.events().emit_plugin("genericprops", "get_objects_snapshot", &request).await {
             self.pending_snapshots.lock().unwrap().remove(&request_id);
             return Err(format!("emit get_objects_snapshot failed: {}", e));
         }
@@ -1291,7 +1345,9 @@ impl MeshWorker {
         // once the ground is ready) and manage it; only then does the parent shrink
         // and freeze what it lost — judged on the one snapshot every child's
         // players came from, not the one taken before the warm-up (see hand_over).
-        let current = self.hand_over_many(&used, &items, self.warmup()).await.unwrap_or(items);
+        let parent_players = parent.managed_players.lock().unwrap().clone();
+        let fresh = self.hand_over_many(&used, &items, self.warmup(), &parent_players).await;
+        let current = overlay(items, fresh);
         if !parent.update_zones(plan.keep.clone()) {
             error!("[mesh] split aborted: could not send the new zones to {}; releasing the children", parent.server_name);
             for (child, _) in &used {
@@ -1300,6 +1356,7 @@ impl MeshWorker {
             }
             return result;
         }
+        log_freeze_coverage(parent, &current, &parent_zones, &plan.keep);
         if let Err(e) = handle_freeze_object(&current, parent, &plan.keep) {
             error!("[mesh] freeze on {} failed: {}", parent.server_name, e);
         }
@@ -1365,14 +1422,13 @@ impl MeshWorker {
         // Freeze on the released server what the fresh snapshot (the one the
         // survivor's players were spawned from) still places in its zones: a player
         // who arrived there during the warm-up must leave with the others.
-        let to_freeze: SnapshotItems = match self.hand_over(survivor, &to_spawn, &survivor_zones, self.warmup()).await {
-            Some(fresh) => fresh
-                .into_iter()
-                .filter(|(_, i)| !is_world_object(&i.object_type))
-                .filter(|(_, i)| ObjectWorld::from_object_data(&i.object_data).map_or(false, |w| zones_contain(&released_zones, &w)))
-                .collect(),
-            None => to_move,
-        };
+        let released_players = released.managed_players.lock().unwrap().clone();
+        let fresh = self.hand_over(survivor, &to_spawn, &survivor_zones, self.warmup(), &released_players).await;
+        let to_freeze: SnapshotItems = overlay(to_move, fresh)
+            .into_iter()
+            .filter(|(_, i)| !is_world_object(&i.object_type))
+            .filter(|(_, i)| ObjectWorld::from_object_data(&i.object_data).map_or(false, |w| zones_contain(&released_zones, &w)))
+            .collect();
         if let Err(e) = handle_freeze_object(&to_freeze, released, &[]) {
             error!("[mesh] freeze on {} failed: {}", released.server_name, e);
         }
@@ -1396,7 +1452,7 @@ impl MeshWorker {
             Ok(items) => {
                 result.planets = planets_in(&items);
                 // Nobody simulates these players any more: no point waiting.
-                self.hand_over(server, &items, &zones, Duration::ZERO).await;
+                self.hand_over(server, &items, &zones, Duration::ZERO, &[]).await;
             }
             Err(e) => error!("[mesh] {} started on [{}] but the snapshot failed: {}", server.server_name, zones_label(&zones), e),
         }
@@ -1436,7 +1492,7 @@ impl MeshWorker {
             return result;
         }
         info!("[mesh] {} gained [{}]: sending {} objects it did not have", server.server_name, zones_label(gained), to_spawn.len());
-        self.hand_over(server, &to_spawn, &zones, Duration::ZERO).await;
+        self.hand_over(server, &to_spawn, &zones, Duration::ZERO, &[]).await;
         result
     }
 
@@ -1454,15 +1510,20 @@ impl MeshWorker {
     /// snapshot and inside it in the fresh one; freezing from the first one erases
     /// them on the parent while the child, working from the fresh one, does not
     /// spawn them — nobody simulates them any more (preprod, 2026-09-20).
-    async fn hand_over(&self, server: &Server, items: &SnapshotItems, zones: &[Zone], warmup: Duration) -> Option<SnapshotItems> {
+    async fn hand_over(&self, server: &Server, items: &SnapshotItems, zones: &[Zone], warmup: Duration, also_players: &[String]) -> Option<SnapshotItems> {
         let zones = zones.to_vec();
-        self.hand_over_many(&[(server, &zones)], items, warmup).await
+        self.hand_over_many(&[(server, &zones)], items, warmup, also_players).await
     }
 
     /// `hand_over` to several servers at once, each for its own zones: the props
     /// and prewarms go out to all of them, they warm up in parallel, and the
-    /// players are sent from ONE fresh snapshot — the one the caller freezes from.
-    async fn hand_over_many(&self, targets: &[(&Server, &Vec<Zone>)], items: &SnapshotItems, warmup: Duration) -> Option<SnapshotItems> {
+    /// players are sent from ONE fresh snapshot — the one the caller freezes from
+    /// (laid over its own with `overlay`).
+    ///
+    /// The fresh snapshot holds the players and what they ride only: the players
+    /// of `items`, `also_players` (those the releasing server simulates now, who
+    /// may have arrived during the warm-up) and the objects seated players ride.
+    async fn hand_over_many(&self, targets: &[(&Server, &Vec<Zone>)], items: &SnapshotItems, warmup: Duration, also_players: &[String]) -> Option<SnapshotItems> {
         let (players, mut props): (SnapshotItems, SnapshotItems) =
             items.iter().map(|(k, v)| (k.clone(), v.clone())).partition(|(_, i)| i.object_type == "player");
         // A vehicle someone sits in moves with them: sent with the props, it would
@@ -1490,7 +1551,10 @@ impl MeshWorker {
             futures::future::join_all(ready.iter().map(|(server, _)| self.wait_until_ready(server, warmup))).await;
             // The players kept walking on their current server while we waited:
             // spawn them where they are NOW, not where the first snapshot saw them.
-            match self.request_snapshot().await {
+            let mut wanted: HashSet<String> = players.keys().cloned().collect();
+            wanted.extend(also_players.iter().cloned());
+            wanted.extend(ridden.iter().cloned());
+            match self.request_snapshot_of(Some(wanted.into_iter().collect())).await {
                 Ok(fresh) => {
                     fresh_players = Some(fresh.iter().filter(|(_, i)| i.object_type == "player").map(|(k, v)| (k.clone(), v.clone())).collect::<SnapshotItems>());
                     fresh_snapshot = Some(fresh);

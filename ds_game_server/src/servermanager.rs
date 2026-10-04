@@ -22,7 +22,7 @@ use ds_common::world::{ObjectWorld, Point3};
 use ds_common::zone::{is_world_object, zones_contain, zones_label, Zone};
 use horizon_event_system::{utils, PlayerId, ServerContext};
 use serde_json::json;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot};
@@ -150,6 +150,8 @@ enum OpOutcome {
 
 #[derive(Debug)]
 pub struct OpResult {
+    /// The `InFlight::id` of the op; set by `start_ready_ops` once it is over.
+    op_id: u64,
     outcome: OpOutcome,
     /// Servers the op involved: touched (silence) and settling once it is over.
     servers: Vec<String>,
@@ -161,18 +163,23 @@ pub struct OpResult {
 
 impl OpResult {
     fn nothing(op_servers: &[String]) -> OpResult {
-        OpResult { outcome: OpOutcome::Nothing, servers: op_servers.to_vec(), released: Vec::new(), planets: Vec::new() }
+        OpResult { op_id: 0, outcome: OpOutcome::Nothing, servers: op_servers.to_vec(), released: Vec::new(), planets: Vec::new() }
     }
 }
 
-/// The op in flight, as the loop sees it.
+/// An op in flight, as the loop sees it.
 struct InFlight {
+    id: u64,
     label: String,
     servers: Vec<String>,
     started: Instant,
 }
 
 const RECONNECT_DELAY: Duration = Duration::from_secs(10);
+/// Ops on disjoint sets of servers run side by side, up to this many. One at a
+/// time, an overloaded server waited behind the splits of another one and kept
+/// filling up (86 players at 30 tps on preprod, 2026-10-04).
+const MAX_OPS_IN_FLIGHT: usize = 4;
 /// A running server sends serverinfo every second. Silent this long, it is taken
 /// for overloaded, not dead: its main loop is stuck in long frames (village
 /// spawns, navmesh bakes: 16-40 s each on minikube, 2026-10-02) and the cure is
@@ -272,10 +279,12 @@ pub struct ServerManager {
     rules: Option<MeshRules>,
     /// Set by `run`; the I/O side of the ops.
     worker: Option<MeshWorker>,
-    in_flight: Option<InFlight>,
-    /// Ops that must happen (re-homing, zone grants) waiting for the one in flight.
-    /// A split or merge only gets in while nothing is in flight: its rule re-fires
-    /// later if still true.
+    /// Ops running, on pairwise disjoint sets of servers.
+    in_flight: Vec<InFlight>,
+    next_op_id: u64,
+    /// Ops waiting for a slot, or for an op in flight on one of their servers
+    /// (ops on the same server run in queue order). A server in a queued or
+    /// running op is busy: no split or merge is decided on it meanwhile.
     queue: VecDeque<MeshOp>,
     tx: mpsc::Sender<ManagerMessage>,
     rx: mpsc::Receiver<ManagerMessage>,
@@ -297,7 +306,8 @@ impl ServerManager {
             pending_snapshots: Arc::new(Mutex::new(HashMap::new())),
             rules: None,
             worker: None,
-            in_flight: None,
+            in_flight: Vec::new(),
+            next_op_id: 1,
             queue: VecDeque::new(),
             tx,
             rx,
@@ -320,8 +330,29 @@ impl ServerManager {
         self.idle_servers(except, 1).pop()
     }
 
+    /// Idle servers not reserved by a queued or running op (a split's children
+    /// stay idle until the op starts them).
     fn idle_servers(&self, except: &str, n: usize) -> Vec<Server> {
-        self.servers.iter().filter(|s| s.state() == ServerState::Online && s.uuid != except).take(n).cloned().collect()
+        let busy = self.busy_servers();
+        self.servers
+            .iter()
+            .filter(|s| s.state() == ServerState::Online && s.uuid != except && !busy.contains(&s.uuid))
+            .take(n)
+            .cloned()
+            .collect()
+    }
+
+    /// Servers of the ops in flight and in the queue.
+    fn busy_servers(&self) -> HashSet<String> {
+        self.in_flight
+            .iter()
+            .flat_map(|op| op.servers.iter().cloned())
+            .chain(self.queue.iter().flat_map(|op| op.servers()))
+            .collect()
+    }
+
+    fn running_op_servers(&self) -> HashSet<String> {
+        self.in_flight.iter().flat_map(|op| op.servers.iter().cloned()).collect()
     }
 
     /// The idle servers a split of `parent` may use: two when it holds several
@@ -434,7 +465,7 @@ impl ServerManager {
                 self.log_state();
                 self.publish_load(&context);
             }
-            self.start_next_op();
+            self.start_ready_ops();
             let message = match backlog.pop() {
                 Some(message) => message,
                 None => match tokio::time::timeout(WATCHDOG_TICK, self.rx.recv()).await {
@@ -574,29 +605,45 @@ impl ServerManager {
 
     // ---------------------------------------------------------------- ops
 
-    /// Starts the next queued op when none is in flight. Runs it on its own task;
-    /// the outcome comes back as `ManagerMessage::OpDone`.
-    fn start_next_op(&mut self) {
-        if self.in_flight.is_some() {
-            return;
+    /// Starts, in queue order, every queued op whose servers are free: not in an
+    /// op in flight nor in an earlier queued op (ops on one server keep their
+    /// order). Each runs on its own task; its outcome comes back as
+    /// `ManagerMessage::OpDone`.
+    fn start_ready_ops(&mut self) {
+        let mut blocked = self.running_op_servers();
+        let mut waiting = VecDeque::new();
+        while let Some(op) = self.queue.pop_front() {
+            let servers = op.servers();
+            let free = servers.iter().all(|u| !blocked.contains(u));
+            blocked.extend(servers.iter().cloned());
+            if !free || self.in_flight.len() >= MAX_OPS_IN_FLIGHT {
+                waiting.push_back(op);
+                continue;
+            }
+            self.start_op(op, servers);
         }
-        let Some(op) = self.queue.pop_front() else { return };
-        let servers = op.servers();
+        self.queue = waiting;
+    }
+
+    fn start_op(&mut self, op: MeshOp, servers: Vec<String>) {
+        let id = self.next_op_id;
+        self.next_op_id += 1;
         let label = op.label();
-        info!("[mesh] op started: {}", label);
-        self.in_flight = Some(InFlight { label: label.clone(), servers: servers.clone(), started: Instant::now() });
+        info!("[mesh] op started: {} ({} in flight)", label, self.in_flight.len() + 1);
+        self.in_flight.push(InFlight { id, label: label.clone(), servers: servers.clone(), started: Instant::now() });
 
         let worker = self.worker();
         let tx = self.tx.clone();
         crate::plugin_rt().spawn(async move {
             // A panic inside the op must not leave the manager waiting forever.
-            let result = match crate::plugin_rt().spawn(worker.run(op)).await {
+            let mut result = match crate::plugin_rt().spawn(worker.run(op)).await {
                 Ok(result) => result,
                 Err(e) => {
                     error!("[mesh] op `{}` panicked: {}", label, e);
                     OpResult::nothing(&servers)
                 }
             };
+            result.op_id = id;
             if let Err(e) = tx.send(ManagerMessage::OpDone(result)).await {
                 error!("[mesh] could not report the end of `{}`: {}", label, e);
             }
@@ -605,7 +652,8 @@ impl ServerManager {
 
     fn on_op_done(&mut self, result: OpResult) {
         let mut sent_nothing = false;
-        if let Some(op) = self.in_flight.take() {
+        if let Some(index) = self.in_flight.iter().position(|op| op.id == result.op_id) {
+            let op = self.in_flight.remove(index);
             info!("[mesh] op done: {} after {:?}", op.label, op.started.elapsed());
             // A split skipped or aborted before the child started sent nothing to
             // anyone: no burst to absorb, and the parent's silence must keep
@@ -692,10 +740,13 @@ impl ServerManager {
         // While zones move around, every count describes a layout that is about
         // to change: no decision on it, and no run-up of hits either.
         let settling = samples.settle_until.map_or(false, |until| now < until);
-        if self.in_flight.is_some() || settling {
-            samples.split_hits = 0;
+        if settling || self.busy_servers().contains(&info.uuid) {
+            if let Some(samples) = self.samples.get_mut(&info.uuid) {
+                samples.split_hits = 0;
+            }
             return;
         }
+        let Some(samples) = self.samples.get_mut(&info.uuid) else { return };
         // `split_after` is in seconds of overload, not in samples: counted per
         // sample, 10 hits took 7 minutes on a server reporting twice a minute.
         if rules.split.split_hit(info.tps, players) {
@@ -742,7 +793,7 @@ impl ServerManager {
             })
             .collect();
         let state = json!({
-            "in_flight": self.in_flight.as_ref().map(|op| op.label.clone()),
+            "in_flight": self.in_flight.iter().map(|op| op.label.clone()).collect::<Vec<_>>(),
             "queued": self.queue.len(),
             "splits": self.split_history.len(),
             "servers": servers,
@@ -814,7 +865,7 @@ impl ServerManager {
     /// of the op in flight are exempt: they are busy instantiating what it sent.
     async fn check_silent_servers(&mut self, context: &Arc<dyn ServerContext>) {
         let now = Instant::now();
-        let busy: Vec<String> = self.in_flight.as_ref().map(|op| op.servers.clone()).unwrap_or_default();
+        let busy = self.running_op_servers();
         let silent: Vec<Server> = self
             .running_servers()
             .into_iter()
@@ -826,13 +877,15 @@ impl ServerManager {
                 })
             })
             .collect();
-        // Silent but not dead yet: overloaded, give part of its zones away (one at
-        // a time, and only if the pool has room; the op makes it busy meanwhile).
-        if self.rules.is_some() && self.in_flight.is_none() && self.queue.is_empty() {
+        // Silent but not dead yet: overloaded, give part of its zones away (one
+        // server per pass, only if the pool has room; the op makes it busy meanwhile).
+        if self.rules.is_some() {
+            let queued = self.busy_servers();
             let overloaded = self
                 .running_servers()
                 .into_iter()
                 .filter(|s| !silent.iter().any(|d| d.uuid == s.uuid))
+                .filter(|s| !queued.contains(&s.uuid))
                 // Nobody to relieve it of (still loading what it was handed).
                 .filter(|s| s.players_count() > 0)
                 .find(|s| {
@@ -997,6 +1050,7 @@ impl ServerManager {
     // ------------------------------------------------------------- merge
 
     fn evaluate_merge(&mut self, rules: &MeshRules) {
+        let busy = self.busy_servers();
         let mut to_merge: Option<SplitRecord> = None;
         for idx in 0..self.split_history.len() {
             let record = self.split_history[idx].clone();
@@ -1004,7 +1058,9 @@ impl ServerManager {
                 self.split_history[idx].merge_hits = 0;
                 continue;
             };
-            if !p.is_running() || !c.is_running() || self.settling(&p.uuid) || self.settling(&c.uuid) {
+            if !p.is_running() || !c.is_running() || self.settling(&p.uuid) || self.settling(&c.uuid)
+                || busy.contains(&p.uuid) || busy.contains(&c.uuid)
+            {
                 self.split_history[idx].merge_hits = 0;
                 continue;
             }

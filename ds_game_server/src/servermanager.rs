@@ -1357,6 +1357,16 @@ impl MeshWorker {
             return result;
         }
         log_freeze_coverage(parent, &current, &parent_zones, &plan.keep);
+        // Only what the parent simulates, plus every player (one that arrived during
+        // the warm-up may be on it without being listed yet). The whole snapshot used
+        // to go: ~20k freezes per split, nearly all for objects a child server never
+        // had (20137 frozen for 91 managed, preprod 2026-10-04), queued on a Godot
+        // server that had just been relieved because it was overloaded.
+        let managed = parent.managed_objects.lock().unwrap().clone();
+        let current: SnapshotItems = current
+            .into_iter()
+            .filter(|(uuid, i)| i.object_type == "player" || managed.contains(uuid))
+            .collect();
         if let Err(e) = handle_freeze_object(&current, parent, &plan.keep) {
             error!("[mesh] freeze on {} failed: {}", parent.server_name, e);
         }

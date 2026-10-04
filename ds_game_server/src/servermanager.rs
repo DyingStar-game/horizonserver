@@ -298,6 +298,12 @@ pub struct ServerManager {
     discovery: Option<Discovery>,
     last_discovery: Option<Instant>,
     last_state_log: Option<Instant>,
+    /// Zones of a server gone offline that nobody could take (no idle server at that
+    /// moment) while other servers kept running: the first server that turns idle
+    /// adopts them (`adopt_orphans`). They used to wait for the dead server only,
+    /// which came back as a NEW idle server (another pod) and never took them: its
+    /// players stayed connected and unsimulated (minikube, 2026-10-04).
+    orphan_zones: Vec<Zone>,
 }
 
 impl ServerManager {
@@ -320,6 +326,7 @@ impl ServerManager {
             discovery: None,
             last_discovery: None,
             last_state_log: None,
+            orphan_zones: Vec::new(),
         }
     }
 
@@ -470,6 +477,7 @@ impl ServerManager {
                 self.log_state();
                 self.publish_load(&context);
             }
+            self.adopt_orphans(&context);
             self.start_ready_ops();
             let message = match backlog.pop() {
                 Some(message) => message,
@@ -966,13 +974,35 @@ impl ServerManager {
                         error!("[mesh] could not start {} on the orphaned zones", idle.server_name);
                     }
                 }
-                None => error!("[mesh] no idle server to take over the zones of {}; they wait for a reconnection", server.server_name),
+                None => error!("[mesh] no idle server to take over the zones of {}; the first idle server adopts them", server.server_name),
             }
         }
-        // Zones re-homed above are not given back on reconnection; only the case
-        // where nobody could take them keeps them for the returning server.
-        let zones_for_return = if was_running && !rehomed && self.running_servers().is_empty() { zones } else { Vec::new() };
+        // Zones re-homed above are not given back on reconnection. Nobody to take
+        // them: with no server running at all, the returning one takes them (or the
+        // whole world) on reconnection; otherwise the first server to turn idle does.
+        let nobody_runs = self.running_servers().is_empty();
+        if was_running && !rehomed && !nobody_runs {
+            self.orphan_zones.extend(zones.iter().cloned());
+        }
+        let zones_for_return = if was_running && !rehomed && nobody_runs { zones } else { Vec::new() };
         self.spawn_reconnect(server, context.clone(), zones_for_return);
+    }
+
+    /// Hands the orphan zones (see `orphan_zones`) to an idle server, when there is one.
+    fn adopt_orphans(&mut self, context: &Arc<dyn ServerContext>) {
+        if self.orphan_zones.is_empty() || self.running_servers().is_empty() {
+            return;
+        }
+        let Some(idle) = self.idle_server("") else { return };
+        let zones = std::mem::take(&mut self.orphan_zones);
+        error!("[mesh] orphan zones [{}] adopted by {}", zones_label(&zones), idle.server_name);
+        if idle.start(zones.clone(), context.clone()) {
+            self.touch_loading(&idle.uuid);
+            self.queue.push_back(MeshOp::Adopt { server: idle, zones });
+        } else {
+            error!("[mesh] could not start {} on the orphan zones", idle.server_name);
+            self.orphan_zones = zones;
+        }
     }
 
     fn on_server_reconnected(&mut self, uuid: String, zones: Vec<Zone>, context: &Arc<dyn ServerContext>) {
@@ -984,7 +1014,13 @@ impl ServerManager {
             // re-sent since the Godot process may have restarted from scratch.
             // Started right away: a whole pool connecting at once (first start,
             // redeploy) must not elect several servers before the op runs.
-            let zones = if zones.is_empty() { self.initial_zones() } else { zones };
+            let zones = if zones.is_empty() {
+                // The whole world: it covers whatever was left orphan too.
+                self.orphan_zones.clear();
+                self.initial_zones()
+            } else {
+                zones
+            };
             if server.start(zones.clone(), context.clone()) {
                 self.touch_loading(&server.uuid);
                 self.queue.push_back(MeshOp::Adopt { server, zones });

@@ -38,11 +38,13 @@ pub fn replay_velocity(player_uuid: &str, websocket: &WsWriter) -> Result<(), Ev
     send_move(player_uuid, &data, websocket)
 }
 
-pub async fn handle_player_movement(
-    event: ClientEventWrapper<serde_json::Value>,
-    websocket: WsWriter,
+/// Forwards a client's movement to the Godot server managing the player. Synchronous on purpose:
+/// called from the handler itself, packets keep the order the client sent them in.
+pub fn handle_player_movement(
+    event: &ClientEventWrapper<serde_json::Value>,
+    websocket: &WsWriter,
 ) -> Result<(), EventError> {
-    send_move(&event.player_id.to_string(), &event.data, &websocket)
+    send_move(&event.player_id.to_string(), &event.data, websocket)
 }
 
 fn send_move(player_uuid: &str, data: &Value, websocket: &WsWriter) -> Result<(), EventError> {

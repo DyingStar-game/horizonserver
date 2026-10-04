@@ -488,9 +488,12 @@ impl Server {
         }
 
         // --- client movement: forwarded to the server managing that player.
+        // Forwarded right here, in the order the client sent them -- never from a task of its own:
+        // two packets a few ms apart (a key pressed then released) landed swapped, and the server
+        // kept the player walking with nobody on the keys. send_ws only queues on the connection's
+        // writer, so this does not block the handler.
         {
             let server = self.clone();
-            let rt = crate::plugin_rt();
             events.on_client("movement", "update_velocity", move |event: ClientEventWrapper<serde_json::Value>, _player_id: PlayerId, _connection: ClientConnectionRef| {
                 // Kept whoever manages the player: the client only sends a velocity when
                 // it changes, and the server they are transferred to needs the last one.
@@ -500,29 +503,23 @@ impl Server {
                     return Ok(());
                 }
                 debug!("📝 LoggerPlugin: 🦘 Client movement from player {}", event.player_id);
-                let websocket_sender = Arc::clone(&server.websocket_sender);
-                rt.spawn(async move {
-                    let _ = player_movement::handle_player_movement(event, websocket_sender).await;
-                });
+                let _ = player_movement::handle_player_movement(&event, &server.websocket_sender);
                 Ok(())
             }).await
             .map_err(|e| PluginError::ExecutionError(e.to_string()))?;
         }
 
-        // --- client action (jump, press...): forwarded to the server managing that player.
+        // --- client action (jump, press...): forwarded to the server managing that player, in order
+        // (same reason as the movement above: a held key's press and release must not swap).
         {
             let server = self.clone();
-            let rt = crate::plugin_rt();
             events.on_client("player", "client_action", move |event: ClientEventWrapper<serde_json::Value>, _player_id: PlayerId, _connection: ClientConnectionRef| {
                 if !server.is_running() || !server.is_managed_player(&event.player_id.to_string()) {
                     debug!("🔧 DsGameServerPlugin: Player {} is not managed by this server, skipping action", event.player_id);
                     return Ok(());
                 }
                 debug!("📝 LoggerPlugin: 🦘 Client action from player {}", event.player_id);
-                let websocket_sender = Arc::clone(&server.websocket_sender);
-                rt.spawn(async move {
-                    let _ = player_action::handle_player_action(event, websocket_sender).await;
-                });
+                let _ = player_action::handle_player_action(&event, &server.websocket_sender);
                 Ok(())
             }).await
             .map_err(|e| PluginError::ExecutionError(e.to_string()))?;

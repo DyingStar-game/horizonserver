@@ -4,9 +4,11 @@ use tracing::debug;
 
 use super::{send_ws, WsWriter};
 
-pub async fn handle_player_action(
-    event: ClientEventWrapper<serde_json::Value>,
-    websocket: WsWriter,
+/// Forwards a client's action to the Godot server managing the player. Synchronous on purpose:
+/// called from the handler itself, actions keep the order the client sent them in.
+pub fn handle_player_action(
+    event: &ClientEventWrapper<serde_json::Value>,
+    websocket: &WsWriter,
 ) -> Result<(), EventError> {
     let message = json!({
         "namespace": "player",
@@ -15,5 +17,5 @@ pub async fn handle_player_action(
         "data": event.data.clone(),
     });
     debug!("[player_action] constructed message: {:?}", message);
-    send_ws(&websocket, "player_action", &message)
+    send_ws(websocket, "player_action", &message)
 }

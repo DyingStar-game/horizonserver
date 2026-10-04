@@ -1153,6 +1153,19 @@ impl ServerManager {
     }
 }
 
+/// Objects the players of `items` are seated in (vehicles): the `parent_id` of a
+/// player with a `seat`. A player on foot has a parent too (planet frame,
+/// apartment), which must not be held back.
+fn ridden_objects(items: &SnapshotItems) -> HashSet<String> {
+    let text = |i: &GenericPropsRequest, key: &str| i.object_data.get(key).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    items
+        .values()
+        .filter(|i| i.object_type == "player" && !text(i, "seat").is_empty())
+        .map(|i| text(i, "parent_id"))
+        .filter(|parent| !parent.is_empty())
+        .collect()
+}
+
 fn planets_in(items: &SnapshotItems) -> Vec<(String, String)> {
     items
         .values()
@@ -1450,8 +1463,15 @@ impl MeshWorker {
     /// and prewarms go out to all of them, they warm up in parallel, and the
     /// players are sent from ONE fresh snapshot — the one the caller freezes from.
     async fn hand_over_many(&self, targets: &[(&Server, &Vec<Zone>)], items: &SnapshotItems, warmup: Duration) -> Option<SnapshotItems> {
-        let (players, props): (SnapshotItems, SnapshotItems) =
+        let (players, mut props): (SnapshotItems, SnapshotItems) =
             items.iter().map(|(k, v)| (k.clone(), v.clone())).partition(|(_, i)| i.object_type == "player");
+        // A vehicle someone sits in moves with them: sent with the props, it would
+        // stand where the first snapshot saw it while its driver, spawned from the
+        // fresh one in vehicle-local coordinates, is seated back in it — the whole
+        // ride of the warm-up rolled back (preprod, 2026-10-04). It goes with the
+        // players instead, from the same snapshot.
+        let ridden = ridden_objects(&players);
+        props.retain(|uuid, _| !ridden.contains(uuid));
         let mut ready = Vec::new();
         for (server, zones) in targets {
             if let Err(e) = handle_initial_object(&props, server, zones) {
@@ -1479,7 +1499,23 @@ impl MeshWorker {
             }
         }
         let source = fresh_players.as_ref().unwrap_or(&players);
+        let rides: SnapshotItems = fresh_snapshot
+            .as_ref()
+            .unwrap_or(items)
+            .iter()
+            .filter(|(uuid, i)| ridden.contains(*uuid) && i.object_type != "player")
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
         for (server, zones) in ready {
+            if !rides.is_empty() {
+                // Before the players, who are seated in them on arrival. One the
+                // server already has (moved in by an out_of_zone transfer) is skipped.
+                let managed = server.managed_objects.lock().unwrap().clone();
+                let to_send: SnapshotItems = rides.iter().filter(|(uuid, _)| !managed.contains(*uuid)).map(|(k, v)| (k.clone(), v.clone())).collect();
+                if let Err(e) = handle_initial_object(&to_send, server, zones) {
+                    error!("[mesh] initial vehicles to {} failed: {}", server.server_name, e);
+                }
+            }
             // Whoever already landed on `server` meanwhile (out_of_zone transfer into
             // its zones, granted at start) is not spawned a second time, and a player
             // outside `zones` is not sent at all: Godot would only spawn then erase it.

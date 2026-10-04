@@ -21,6 +21,7 @@
 				"steering",
 				"speed",
 				"velocity_local",
+				"wheel_kmh",
 				"handbrake",
 				"headlights",
 				"engine",

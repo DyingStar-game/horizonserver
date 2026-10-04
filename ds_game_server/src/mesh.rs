@@ -63,6 +63,21 @@ pub struct MeshRules {
     pub warmup_max: Duration,
     /// The server is ready once it reports at least this tps with no chunk loading.
     pub ready_tps: u8,
+    /// Players a server may be given by the placement of new players
+    /// (`placement_capacity`). Defaults to the threshold of a `players:` split
+    /// rule; set it above that threshold so a server is split before it fills up
+    /// while the new players keep arriving on it.
+    pub placement_capacity: Option<u32>,
+}
+
+impl MeshRules {
+    /// True when the placement must stop sending new players to this server.
+    pub fn placement_full(&self, tps: u8, players: u16) -> bool {
+        match self.placement_capacity {
+            Some(n) => players as u32 > n || matches!(self.split, Rule::Tps(_)) && self.split.split_hit(tps, players),
+            None => self.split.split_hit(tps, players),
+        }
+    }
 }
 
 impl MeshRules {
@@ -77,8 +92,17 @@ impl MeshRules {
         let int = |key: &str, default: i64| -> i64 {
             config.get_value(key).and_then(|v| v.as_integer()).unwrap_or(default).max(1)
         };
+        let split = rule("split_rule", "tps:20");
+        let placement_capacity = config
+            .get_value("placement_capacity")
+            .and_then(|v| v.as_integer())
+            .map(|n| n.max(1) as u32)
+            .or(match split {
+                Rule::Players(n) => Some(n as u32),
+                Rule::Tps(_) => None,
+            });
         MeshRules {
-            split: rule("split_rule", "tps:20"),
+            split,
             merge: rule("merge_rule", "players:10"),
             split_after: int("split_after_samples", 10) as u32,
             merge_after: int("merge_after_samples", 30) as u32,
@@ -86,6 +110,7 @@ impl MeshRules {
             warmup: Duration::from_secs(int("split_warmup_secs", 5) as u64),
             warmup_max: Duration::from_secs(int("split_warmup_max_secs", 30) as u64),
             ready_tps: int("split_ready_tps", 58).clamp(1, 255) as u8,
+            placement_capacity,
         }
     }
 }
@@ -144,6 +169,74 @@ pub fn plan_split(zones: &[Zone], players: &[ObjectWorld]) -> Option<SplitPlan> 
             }
             Some(SplitPlan { keep, give, keep_players, give_players })
         }
+    }
+}
+
+/// How one server's zones are divided between it and one or more children:
+/// `keep` stays on the parent, each entry of `gives` goes to its own child (with
+/// the number of players it holds), in the order of the children.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SplitPlanN {
+    pub keep: Vec<Zone>,
+    pub keep_players: usize,
+    pub gives: Vec<(Vec<Zone>, usize)>,
+}
+
+impl From<SplitPlan> for SplitPlanN {
+    fn from(plan: SplitPlan) -> Self {
+        SplitPlanN { keep: plan.keep, keep_players: plan.keep_players, gives: vec![(plan.give, plan.give_players)] }
+    }
+}
+
+impl SplitPlanN {
+    pub fn give_players(&self) -> usize {
+        self.gives.iter().map(|(_, n)| n).sum()
+    }
+}
+
+/// Divides `zones` between a parent and up to `children` new servers.
+///
+/// When the parent holds several zones and one of them carries more than half of
+/// its players (the first server: space + the planet where everybody spawns),
+/// moving that zone whole would only move the overload to the child. The zone is
+/// cut through its population instead (`split_bounds`): with two children each
+/// half goes to one of them and the parent keeps the other zones; with one child
+/// the parent also keeps the first half. Anything else is `plan_split`.
+pub fn plan_split_n(zones: &[Zone], players: &[ObjectWorld], children: usize) -> Option<SplitPlanN> {
+    if children == 0 {
+        return None;
+    }
+    let total = players.iter().filter(|w| zones.iter().any(|z| z.contains(w))).count();
+    let dominant = if zones.len() >= 2 {
+        zones
+            .iter()
+            .enumerate()
+            .map(|(i, z)| (i, players.iter().filter(|w| z.contains(w)).count()))
+            .max_by_key(|&(_, count)| count)
+            .filter(|&(_, count)| count >= 2 && count * 2 > total)
+    } else {
+        None
+    };
+    let Some((index, _)) = dominant else {
+        return plan_split(zones, players).map(SplitPlanN::from);
+    };
+    let zone = &zones[index];
+    let others: Vec<Zone> = zones.iter().enumerate().filter(|&(i, _)| i != index).map(|(_, z)| z.clone()).collect();
+    let count_in = |zs: &[Zone]| players.iter().filter(|w| zs.iter().any(|z| z.contains(w))).count();
+    let locals: Vec<Point3> = players.iter().filter(|w| zone.contains(w)).map(|w| w.local_position).collect();
+    let base = zone.bounds.clone().unwrap_or_else(Bounds::unbounded);
+    let (b1, b2) = split_bounds(&base, &locals);
+    let second = vec![zone.with_new_bounds(b2)];
+    if children >= 2 {
+        let first = vec![zone.with_new_bounds(b1)];
+        let (n1, n2) = (count_in(&first), count_in(&second));
+        Some(SplitPlanN { keep_players: count_in(&others), keep: others, gives: vec![(first, n1), (second, n2)] })
+    } else {
+        // The parent keeps the zone's identity on the first half, like `plan_split`.
+        let mut keep = others;
+        keep.push(Zone { id: zone.id.clone(), world: zone.world.clone(), bounds: Some(b1) });
+        let n2 = count_in(&second);
+        Some(SplitPlanN { keep_players: count_in(&keep), keep, gives: vec![(second, n2)] })
     }
 }
 
@@ -316,6 +409,82 @@ mod tests {
         assert!(plan.give.iter().any(|z| z.planet_uuid() == Some("a")));
         assert!(plan.keep.iter().any(|z| z.is_space()));
         assert!(plan.give.iter().all(|z| z.bounds.is_none()));
+    }
+
+    fn crowd_on(planet: &str, n: usize) -> Vec<ObjectWorld> {
+        (0..n).map(|i| on_planet(planet, i as f64 * 0.5, 0.0, (i % 7) as f64)).collect()
+    }
+
+    #[test]
+    fn dominant_zone_is_cut_between_two_children() {
+        let zones = vec![Zone::space(), Zone::planet("a", "a"), Zone::planet("b", "b")];
+        let mut players = crowd_on("a", 80);
+        players.push(in_space(0.0, 0.0, 0.0));
+        players.push(on_planet("b", 0.0, 0.0, 0.0));
+        let plan = plan_split_n(&zones, &players, 2).unwrap();
+        // the parent keeps space and b whole, each child gets half of a
+        assert_eq!(plan.keep.len(), 2);
+        assert!(plan.keep.iter().all(|z| z.planet_uuid() != Some("a")));
+        assert_eq!(plan.keep_players, 2);
+        assert_eq!(plan.gives.len(), 2);
+        assert_eq!((plan.gives[0].1, plan.gives[1].1), (40, 40));
+        for (give, _) in &plan.gives {
+            assert_eq!(give.len(), 1);
+            assert_eq!(give[0].planet_uuid(), Some("a"));
+            assert!(give[0].bounds.is_some());
+            assert!(zones.iter().all(|z| z.id != give[0].id));
+        }
+        assert_ne!(plan.gives[0].0[0].id, plan.gives[1].0[0].id);
+    }
+
+    #[test]
+    fn dominant_zone_is_cut_in_place_with_one_child() {
+        let zones = vec![Zone::space(), Zone::planet("a", "a")];
+        let plan = plan_split_n(&zones, &crowd_on("a", 80), 1).unwrap();
+        assert_eq!(plan.gives.len(), 1);
+        assert_eq!((plan.keep_players, plan.gives[0].1), (40, 40));
+        // the parent keeps space and the first half, under the zone's own id
+        assert_eq!(plan.keep.len(), 2);
+        assert!(plan.keep.iter().any(|z| z.id == zones[1].id && z.bounds.is_some()));
+        assert_ne!(plan.gives[0].0[0].id, zones[1].id);
+    }
+
+    #[test]
+    fn no_dominant_zone_moves_whole_zones() {
+        let zones = vec![Zone::space(), Zone::planet("a", "a"), Zone::planet("b", "b")];
+        let mut players = crowd_on("a", 5);
+        players.extend(crowd_on("b", 5));
+        let plan = plan_split_n(&zones, &players, 2).unwrap();
+        assert_eq!(plan.gives.len(), 1);
+        assert!(plan.gives[0].0.iter().all(|z| z.bounds.is_none()));
+        assert_eq!((plan.keep_players, plan.give_players()), (5, 5));
+        // a single zone is still halved between the parent and one child
+        let single = vec![Zone::planet("a", "a")];
+        let plan = plan_split_n(&single, &crowd_on("a", 10), 2).unwrap();
+        assert_eq!(plan.gives.len(), 1);
+        assert_eq!(plan.keep[0].id, single[0].id);
+        assert!(plan_split_n(&zones, &players, 0).is_none());
+    }
+
+    #[test]
+    fn placement_capacity_defaults_to_the_players_rule() {
+        let mut rules = MeshRules {
+            split: Rule::Players(60),
+            merge: Rule::Players(25),
+            split_after: 10,
+            merge_after: 15,
+            snapshot_timeout: Duration::from_secs(5),
+            warmup: Duration::from_secs(5),
+            warmup_max: Duration::from_secs(30),
+            ready_tps: 58,
+            placement_capacity: Some(75),
+        };
+        assert!(!rules.placement_full(60, 75) && rules.placement_full(60, 76));
+        rules.placement_capacity = None;
+        assert!(rules.placement_full(60, 61) && !rules.placement_full(60, 60));
+        rules.split = Rule::Tps(20);
+        rules.placement_capacity = Some(75);
+        assert!(rules.placement_full(10, 3) && !rules.placement_full(30, 3));
     }
 
     #[test]

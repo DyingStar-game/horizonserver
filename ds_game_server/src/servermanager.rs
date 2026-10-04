@@ -13,7 +13,7 @@
 //! `context.tokio_handle()` nor `block_on` (see the notes in lib.rs).
 
 use crate::handlers::initial_objects::{handle_freeze_object, handle_initial_object, handle_world_objects};
-use crate::mesh::{plan_split, MeshRules, Rule};
+use crate::mesh::{plan_split_n, MeshRules, Rule};
 use crate::server::{Server, ServerState};
 
 use ds_common::events::GenericPropsRequest;
@@ -95,8 +95,9 @@ impl SplitRecord {
 
 /// A zone transition, run off the manager loop by the `MeshWorker`.
 enum MeshOp {
-    /// `parent` is overloaded: part of its zones go to the idle `child`.
-    Split { parent: Server, child: Server },
+    /// `parent` is overloaded: part of its zones go to idle `children` (one, or two
+    /// when it holds several zones: the plan decides how many it actually uses).
+    Split { parent: Server, children: Vec<Server> },
     /// The pair of a split is under the merge rule: the child gives its zones back.
     Merge { record: SplitRecord, survivor: Server, released: Server },
     /// Zones nobody simulates (first start, owner gone) go to `server`.
@@ -110,7 +111,11 @@ enum MeshOp {
 impl MeshOp {
     fn label(&self) -> String {
         match self {
-            MeshOp::Split { parent, child } => format!("split {} -> {}", parent.server_name, child.server_name),
+            MeshOp::Split { parent, children } => format!(
+                "split {} -> {}",
+                parent.server_name,
+                children.iter().map(|c| c.server_name.as_str()).collect::<Vec<_>>().join(",")
+            ),
             MeshOp::Merge { survivor, released, .. } => format!("merge {} into {}", released.server_name, survivor.server_name),
             MeshOp::Adopt { server, zones } => format!("adopt [{}] on {}", zones_label(zones), server.server_name),
             MeshOp::Grant { server, gained } => format!("grant [{}] to {}", zones_label(gained), server.server_name),
@@ -122,7 +127,7 @@ impl MeshOp {
     /// are not held to the silence timeout while it runs.
     fn servers(&self) -> Vec<String> {
         match self {
-            MeshOp::Split { parent, child } => vec![parent.uuid.clone(), child.uuid.clone()],
+            MeshOp::Split { parent, children } => std::iter::once(parent).chain(children).map(|s| s.uuid.clone()).collect(),
             MeshOp::Merge { survivor, released, .. } => vec![survivor.uuid.clone(), released.uuid.clone()],
             MeshOp::Adopt { server, .. } | MeshOp::Grant { server, .. } | MeshOp::Reseed { server } => vec![server.uuid.clone()],
         }
@@ -132,8 +137,9 @@ impl MeshOp {
 /// What the manager records once an op is over.
 #[derive(Debug)]
 enum OpOutcome {
-    /// The split went through: the pair can be merged back later.
-    Split(SplitRecord),
+    /// The split went through: each pair can be merged back later. A split onto
+    /// two children is recorded as two splits in a row, unwound in reverse order.
+    Split(Vec<SplitRecord>),
     /// The merge went through.
     Merged(SplitRecord),
     /// The merge failed; its hit counter starts over.
@@ -311,7 +317,19 @@ impl ServerManager {
     }
 
     fn idle_server(&self, except: &str) -> Option<Server> {
-        self.servers.iter().find(|s| s.state() == ServerState::Online && s.uuid != except).cloned()
+        self.idle_servers(except, 1).pop()
+    }
+
+    fn idle_servers(&self, except: &str, n: usize) -> Vec<Server> {
+        self.servers.iter().filter(|s| s.state() == ServerState::Online && s.uuid != except).take(n).cloned().collect()
+    }
+
+    /// The idle servers a split of `parent` may use: two when it holds several
+    /// zones (one of them may carry the crowd and be cut between two children,
+    /// see `plan_split_n`), else one.
+    fn split_children(&self, parent: &Server) -> Vec<Server> {
+        let wanted = if parent.zones().len() >= 2 { 2 } else { 1 };
+        self.idle_servers(&parent.uuid, wanted)
     }
 
     /// The zones the first server gets: space plus every planet known so far.
@@ -607,10 +625,12 @@ impl ServerManager {
             self.samples.remove(uuid);
         }
         match result.outcome {
-            OpOutcome::Split(record) => {
-                let alive = |uuid: &str| self.server(uuid).map_or(false, |s| s.is_running());
-                if alive(&record.parent_uuid) && alive(&record.child_uuid) {
-                    self.split_history.push(record);
+            OpOutcome::Split(records) => {
+                for record in records {
+                    let alive = |uuid: &str| self.server(uuid).map_or(false, |s| s.is_running());
+                    if alive(&record.parent_uuid) && alive(&record.child_uuid) {
+                        self.split_history.push(record);
+                    }
                 }
             }
             OpOutcome::Merged(record) => self.split_history.retain(|r| !r.same_pair(&record)),
@@ -685,9 +705,10 @@ impl ServerManager {
         }
         if samples.split_hits >= rules.split_after {
             samples.split_hits = 0;
-            match self.idle_server(&server.uuid) {
-                Some(child) => self.queue.push_back(MeshOp::Split { parent: server, child }),
-                None => warn!("[mesh] {} is overloaded (rule {:?}) but no idle server is available in the pool", server.server_name, rules.split),
+            let children = self.split_children(&server);
+            match children.is_empty() {
+                false => self.queue.push_back(MeshOp::Split { parent: server, children }),
+                true => warn!("[mesh] {} is overloaded (rule {:?}) but no idle server is available in the pool", server.server_name, rules.split),
             }
             return;
         }
@@ -743,8 +764,10 @@ impl ServerManager {
                     .and_then(|x| x.last_seen)
                     .map_or(false, |seen| seen.elapsed() <= ACCEPT_SILENCE);
                 let loading = samples.map_or(false, |x| x.loading);
+                // Judged on the placement capacity, not the split rule: a server
+                // split early keeps taking players until it is really full.
                 let overloaded = match (&self.rules, samples) {
-                    (Some(rules), Some(x)) => rules.split.split_hit(x.tps, players),
+                    (Some(rules), Some(x)) => rules.placement_full(x.tps, players),
                     _ => false,
                 };
                 ServerLoad {
@@ -757,10 +780,7 @@ impl ServerManager {
                 }
             })
             .collect();
-        let capacity = match self.rules.as_ref().map(|r| r.split) {
-            Some(Rule::Players(n)) => Some(n as u32),
-            _ => None,
-        };
+        let capacity = self.rules.as_ref().and_then(|r| r.placement_capacity);
         let load = PoolLoad { servers, capacity };
         let events = context.events();
         crate::plugin_rt().spawn(async move {
@@ -822,15 +842,16 @@ impl ServerManager {
                         .map_or(false, |seen| now.duration_since(seen) > OVERLOAD_SILENCE)
                 });
             if let Some(server) = overloaded {
-                match self.idle_server(&server.uuid) {
-                    Some(child) => {
+                let children = self.split_children(&server);
+                match children.is_empty() {
+                    false => {
                         warn!(
-                            "[mesh] {} sent no serverinfo for {:?}: overloaded, splitting it onto {}",
-                            server.server_name, OVERLOAD_SILENCE, child.server_name
+                            "[mesh] {} sent no serverinfo for {:?}: overloaded, splitting it",
+                            server.server_name, OVERLOAD_SILENCE
                         );
-                        self.queue.push_back(MeshOp::Split { parent: server, child });
+                        self.queue.push_back(MeshOp::Split { parent: server, children });
                     }
-                    None => debug!("[mesh] {} is silent but no idle server is available in the pool", server.server_name),
+                    true => debug!("[mesh] {} is silent but no idle server is available in the pool", server.server_name),
                 }
             }
         }
@@ -1099,7 +1120,7 @@ impl MeshWorker {
     async fn run(self, op: MeshOp) -> OpResult {
         let servers = op.servers();
         match op {
-            MeshOp::Split { parent, child } => self.split(&parent, &child, &servers).await,
+            MeshOp::Split { parent, children } => self.split(&parent, &children, &servers).await,
             MeshOp::Merge { record, survivor, released } => self.merge(record, &survivor, &released, &servers).await,
             MeshOp::Adopt { server, zones } => self.adopt_zones(&server, zones, &servers).await,
             MeshOp::Grant { server, gained } => self.grant_zones(&server, &gained, &servers).await,
@@ -1137,7 +1158,7 @@ impl MeshWorker {
 
     // ------------------------------------------------------ split / merge
 
-    async fn split(&self, parent: &Server, child: &Server, op_servers: &[String]) -> OpResult {
+    async fn split(&self, parent: &Server, children: &[Server], op_servers: &[String]) -> OpResult {
         let mut result = OpResult::nothing(op_servers);
         let items = match self.request_snapshot().await {
             Ok(items) => items,
@@ -1154,54 +1175,80 @@ impl MeshWorker {
             .filter(|i| i.object_type == "player")
             .filter_map(|i| ObjectWorld::from_object_data(&i.object_data))
             .collect();
-        let Some(plan) = plan_split(&parent_zones, &players) else {
+        let Some(plan) = plan_split_n(&parent_zones, &players, children.len()) else {
             error!("[mesh] {} has no zones to split", parent.server_name);
             return result;
         };
         // Over the players rule with nobody in its zones to give away: the count
         // still describes players it already handed over. Nothing to gain here.
-        if plan.give_players == 0 && matches!(self.rules.as_ref().map(|r| r.split), Some(Rule::Players(_))) {
+        if plan.give_players() == 0 && matches!(self.rules.as_ref().map(|r| r.split), Some(Rule::Players(_))) {
             warn!(
                 "[mesh] split of {} skipped: its zones [{}] hold no player to give away (count not settled yet?)",
                 parent.server_name, zones_label(&parent_zones)
             );
             return result;
         }
+        // One child per give, in order; an idle server the plan did not need stays idle.
+        let used: Vec<(&Server, &Vec<Zone>)> = children.iter().zip(plan.gives.iter().map(|(zones, _)| zones)).collect();
         info!(
-            "[mesh] split {} -> {}: keep=[{}] ({} players) give=[{}] ({} players)",
-            parent.server_name, child.server_name, zones_label(&plan.keep), plan.keep_players,
-            zones_label(&plan.give), plan.give_players
+            "[mesh] split {} -> {}: keep=[{}] ({} players) {}",
+            parent.server_name,
+            used.iter().map(|(c, _)| c.server_name.as_str()).collect::<Vec<_>>().join(","),
+            zones_label(&plan.keep),
+            plan.keep_players,
+            used.iter()
+                .zip(&plan.gives)
+                .map(|((c, _), (zones, n))| format!("give {}=[{}] ({} players)", c.server_name, zones_label(zones), n))
+                .collect::<Vec<_>>()
+                .join(" ")
         );
 
-        // The child starts first and gets the ground under the players it will
+        // The children start first and get the ground under the players they will
         // receive loaded; the parent keeps simulating them meanwhile (its zones
         // shrink only after the warm-up, and Godot grants 5 s of grace after a zone
         // change before it reports anyone out of zone).
-        if !child.start(plan.give.clone(), self.context.clone()) {
-            error!("[mesh] split aborted: could not start {}", child.server_name);
-            return result;
+        for (i, (child, give)) in used.iter().enumerate() {
+            if !child.start((*give).clone(), self.context.clone()) {
+                error!("[mesh] split aborted: could not start {}", child.server_name);
+                for (started, _) in &used[..i] {
+                    started.release();
+                    result.released.push(started.uuid.clone());
+                }
+                return result;
+            }
         }
-        // The child gets what lies in its zones (props first, then the players once
-        // the ground is ready) and manages it; only then does the parent shrink and freeze what it lost —
-        // judged on the snapshot the child's players came from, not the one taken
-        // before the warm-up (see hand_over).
-        let current = self.hand_over(child, &items, &plan.give, self.warmup()).await.unwrap_or(items);
+        result.servers = std::iter::once(parent).chain(used.iter().map(|(c, _)| *c)).map(|s| s.uuid.clone()).collect();
+        // The children get what lies in their zones (props first, then the players
+        // once the ground is ready) and manage it; only then does the parent shrink
+        // and freeze what it lost — judged on the one snapshot every child's
+        // players came from, not the one taken before the warm-up (see hand_over).
+        let current = self.hand_over_many(&used, &items, self.warmup()).await.unwrap_or(items);
         if !parent.update_zones(plan.keep.clone()) {
-            error!("[mesh] split aborted: could not send the new zones to {}; releasing {}", parent.server_name, child.server_name);
-            child.release();
-            result.released.push(child.uuid.clone());
+            error!("[mesh] split aborted: could not send the new zones to {}; releasing the children", parent.server_name);
+            for (child, _) in &used {
+                child.release();
+                result.released.push(child.uuid.clone());
+            }
             return result;
         }
         if let Err(e) = handle_freeze_object(&current, parent, &plan.keep) {
             error!("[mesh] freeze on {} failed: {}", parent.server_name, e);
         }
 
-        result.outcome = OpOutcome::Split(SplitRecord {
-            parent_uuid: parent.uuid.clone(),
-            child_uuid: child.uuid.clone(),
-            parent_zones_before: parent_zones,
-            merge_hits: 0,
-        });
+        // Recorded as successive single splits: the parent gave the last give
+        // first, so each merge (latest first) restores the zones it had before.
+        let mut records = Vec::new();
+        let mut before = parent_zones;
+        for (i, (child, _)) in used.iter().enumerate() {
+            records.push(SplitRecord {
+                parent_uuid: parent.uuid.clone(),
+                child_uuid: child.uuid.clone(),
+                parent_zones_before: before.clone(),
+                merge_hits: 0,
+            });
+            before = plan.keep.iter().cloned().chain(plan.gives[i + 1..].iter().flat_map(|(z, _)| z.clone())).collect();
+        }
+        result.outcome = OpOutcome::Split(records);
         result
     }
 
@@ -1339,37 +1386,61 @@ impl MeshWorker {
     /// them on the parent while the child, working from the fresh one, does not
     /// spawn them — nobody simulates them any more (preprod, 2026-09-20).
     async fn hand_over(&self, server: &Server, items: &SnapshotItems, zones: &[Zone], warmup: Duration) -> Option<SnapshotItems> {
-        let (mut players, props): (SnapshotItems, SnapshotItems) =
+        let zones = zones.to_vec();
+        self.hand_over_many(&[(server, &zones)], items, warmup).await
+    }
+
+    /// `hand_over` to several servers at once, each for its own zones: the props
+    /// and prewarms go out to all of them, they warm up in parallel, and the
+    /// players are sent from ONE fresh snapshot — the one the caller freezes from.
+    async fn hand_over_many(&self, targets: &[(&Server, &Vec<Zone>)], items: &SnapshotItems, warmup: Duration) -> Option<SnapshotItems> {
+        let (players, props): (SnapshotItems, SnapshotItems) =
             items.iter().map(|(k, v)| (k.clone(), v.clone())).partition(|(_, i)| i.object_type == "player");
-        if let Err(e) = handle_initial_object(&props, server, zones) {
-            error!("[mesh] initial props to {} failed: {}", server.server_name, e);
+        let mut ready = Vec::new();
+        for (server, zones) in targets {
+            if let Err(e) = handle_initial_object(&props, server, zones) {
+                error!("[mesh] initial props to {} failed: {}", server.server_name, e);
+                continue;
+            }
+            self.prewarm_players(server, &players, zones).await;
+            ready.push((*server, *zones));
+        }
+        if ready.is_empty() {
             return None;
         }
-        self.prewarm_players(server, &players, zones).await;
         let mut fresh_snapshot = None;
+        let mut fresh_players = None;
         if !warmup.is_zero() {
-            self.wait_until_ready(server, warmup).await;
+            futures::future::join_all(ready.iter().map(|(server, _)| self.wait_until_ready(server, warmup))).await;
             // The players kept walking on their current server while we waited:
             // spawn them where they are NOW, not where the first snapshot saw them.
-            // Whoever already landed on `server` meanwhile (out_of_zone transfer into
-            // its zones, granted at start) is not spawned a second time, and a player
-            // outside `zones` is not sent at all: Godot would only spawn then erase it.
             match self.request_snapshot().await {
                 Ok(fresh) => {
-                    let already_players = server.managed_players.lock().unwrap().clone();
-                    players = fresh
-                        .iter()
-                        .filter(|(uuid, i)| i.object_type == "player" && !already_players.contains(*uuid))
-                        .filter(|(_, i)| ObjectWorld::from_object_data(&i.object_data).map_or(false, |w| zones_contain(zones, &w)))
-                        .map(|(k, v)| (k.clone(), v.clone()))
-                        .collect();
+                    fresh_players = Some(fresh.iter().filter(|(_, i)| i.object_type == "player").map(|(k, v)| (k.clone(), v.clone())).collect::<SnapshotItems>());
                     fresh_snapshot = Some(fresh);
                 }
                 Err(e) => warn!("[mesh] could not refresh player positions before the hand-over: {}", e),
             }
         }
-        if let Err(e) = handle_initial_object(&players, server, zones) {
-            error!("[mesh] initial players to {} failed: {}", server.server_name, e);
+        let source = fresh_players.as_ref().unwrap_or(&players);
+        for (server, zones) in ready {
+            // Whoever already landed on `server` meanwhile (out_of_zone transfer into
+            // its zones, granted at start) is not spawned a second time, and a player
+            // outside `zones` is not sent at all: Godot would only spawn then erase it.
+            let to_send: SnapshotItems = if fresh_players.is_some() {
+                let already_players = server.managed_players.lock().unwrap().clone();
+                source
+                    .iter()
+                    .filter(|(uuid, _)| !already_players.contains(*uuid))
+                    .filter(|(_, i)| ObjectWorld::from_object_data(&i.object_data).map_or(false, |w| zones_contain(zones, &w)))
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect()
+            } else {
+                source.clone()
+            };
+            if let Err(e) = handle_initial_object(&to_send, server, zones) {
+                error!("[mesh] initial players to {} failed: {}", server.server_name, e);
+            }
         }
         fresh_snapshot
     }

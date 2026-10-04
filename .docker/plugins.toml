@@ -20,8 +20,10 @@ servers_mode = "development"
 
 # Dynamic server meshing (ignored in single mode). A Godot server owns a list of
 # zones (space, or one planet, optionally bounded). When a server saturates, whole
-# zones are handed to an idle server of the pool; a server left with a single zone
-# gets that zone cut in two. Sibling servers are merged back when the load drops.
+# zones are handed to an idle server of the pool; when one of its zones holds most
+# of its players, that zone is cut in two and each half goes to its own idle
+# server; a server left with a single zone gets that zone cut in two and keeps one
+# half. Sibling servers are merged back when the load drops.
 #
 # split_rule:
 #  * "tps:20"     => split when the achieved physics ticks/s stay under 20
@@ -30,7 +32,11 @@ servers_mode = "development"
 #  * "players:10" => merge when the sum of their players is under 10
 #  * "tps:50"     => merge when both run above 50 ticks/s
 # A rule must hold for N consecutive 1 s samples before acting.
-split_rule = "players:75"
+split_rule = "players:60"
+# Players the placement of new players gives a server at most (default: the
+# threshold of a players: split_rule). Above split_rule, so the split of a busy
+# server starts while the arrivals still have room on it.
+placement_capacity = 75
 merge_rule = "players:25"
 split_after_samples = 10
 merge_after_samples = 15

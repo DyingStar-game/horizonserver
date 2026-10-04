@@ -111,6 +111,81 @@ pub fn handle_initial_object(
     Ok(())
 }
 
+/// Sends the players and vehicles of a hand-over to `server` ASLEEP, during its
+/// warm-up: Godot instantiates and places them (the expensive part: ~2.4 s of main
+/// loop for 60 players) but keeps them inert — no messages, no input, not counted
+/// — until `handle_activate_objects`. Not tracked: the releasing server still owns
+/// and simulates them meanwhile. Items outside `zones` are not sent. Returns the
+/// uuids sent.
+pub fn handle_dormant_objects(
+    items: &HashMap<String, GenericPropsRequest>,
+    server: &Server,
+    zones: &[Zone],
+) -> Result<HashSet<String>, EventError> {
+    let mut sent = HashSet::new();
+    for item in items.values() {
+        if is_world_object(&item.object_type) || !is_member(item, zones) {
+            continue;
+        }
+        let mut wire = item_on_wire(item);
+        wire["dormant"] = Value::Bool(true);
+        send_ws(&server.websocket_sender, "initial_object", &json!({
+            "namespace": "server",
+            "event": "initial_object",
+            "data": wire,
+        }))?;
+        sent.insert(item.object_uuid.clone());
+    }
+    info!("[initial_object] {} asleep on {}: {} item(s)", zones_label(zones), server.server_name, sent.len());
+    Ok(sent)
+}
+
+/// The switch of a hand-over: `activate_object` for each item (fresh state) — Godot
+/// wakes what it holds asleep, or creates it the normal way — and the server owns
+/// them from now on (tracked, like `handle_initial_object`). Items outside `zones`
+/// are not sent.
+pub fn handle_activate_objects(
+    items: &HashMap<String, GenericPropsRequest>,
+    server: &Server,
+    zones: &[Zone],
+) -> Result<(), EventError> {
+    let mut sent = 0usize;
+    for item in items.values() {
+        if is_world_object(&item.object_type) || !is_member(item, zones) {
+            continue;
+        }
+        send_ws(&server.websocket_sender, "activate_object", &json!({
+            "namespace": "server",
+            "event": "activate_object",
+            "data": item_on_wire(item),
+        }))?;
+        track(item, server);
+        sent += 1;
+    }
+    info!("[activate_object] {} woken on {}", sent, server.server_name);
+    Ok(())
+}
+
+/// Drops on `server` the players of `uuids` it holds asleep (they left the zone or
+/// the game during the warm-up): Godot's `freeze_object` frees an asleep copy.
+pub fn handle_drop_dormant(items: &HashMap<String, GenericPropsRequest>, uuids: &[String], server: &Server) -> Result<(), EventError> {
+    for uuid in uuids {
+        let data = match items.get(uuid) {
+            Some(item) => item_on_wire(item),
+            None => json!({ "object_type": "player", "object_uuid": uuid, "object_data": {} }),
+        };
+        send_ws(&server.websocket_sender, "freeze_object", &json!({
+            "namespace": "server",
+            "event": "freeze_object",
+            "data": data,
+        }))?;
+    }
+    if !uuids.is_empty() {
+        info!("[freeze_object] {} asleep player(s) dropped on {}", uuids.len(), server.server_name);
+    }
+    Ok(())
+}
+
 /// Sends only the world objects (planets, stars) of `items`: what an idle server of
 /// the pool preloads so that being handed zones later is not a cold start.
 pub fn handle_world_objects(items: &HashMap<String, GenericPropsRequest>, server: &Server) -> Result<(), EventError> {

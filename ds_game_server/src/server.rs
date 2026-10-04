@@ -160,6 +160,12 @@ impl Server {
         self.managed_players.lock().unwrap().len()
     }
 
+    /// The Godot server announced (in its last serverinfo) that it creates hand-over
+    /// objects asleep and wakes them with `activate_object`.
+    pub fn dormant_spawn(&self) -> bool {
+        self.last_info.lock().unwrap().as_ref().map_or(false, |(info, _)| info.dormant_spawn)
+    }
+
     /// Connects the websocket. Writes INTO the shared Arcs so the handler closures
     /// registered earlier keep talking to the live socket after a reconnection.
     pub fn connect(&mut self) -> Result<(), WebSocketError> {
@@ -961,6 +967,7 @@ impl Server {
             scenes_number: prop_data["scenes_number"].as_u64().map(|v| v as u32).unwrap_or_default(),
             scenes_number_actives: prop_data["scenes_number_actives"].as_u64().map(|v| v as u32).unwrap_or_default(),
             server_name: self.server_name.clone(),
+            dormant_spawn: prop_data["dormant_spawn"].as_bool().unwrap_or(false),
         };
         *self.last_info.lock().unwrap() = Some((data.clone(), Instant::now()));
         // try_send: never block the reader; a dropped sample is replaced next second.

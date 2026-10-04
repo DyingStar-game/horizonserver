@@ -12,7 +12,9 @@
 //! Everything here runs on the plugin-owned runtime (`crate::plugin_rt()`); never
 //! `context.tokio_handle()` nor `block_on` (see the notes in lib.rs).
 
-use crate::handlers::initial_objects::{handle_freeze_object, handle_initial_object, handle_world_objects};
+use crate::handlers::initial_objects::{
+    handle_activate_objects, handle_dormant_objects, handle_drop_dormant, handle_freeze_object, handle_initial_object, handle_world_objects,
+};
 use crate::mesh::{plan_split_n, MeshRules, Rule};
 use crate::server::{Server, ServerState};
 
@@ -43,6 +45,9 @@ pub struct ServerInfo {
     /// Scenes actually instantiated (in the Godot tree).
     pub scenes_number_actives: u32,
     pub server_name: String,
+    /// The server creates hand-over objects asleep (`dormant`) and wakes them with
+    /// `activate_object` (see `hand_over_many`).
+    pub dormant_spawn: bool,
 }
 
 pub type SnapshotItems = HashMap<String, GenericPropsRequest>;
@@ -1346,8 +1351,24 @@ impl MeshWorker {
         // and freeze what it lost — judged on the one snapshot every child's
         // players came from, not the one taken before the warm-up (see hand_over).
         let parent_players = parent.managed_players.lock().unwrap().clone();
+        let woken = used.iter().all(|(child, _)| child.dormant_spawn());
         let fresh = self.hand_over_many(&used, &items, self.warmup(), &parent_players).await;
-        let current = overlay(items, fresh);
+        let mut current = overlay(items, fresh);
+        // The children woke the players and their vehicles already (asleep path): the
+        // parent lets go of them NOW, before its zones change — Godot applies a zone
+        // change (forgetting ~20k objects) in one long frame, and the freezes queued
+        // behind it left the players simulated by both servers for 1.5-3 s (preprod).
+        // Without the asleep path the children are still creating them: no early freeze.
+        if woken {
+            let movers: HashSet<String> = ridden_objects(&current).into_iter().chain(
+                current.values().filter(|i| i.object_type == "player").map(|i| i.object_uuid.clone()),
+            ).collect();
+            let early: SnapshotItems = current.iter().filter(|(uuid, _)| movers.contains(*uuid)).map(|(k, v)| (k.clone(), v.clone())).collect();
+            if let Err(e) = handle_freeze_object(&early, parent, &plan.keep) {
+                error!("[mesh] early freeze on {} failed: {}", parent.server_name, e);
+            }
+            current.retain(|uuid, _| !movers.contains(uuid));
+        }
         if !parent.update_zones(plan.keep.clone()) {
             error!("[mesh] split aborted: could not send the new zones to {}; releasing the children", parent.server_name);
             for (child, _) in &used {
@@ -1543,14 +1564,31 @@ impl MeshWorker {
         // players instead, from the same snapshot.
         let ridden = ridden_objects(&players);
         props.retain(|uuid, _| !ridden.contains(uuid));
-        let mut ready = Vec::new();
+        let first_rides: SnapshotItems = items
+            .iter()
+            .filter(|(uuid, i)| ridden.contains(*uuid) && i.object_type != "player")
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        // Per target: the players sent to it asleep, when it can take them that way.
+        let mut ready: Vec<(&Server, &Vec<Zone>, Option<HashSet<String>>)> = Vec::new();
         for (server, zones) in targets {
             if let Err(e) = handle_initial_object(&props, server, zones) {
                 error!("[mesh] initial props to {} failed: {}", server.server_name, e);
                 continue;
             }
             self.prewarm_players(server, &players, zones).await;
-            ready.push((*server, *zones));
+            // Asleep during the warm-up (see handle_dormant_objects): creating ~60
+            // players at the switch froze the new server ~2.4 s, and with it every
+            // player handed over. Only with a warm-up (a switch to come) and a server
+            // that announced it can.
+            let mut asleep = None;
+            if !warmup.is_zero() && server.dormant_spawn() {
+                match handle_dormant_objects(&first_rides, server, zones).and_then(|_| handle_dormant_objects(&players, server, zones)) {
+                    Ok(sent) => asleep = Some(sent),
+                    Err(e) => error!("[mesh] asleep players to {} failed: {}", server.server_name, e),
+                }
+            }
+            ready.push((*server, *zones, asleep));
         }
         if ready.is_empty() {
             return None;
@@ -1558,7 +1596,7 @@ impl MeshWorker {
         let mut fresh_snapshot = None;
         let mut fresh_players = None;
         if !warmup.is_zero() {
-            futures::future::join_all(ready.iter().map(|(server, _)| self.wait_until_ready(server, warmup))).await;
+            futures::future::join_all(ready.iter().map(|(server, _, _)| self.wait_until_ready(server, warmup))).await;
             // The players kept walking on their current server while we waited:
             // spawn them where they are NOW, not where the first snapshot saw them.
             let mut wanted: HashSet<String> = players.keys().cloned().collect();
@@ -1580,21 +1618,25 @@ impl MeshWorker {
             .filter(|(uuid, i)| ridden.contains(*uuid) && i.object_type != "player")
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
-        for (server, zones) in ready {
+        for (server, zones, asleep) in ready {
             if !rides.is_empty() {
                 // Before the players, who are seated in them on arrival. One the
                 // server already has (moved in by an out_of_zone transfer) is skipped.
                 let managed = server.managed_objects.lock().unwrap().clone();
                 let to_send: SnapshotItems = rides.iter().filter(|(uuid, _)| !managed.contains(*uuid)).map(|(k, v)| (k.clone(), v.clone())).collect();
-                if let Err(e) = handle_initial_object(&to_send, server, zones) {
-                    error!("[mesh] initial vehicles to {} failed: {}", server.server_name, e);
+                let sent = match asleep {
+                    Some(_) => handle_activate_objects(&to_send, server, zones),
+                    None => handle_initial_object(&to_send, server, zones),
+                };
+                if let Err(e) = sent {
+                    error!("[mesh] vehicles to {} failed: {}", server.server_name, e);
                 }
             }
             // Whoever already landed on `server` meanwhile (out_of_zone transfer into
             // its zones, granted at start) is not spawned a second time, and a player
             // outside `zones` is not sent at all: Godot would only spawn then erase it.
+            let already_players = server.managed_players.lock().unwrap().clone();
             let to_send: SnapshotItems = if fresh_players.is_some() {
-                let already_players = server.managed_players.lock().unwrap().clone();
                 source
                     .iter()
                     .filter(|(uuid, _)| !already_players.contains(*uuid))
@@ -1604,8 +1646,28 @@ impl MeshWorker {
             } else {
                 source.clone()
             };
-            if let Err(e) = handle_initial_object(&to_send, server, zones) {
-                error!("[mesh] initial players to {} failed: {}", server.server_name, e);
+            match asleep {
+                Some(asleep) => {
+                    // Woken with what they are doing NOW; the ones that arrived during
+                    // the warm-up are created the normal way by the same message.
+                    if let Err(e) = handle_activate_objects(&to_send, server, zones) {
+                        error!("[mesh] players to {} failed: {}", server.server_name, e);
+                    }
+                    // Asleep there but no longer coming: gone, or out of these zones.
+                    // One that crossed in meanwhile is live there, not asleep: not dropped.
+                    let gone: Vec<String> = asleep
+                        .into_iter()
+                        .filter(|uuid| !to_send.contains_key(uuid) && !already_players.contains(uuid) && players.contains_key(uuid))
+                        .collect();
+                    if let Err(e) = handle_drop_dormant(&players, &gone, server) {
+                        error!("[mesh] dropping asleep players on {} failed: {}", server.server_name, e);
+                    }
+                }
+                None => {
+                    if let Err(e) = handle_initial_object(&to_send, server, zones) {
+                        error!("[mesh] initial players to {} failed: {}", server.server_name, e);
+                    }
+                }
             }
         }
         fresh_snapshot

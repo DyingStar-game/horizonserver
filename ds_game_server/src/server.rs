@@ -340,6 +340,7 @@ impl Server {
                 crate::ownership::release(&object_uuid, &server.uuid);
                 server.managed_objects.lock().unwrap().remove(&object_uuid);
                 player_movement::forget_velocity(&object_uuid);
+                player_action::forget_input(&object_uuid);
             } else {
                 error!("🔧 DsGameServerPlugin: Failed to send remove_player for {}", object_uuid);
             }
@@ -514,6 +515,8 @@ impl Server {
         {
             let server = self.clone();
             events.on_client("player", "client_action", move |event: ClientEventWrapper<serde_json::Value>, _player_id: PlayerId, _connection: ClientConnectionRef| {
+                // Kept whoever manages the player: the next server replays it (see LAST_HELD).
+                player_action::remember_input(&event.player_id.to_string(), &event.data);
                 if !server.is_running() || !server.is_managed_player(&event.player_id.to_string()) {
                     debug!("🔧 DsGameServerPlugin: Player {} is not managed by this server, skipping action", event.player_id);
                     return Ok(());
@@ -654,6 +657,7 @@ impl Server {
                             if spawned.is_ok() {
                                 crate::ownership::take(&child.object_uuid, &server.uuid, &server.managed_players);
                                 let _ = player_movement::replay_velocity(&child.object_uuid, &server.websocket_sender);
+                                let _ = player_action::replay_input(&child.object_uuid, &server.websocket_sender);
                             }
                             server.transferring_players.lock().unwrap().remove(&child.object_uuid);
                         } else {
@@ -797,6 +801,7 @@ impl Server {
                         // The player was moving when they crossed: give the new server the
                         // velocity the client will not send again until it changes.
                         let _ = player_movement::replay_velocity(&object_uuid, &server.websocket_sender);
+                        let _ = player_action::replay_input(&object_uuid, &server.websocket_sender);
                         // Then what they carry, parented under them: the Godot server creates it
                         // in the player's hands (or adopts a copy it still held).
                         for child in &children {

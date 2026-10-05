@@ -46,6 +46,10 @@ fn track(item: &GenericPropsRequest, server: &Server) {
         crate::ownership::take(&item.object_uuid, &server.uuid, &server.managed_players);
         let parent = item.object_data.get("parent_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
         server.player_parents.lock().unwrap().insert(item.object_uuid.clone(), parent);
+        // Sent right after the player itself (same socket, same order): a driver keeps
+        // the throttle they hold instead of having the engine brake stop them, a
+        // sprinting player keeps running.
+        let _ = super::player_action::replay_input(&item.object_uuid, &server.websocket_sender);
     }
 }
 

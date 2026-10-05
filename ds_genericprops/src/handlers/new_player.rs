@@ -95,9 +95,15 @@ impl VillageState {
 /// Whether a poi_village of this `type` houses players. Only the mining villages have
 /// spawnbuildings: a factory city has none, and counting it would hand the reserve a full cap
 /// of places that never arrive (free_reserve counts a requested village with no habs as `max`).
-/// A village with no `type` (data from before the field) still counts.
-fn houses_players(village_type: Option<&str>) -> bool {
-    village_type.map_or(true, |t| t == "mining")
+/// A village with no `type` (data from before the field) still counts. One whose `type` reads
+/// "poi_village" had it overwritten by a game server update (see update.rs, without_type_echo):
+/// its layout tells, a factory city's spawn_scene being ares_city_factory.
+fn houses_players(village_type: Option<&str>, spawn_scene: Option<&str>) -> bool {
+    match village_type {
+        None => true,
+        Some("poi_village") => !spawn_scene.is_some_and(|s| s.contains("factory")),
+        Some(t) => t == "mining",
+    }
 }
 
 /// The value of `key` in whichever channel of the prop holds it.
@@ -360,7 +366,10 @@ async fn collect_villages(gorc_instances: &Arc<GorcInstanceManager>) -> Vec<Vill
         let village = gorc_instances
             .with_object_mut(gorc_id, |instance| {
                 instance.get_object::<GenericProps>()
-                    .filter(|v| houses_players(prop_value(v, "type").and_then(|t| t.as_str())))
+                    .filter(|v| houses_players(
+                        prop_value(v, "type").and_then(|t| t.as_str()),
+                        prop_value(v, "spawn_scene").and_then(|s| s.as_str()),
+                    ))
                     .map(|v| (VillageState {
                     gorc_id: Some(gorc_id),
                     uuid: v.uuid.clone(),
@@ -822,9 +831,13 @@ mod tests {
 
     #[test]
     fn only_mining_villages_house_players() {
-        assert!(houses_players(Some("mining")));
-        assert!(!houses_players(Some("factory")), "a factory city has no habs");
-        assert!(houses_players(None), "a village from before the type field still counts");
+        assert!(houses_players(Some("mining"), None));
+        assert!(!houses_players(Some("factory"), None), "a factory city has no habs");
+        assert!(houses_players(None, None), "a village from before the type field still counts");
+        let mining = Some("scenes/_universe/structures/urban/villages/ares_village_mining.tscn");
+        let factory = Some("scenes/_universe/structures/urban/cities/ares_city_factory.tscn");
+        assert!(houses_players(Some("poi_village"), mining), "type overwritten by an update: the layout tells");
+        assert!(!houses_players(Some("poi_village"), factory));
     }
 
     #[test]

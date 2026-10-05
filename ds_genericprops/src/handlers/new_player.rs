@@ -92,6 +92,14 @@ impl VillageState {
     }
 }
 
+/// Whether a poi_village of this `type` houses players. Only the mining villages have
+/// spawnbuildings: a factory city has none, and counting it would hand the reserve a full cap
+/// of places that never arrive (free_reserve counts a requested village with no habs as `max`).
+/// A village with no `type` (data from before the field) still counts.
+fn houses_players(village_type: Option<&str>) -> bool {
+    village_type.map_or(true, |t| t == "mining")
+}
+
 /// The value of `key` in whichever channel of the prop holds it.
 fn prop_value<'a>(prop: &'a GenericProps, key: &str) -> Option<&'a serde_json::Value> {
     prop.data.values().find_map(|v| v.get(key))
@@ -343,14 +351,17 @@ fn villages_to_request<'a>(
     chosen
 }
 
-/// Every poi_village with the occupancy of the spawnbuildings linked to it by `poi_uuid`.
+/// Every poi_village that houses players (see houses_players), with the occupancy of the
+/// spawnbuildings linked to it by `poi_uuid`.
 async fn collect_villages(gorc_instances: &Arc<GorcInstanceManager>) -> Vec<VillageState> {
     let mut villages: Vec<VillageState> = Vec::new();
     let mut anchors: Vec<(usize, Vec3, Option<String>)> = Vec::new();
     for gorc_id in gorc_instances.get_objects_by_type("poi_village").await {
         let village = gorc_instances
             .with_object_mut(gorc_id, |instance| {
-                instance.get_object::<GenericProps>().map(|v| (VillageState {
+                instance.get_object::<GenericProps>()
+                    .filter(|v| houses_players(prop_value(v, "type").and_then(|t| t.as_str())))
+                    .map(|v| (VillageState {
                     gorc_id: Some(gorc_id),
                     uuid: v.uuid.clone(),
                     name: prop_value(v, "name").and_then(|n| n.as_str()).unwrap_or_default().to_string(),
@@ -807,6 +818,13 @@ mod tests {
             free,
             buildings: if free > 0 || occupancy > 0 { vec![GorcObjectId::new()] } else { Vec::new() },
         }
+    }
+
+    #[test]
+    fn only_mining_villages_house_players() {
+        assert!(houses_players(Some("mining")));
+        assert!(!houses_players(Some("factory")), "a factory city has no habs");
+        assert!(houses_players(None), "a village from before the type field still counts");
     }
 
     #[test]

@@ -1392,5 +1392,24 @@
         },
         "object_type": "poi_village",
         "object_uuid": "80f08e0a-d82a-50a0-8cb8-5369d61a9071"
+    },
+    {
+        "object_type": "simple_building",
+        "object_uuid": "6c20748b-7f8b-a368-420d-b0a8188bed68",
+        "object_data": {
+            "name": "Teleporter",
+            "parent_id": "38db93fd-3046-5df0-1c23-0c58dcae9a74",
+            "scenename": "scenes/_universe/structures/buildings/teleporter/teleporter.tscn",
+            "position": {
+                "x": -23.85423938674552,
+                "y": -1.931746285461237,
+                "z": -40.62550122908625
+            },
+            "rotation": {
+                "x": 0.0,
+                "y": 1.5707963267948966,
+                "z": 0.0
+            }
+        }
     }
 ]

@@ -1411,5 +1411,305 @@
                 "z": 0.0
             }
         }
+    },
+    {
+        "object_data": {
+            "parent_id": "_planet_SandBox",
+            "position": {
+                "x": 4459226.579,
+                "y": 2659326.981,
+                "z": -3680814.929
+            },
+            "rotation": {
+                "x": -0.300742,
+                "y": 0.546928,
+                "z": -1.118
+            },
+            "scenename": "scenes/_universe/structures/urban/poi_villages.tscn",
+            "is_spawned": false,
+            "spawn_requested": true,
+            "spawn_scene": "scenes/_universe/structures/urban/cities/ares_city_factory.tscn",
+            "radius_m": 2500,
+            "population": 1000,
+            "type": "factory",
+            "name": "F0005"
+        },
+        "object_type": "poi_village",
+        "object_uuid": "7bd7708d-8787-5acb-8a84-6bfc8e0caad5"
+    },
+    {
+        "object_data": {
+            "parent_id": "_planet_SandBox",
+            "position": {
+                "x": 3958754.024,
+                "y": 1198227.528,
+                "z": -4837110.458
+            },
+            "rotation": {
+                "x": -0.221999,
+                "y": 0.841645,
+                "z": -1.37657
+            },
+            "scenename": "scenes/_universe/structures/urban/poi_villages.tscn",
+            "is_spawned": false,
+            "spawn_requested": true,
+            "spawn_scene": "scenes/_universe/structures/urban/cities/ares_city_factory.tscn",
+            "radius_m": 2000,
+            "population": 1000,
+            "type": "factory",
+            "name": "F0028"
+        },
+        "object_type": "poi_village",
+        "object_uuid": "597fd315-7cea-5803-b95c-f9ed690fdf79"
+    },
+    {
+        "object_data": {
+            "parent_id": "_planet_SandBox",
+            "position": {
+                "x": 4075362.84,
+                "y": 1270373.301,
+                "z": -4720454.386
+            },
+            "rotation": {
+                "x": -0.222561,
+                "y": 0.812491,
+                "z": -1.364685
+            },
+            "scenename": "scenes/_universe/structures/urban/poi_villages.tscn",
+            "is_spawned": false,
+            "spawn_requested": true,
+            "spawn_scene": "scenes/_universe/structures/urban/cities/ares_city_factory.tscn",
+            "radius_m": 2000,
+            "population": 1000,
+            "type": "factory",
+            "name": "F0029"
+        },
+        "object_type": "poi_village",
+        "object_uuid": "f87ab025-db9d-5dad-9a19-09f4b96063c2"
+    },
+    {
+        "object_data": {
+            "parent_id": "_planet_SandBox",
+            "position": {
+                "x": 4220882.544,
+                "y": 1346342.955,
+                "z": -4569095.251
+            },
+            "rotation": {
+                "x": -0.219935,
+                "y": 0.776587,
+                "z": -1.352296
+            },
+            "scenename": "scenes/_universe/structures/urban/poi_villages.tscn",
+            "is_spawned": false,
+            "spawn_requested": true,
+            "spawn_scene": "scenes/_universe/structures/urban/cities/ares_city_factory.tscn",
+            "radius_m": 2000,
+            "population": 1000,
+            "type": "factory",
+            "name": "F0030"
+        },
+        "object_type": "poi_village",
+        "object_uuid": "84131032-f303-51b8-b05e-7e4bf93b2c30"
+    },
+    {
+        "object_data": {
+            "parent_id": "_planet_SandBox",
+            "position": {
+                "x": 4286234.564,
+                "y": 1409438.105,
+                "z": -4488518.431
+            },
+            "rotation": {
+                "x": -0.222126,
+                "y": 0.757134,
+                "z": -1.341763
+            },
+            "scenename": "scenes/_universe/structures/urban/poi_villages.tscn",
+            "is_spawned": false,
+            "spawn_requested": true,
+            "spawn_scene": "scenes/_universe/structures/urban/cities/ares_city_factory.tscn",
+            "radius_m": 2000,
+            "population": 1000,
+            "type": "factory",
+            "name": "F0031"
+        },
+        "object_type": "poi_village",
+        "object_uuid": "4e661f0a-e968-5fe6-bc84-215834a4adcf"
+    },
+    {
+        "object_data": {
+            "parent_id": "_planet_SandBox",
+            "position": {
+                "x": 4330273.165,
+                "y": 1502452.846,
+                "z": -4415482.983
+            },
+            "rotation": {
+                "x": -0.229426,
+                "y": 0.738375,
+                "z": -1.325932
+            },
+            "scenename": "scenes/_universe/structures/urban/poi_villages.tscn",
+            "is_spawned": false,
+            "spawn_requested": true,
+            "spawn_scene": "scenes/_universe/structures/urban/cities/ares_city_factory.tscn",
+            "radius_m": 2000,
+            "population": 1000,
+            "type": "factory",
+            "name": "F0032"
+        },
+        "object_type": "poi_village",
+        "object_uuid": "129695fa-cc8e-5442-a38d-614f7503e191"
+    },
+    {
+        "object_data": {
+            "parent_id": "_planet_SandBox",
+            "position": {
+                "x": 4375354.134,
+                "y": 1632853.785,
+                "z": -4323792.887
+            },
+            "rotation": {
+                "x": -0.239829,
+                "y": 0.714514,
+                "z": -1.303503
+            },
+            "scenename": "scenes/_universe/structures/urban/poi_villages.tscn",
+            "is_spawned": false,
+            "spawn_requested": true,
+            "spawn_scene": "scenes/_universe/structures/urban/cities/ares_city_factory.tscn",
+            "radius_m": 2000,
+            "population": 1000,
+            "type": "factory",
+            "name": "F0033"
+        },
+        "object_type": "poi_village",
+        "object_uuid": "a6bcd0d4-31b1-579a-87fe-903469678e3c"
+    },
+    {
+        "object_data": {
+            "parent_id": "_planet_SandBox",
+            "position": {
+                "x": 4439196.471,
+                "y": 1746458.407,
+                "z": -4212901.368
+            },
+            "rotation": {
+                "x": -0.24478,
+                "y": 0.687907,
+                "z": -1.284039
+            },
+            "scenename": "scenes/_universe/structures/urban/poi_villages.tscn",
+            "is_spawned": false,
+            "spawn_requested": true,
+            "spawn_scene": "scenes/_universe/structures/urban/cities/ares_city_factory.tscn",
+            "radius_m": 2000,
+            "population": 1000,
+            "type": "factory",
+            "name": "F0034"
+        },
+        "object_type": "poi_village",
+        "object_uuid": "1cd60948-237a-5c4d-8c2a-e93dbb31c984"
+    },
+    {
+        "object_data": {
+            "parent_id": "_planet_SandBox",
+            "position": {
+                "x": 4444712.409,
+                "y": 1928079.495,
+                "z": -4127003.91
+            },
+            "rotation": {
+                "x": -0.261014,
+                "y": 0.663338,
+                "z": -1.251846
+            },
+            "scenename": "scenes/_universe/structures/urban/poi_villages.tscn",
+            "is_spawned": false,
+            "spawn_requested": true,
+            "spawn_scene": "scenes/_universe/structures/urban/cities/ares_city_factory.tscn",
+            "radius_m": 2000,
+            "population": 1000,
+            "type": "factory",
+            "name": "F0035"
+        },
+        "object_type": "poi_village",
+        "object_uuid": "63a6ea9d-ad6c-502a-a75b-688a2a15c2ca"
+    },
+    {
+        "object_data": {
+            "parent_id": "_planet_SandBox",
+            "position": {
+                "x": 4446822.113,
+                "y": 2098522.551,
+                "z": -4040680.191
+            },
+            "rotation": {
+                "x": -0.274389,
+                "y": 0.63911,
+                "z": -1.221173
+            },
+            "scenename": "scenes/_universe/structures/urban/poi_villages.tscn",
+            "is_spawned": false,
+            "spawn_requested": true,
+            "spawn_scene": "scenes/_universe/structures/urban/cities/ares_city_factory.tscn",
+            "radius_m": 2000,
+            "population": 1000,
+            "type": "factory",
+            "name": "F0036"
+        },
+        "object_type": "poi_village",
+        "object_uuid": "874884dc-1054-587f-b0a5-8acdd67e8df3"
+    },
+    {
+        "object_data": {
+            "parent_id": "_planet_SandBox",
+            "position": {
+                "x": 4472727.995,
+                "y": 2268073.977,
+                "z": -3918630.491
+            },
+            "rotation": {
+                "x": -0.282197,
+                "y": 0.608651,
+                "z": -1.19066
+            },
+            "scenename": "scenes/_universe/structures/urban/poi_villages.tscn",
+            "is_spawned": false,
+            "spawn_requested": true,
+            "spawn_scene": "scenes/_universe/structures/urban/cities/ares_city_factory.tscn",
+            "radius_m": 2000,
+            "population": 1000,
+            "type": "factory",
+            "name": "F0037"
+        },
+        "object_type": "poi_village",
+        "object_uuid": "8996b7bc-7be7-53f6-ab63-ed0730ab6a65"
+    },
+    {
+        "object_data": {
+            "parent_id": "_planet_SandBox",
+            "position": {
+                "x": 4421313.723,
+                "y": 2517402.983,
+                "z": -3823583.058
+            },
+            "rotation": {
+                "x": -0.301825,
+                "y": 0.578539,
+                "z": -1.143652
+            },
+            "scenename": "scenes/_universe/structures/urban/poi_villages.tscn",
+            "is_spawned": false,
+            "spawn_requested": true,
+            "spawn_scene": "scenes/_universe/structures/urban/cities/ares_city_factory.tscn",
+            "radius_m": 2000,
+            "population": 1000,
+            "type": "factory",
+            "name": "F0038"
+        },
+        "object_type": "poi_village",
+        "object_uuid": "8f3f1f0f-f8a9-59e1-bb90-07548f4e797e"
     }
 ]

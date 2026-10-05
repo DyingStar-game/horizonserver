@@ -72,6 +72,23 @@ fn broadcast_object_update(
     }
 }
 
+/// The payload of a game server update without the `type` key its envelope carries: Godot sends
+/// every entry of props/update_object as `{"uuid", "type": <prop type>, ...}`, and a prop whose def
+/// whitelists a property of that name (poi_village: "mining" / "factory") had it overwritten with
+/// "poi_village" by the first update of the village (its is_spawned, its ground snap). The new
+/// player logic then no longer saw it as a mining village, orphaned its habs, and woke two new
+/// villages for every player (minikube, 2026-10-05). A value equal to the prop type itself is
+/// never a real property value.
+fn without_type_echo(object_data: &serde_json::Value, object_type: &str) -> serde_json::Value {
+	let mut data = object_data.clone();
+	if let Some(map) = data.as_object_mut() {
+		if map.get("type").and_then(|t| t.as_str()) == Some(object_type) {
+			map.remove("type");
+		}
+	}
+	data
+}
+
 /// Update the global positions of all child objects when parent moves
 async fn update_children_positions(
     parent_gorc_id: GorcObjectId,
@@ -241,7 +258,7 @@ pub fn handle_object_update(
 					let zone_set = gorc_instances.with_object_mut(gorc_id, |instance| {
 						let zone_set = instance.get_object_mut::<GenericProps>()
 							.expect("Object must exists")
-							.update(req_data.object_data.clone());
+							.update(without_type_echo(&req_data.object_data, &req_data.object_type));
 						for zone in &zone_set {
 							instance.mark_needs_update(*zone);
 						}
@@ -377,3 +394,17 @@ pub fn handle_object_update(
 
 		Ok(())
 	}
+
+#[cfg(test)]
+mod tests {
+	use super::without_type_echo;
+	use serde_json::json;
+
+	#[test]
+	fn the_envelope_type_never_overwrites_a_type_property() {
+		let update = json!({"uuid": "u", "type": "poi_village", "is_spawned": true});
+		assert_eq!(without_type_echo(&update, "poi_village"), json!({"uuid": "u", "is_spawned": true}));
+		let real = json!({"type": "factory"});
+		assert_eq!(without_type_echo(&real, "poi_village"), real, "a real value is kept");
+	}
+}

@@ -121,3 +121,8 @@ subscribe = [
     "plugin:ds_game_server:server_registered",
     "plugin:ds_game_server:server_unregistered",
 ]
+
+[[ds_bridge.services]]
+name = "weather"
+url = "ws://service-weather:9400/ws"
+subscribe = []

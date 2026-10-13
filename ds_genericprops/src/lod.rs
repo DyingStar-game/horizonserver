@@ -27,7 +27,7 @@
 //! [`queue_sticky`] names such keys: the stream remembers their last value and
 //! every recipient that has not yet been served a payload carrying it gets it
 //! merged into whatever payload it is served next. Nobody else pays for it —
-//! the key goes out once per recipient and per change, exactly as if the
+//! the key goes out once per recipient and per declaration, exactly as if the
 //! original packet had been delivered.
 //!
 //! Recipients are computed here rather than read from
@@ -230,7 +230,7 @@ struct Stream {
     bytes_sticky: Option<Arc<Vec<u8>>>,
     /// Last value of every sticky key ever queued on this stream.
     sticky: serde_json::Map<String, serde_json::Value>,
-    /// Version at which a sticky key last changed. A recipient whose delivered
+    /// Version at which a sticky key was last declared. A recipient whose delivered
     /// version is older has never been served that value and gets `bytes_sticky`.
     sticky_version: u64,
     /// Last version delivered to each recipient, and when.
@@ -266,6 +266,14 @@ pub fn queue(
     data: &serde_json::Value,
 ) {
     queue_sticky(gorc_id, channel, object_type, event_name, data, &[]);
+}
+
+/// Drop every stream of `gorc_id`. Call when the object is (re)registered: a
+/// player reconnecting within [`IDLE_RETENTION`] gets the same id, and the
+/// stream of its previous session would otherwise carry over its sticky values
+/// (the old `parent_id`) and its per-recipient versions into the new one.
+pub fn forget_object(gorc_id: GorcObjectId) {
+    streams().retain(|(id, _, _), _| *id != gorc_id);
 }
 
 /// [`queue`], with `sticky_keys` naming the keys of `data` that are sent on
@@ -311,11 +319,16 @@ pub fn queue_sticky(
 
     if let Some(payload) = data.as_object() {
         for sticky_key in sticky_keys {
+            // A sticky key is a DECLARATION, sent once, not a value to diff: the
+            // same value again is still news to whoever has not been served it.
+            // Comparing with the remembered value lost a reparent after a quick
+            // reconnect (2026-10-13): the stream of the previous session still held
+            // the same planet as `parent_id`, the version was not bumped, the
+            // packet was overwritten before delivery, and the client applied
+            // planet-local coordinates under its spawn apartment — in space.
             if let Some(value) = payload.get(*sticky_key) {
-                if stream.sticky.get(*sticky_key) != Some(value) {
-                    stream.sticky.insert(sticky_key.to_string(), value.clone());
-                    stream.sticky_version = stream.version;
-                }
+                stream.sticky.insert(sticky_key.to_string(), value.clone());
+                stream.sticky_version = stream.version;
             }
         }
         if stream.sticky.is_empty() {
@@ -670,6 +683,31 @@ mod tests {
         let (_, _, sticky4, _) = stream_of(id);
         assert_eq!(data_of(sticky4.as_ref().unwrap())["parent_id"], json!("city"));
         streams().remove(&(id, 0, "move".to_string()));
+    }
+
+    #[test]
+    fn a_repeated_sticky_value_is_declared_again() {
+        let id = GorcObjectId::new();
+        // Previous session: reparented onto the planet, delivered.
+        queue_sticky(id, 0, "player", "move", &json!({"position": 1, "parent_id": "planet"}), &["parent_id"]);
+        queue_sticky(id, 0, "player", "move", &json!({"position": 2}), &["parent_id"]);
+        // New session: leaves the apartment for the same planet.
+        queue_sticky(id, 0, "player", "move", &json!({"position": 3, "parent_id": "planet"}), &["parent_id"]);
+        let (v3, _, _, sv3) = stream_of(id);
+        assert_eq!(sv3, v3, "a recipient served version 2 must be owed the new declaration");
+        streams().remove(&(id, 0, "move".to_string()));
+    }
+
+    #[test]
+    fn forget_object_drops_every_stream_of_that_object_only() {
+        let (id, other) = (GorcObjectId::new(), GorcObjectId::new());
+        queue_sticky(id, 0, "player", "move", &json!({"position": 1, "parent_id": "planet"}), &["parent_id"]);
+        queue(id, 1, "player", "update_property", &json!({"head": 0.5}));
+        queue(other, 0, "player", "move", &json!({"position": 1}));
+        forget_object(id);
+        assert!(!streams().iter().any(|entry| entry.key().0 == id));
+        assert!(streams().contains_key(&(other, 0, "move".to_string())));
+        streams().remove(&(other, 0, "move".to_string()));
     }
 
     #[test]

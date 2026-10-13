@@ -265,11 +265,11 @@ pub fn handle_movement_request_sync(
                             if let Some(parent_id_str) = &parent_id {
                                 if let Ok(parent_gorc_id) = GorcObjectId::from_str(parent_id_str) {
                                     if let Some(parent_global_position) = gorc_instances.get_object_position(parent_gorc_id).await {
-                                        final_position = horizon_event_system::Vec3 {
-                                            x: parent_global_position.x + move_data.position.x,
-                                            y: parent_global_position.y + move_data.position.y,
-                                            z: parent_global_position.z + move_data.position.z,
-                                        };
+                                        // Turned by the parent's frame: a player riding the vehicle
+                                        // lift's platform stands in the lift's tilted axes (crate::frame).
+                                        let parent_basis = crate::frame::global_basis_of(&gorc_instances, parent_id_str).await;
+                                        final_position = crate::frame::compose(
+                                            parent_global_position, &parent_basis, move_data.position);
                                     }
                                 }
                             }

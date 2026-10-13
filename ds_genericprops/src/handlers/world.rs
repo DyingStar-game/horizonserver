@@ -14,7 +14,7 @@ use tracing::warn;
 use crate::genericprops::GenericProps;
 
 /// Longest parent chain we follow before giving up (guards against cycles too).
-const MAX_CHAIN_DEPTH: usize = 8;
+pub(crate) const MAX_CHAIN_DEPTH: usize = 8;
 
 /// What the resolver needs from one ancestor.
 #[derive(Debug, Clone)]
@@ -25,6 +25,8 @@ pub struct ChainNode {
     pub parent_id: Option<String>,
     /// Position local to ITS parent (for a planet: `positions[0]`).
     pub local_position: Vec3,
+    /// Orientation local to ITS parent: what turns the positions of its children (crate::frame).
+    pub local_rotation: crate::frame::Basis,
 }
 
 /// All channels of an object flattened into one property map.
@@ -61,11 +63,12 @@ pub fn chain_node_of(gp: &GenericProps) -> ChainNode {
         name,
         parent_id: read_parent_id(gp),
         local_position,
+        local_rotation: crate::frame::local_basis(gp),
     }
 }
 
-/// Pure fold: walks `chain` (direct parent first) accumulating local positions
-/// until the first planet, which becomes the world. Anything past the planet is
+/// Pure fold: walks `chain` (direct parent first) accumulating local positions,
+/// each turned by its parent's orientation, until the first planet, which becomes the world. Anything past the planet is
 /// ignored (a moon's own parent planet is not the moon-dweller's world).
 pub fn fold_world(own_local: Vec3, chain: &[ChainNode]) -> ObjectWorld {
     let mut local = own_local;
@@ -81,11 +84,7 @@ pub fn fold_world(own_local: Vec3, chain: &[ChainNode]) -> ObjectWorld {
                 local_position: Point3::new(local.x, local.y, local.z),
             };
         }
-        local = Vec3::new(
-            local.x + node.local_position.x,
-            local.y + node.local_position.y,
-            local.z + node.local_position.z,
-        );
+        local = crate::frame::compose(node.local_position, &node.local_rotation, local);
     }
     ObjectWorld {
         chain: entries,
@@ -204,7 +203,20 @@ mod tests {
             name: Some(format!("{}_name", uuid)),
             parent_id: parent.map(|s| s.to_string()),
             local_position: Vec3::new(pos.0, pos.1, pos.2),
+            local_rotation: crate::frame::Basis::IDENTITY,
         }
+    }
+
+    #[test]
+    fn rotated_vehicle_turns_its_passenger() {
+        // A vehicle turned 90° about Y: its local +X is the planet's -Z.
+        let mut vehicle = node("v", "vehicle", Some("p"), (10.0, 0.0, 0.0));
+        vehicle.local_rotation =
+            crate::frame::Basis::from_euler_yxz(Vec3::new(0.0, std::f64::consts::FRAC_PI_2, 0.0));
+        let chain = vec![vehicle, node("p", "planet", None, (1e9, 0.0, 0.0))];
+        let w = fold_world(Vec3::new(2.0, 0.0, 0.0), &chain);
+        assert!((w.local_position.x - 10.0).abs() < 1e-9);
+        assert!((w.local_position.z + 2.0).abs() < 1e-9);
     }
 
     #[test]

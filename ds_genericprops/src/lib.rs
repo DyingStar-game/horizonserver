@@ -25,6 +25,7 @@ pub mod events;
 pub mod objectdefinition;
 pub mod lod;
 pub mod children;
+pub mod frame;
 // Internal imports
 mod handlers;
 use handlers::*;

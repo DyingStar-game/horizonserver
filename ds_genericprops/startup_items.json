@@ -2986,5 +2986,206 @@
         },
         "object_type": "poi_village",
         "object_uuid": "0ae1b025-8768-4d7d-9d31-38f911588f5e"
+    },
+    {
+        "object_data": {
+            "parent_id": "_planet_SandBox",
+            "position": {
+                "x": 4450769.948,
+                "y": 2672441.488,
+                "z": 3676826.622
+            },
+            "rotation": {
+                "x": 0.111264,
+                "y": -0.638718,
+                "z": -1.134372
+            },
+            "scenename": "scenes/_universe/structures/industrial/vehicle_lift/vehicle_lift.tscn",
+            "name": "Vehicle Lift Cargo",
+            "guide_z_offset": 0.0,
+            "platform_progress_ratio": 0.0,
+            "target_ratio": 0.0,
+            "descent_depth": 179.0,
+            "max_speed": 5.0,
+            "acceleration": 0.2,
+            "is_platformsystem_spawned": false,
+            "is_moving": false
+        },
+        "object_type": "vehicle_lift",
+        "object_uuid": "057fc5a4-79de-4905-9dc5-47b113e8075f"
+    },
+    {
+        "object_data": {
+            "acceleration": 1.0,
+            "descent_depth": 763.2,
+            "guide_z_offset": 0.0,
+            "is_moving": false,
+            "is_platformsystem_spawned": false,
+            "max_speed": 5.0,
+            "name": "Vehicle Lift Cliff 1",
+            "parent_id": "_planet_SandBox",
+            "platform_progress_ratio": 0.0,
+            "position": {
+                "x": 4449366.657,
+                "y": 2635343.536,
+                "z": 3706674.882
+            },
+            "rotation": {
+                "x": -0.837519,
+                "y": -1.224162,
+                "z": -0.903521
+            },
+            "scenename": "scenes/_universe/structures/industrial/vehicle_lift/vehicle_lift.tscn",
+            "target_ratio": 0.0,
+            "notch_length_m": 268.0,
+            "notch_width_m": 24.0
+        },
+        "object_type": "vehicle_lift",
+        "object_uuid": "9751229b-7f83-dc94-f78b-af68f4048aa2"
+    },
+    {
+        "object_data": {
+            "acceleration": 1.0,
+            "descent_depth": 757.7,
+            "guide_z_offset": 0.0,
+            "is_moving": false,
+            "is_platformsystem_spawned": false,
+            "max_speed": 5.0,
+            "name": "Vehicle Lift Cliff 2",
+            "parent_id": "_planet_SandBox",
+            "platform_progress_ratio": 0.0,
+            "position": {
+                "x": 4449389.926,
+                "y": 2635383.359,
+                "z": 3706609.177
+            },
+            "rotation": {
+                "x": -0.832602,
+                "y": -1.218415,
+                "z": -0.907769
+            },
+            "scenename": "scenes/_universe/structures/industrial/vehicle_lift/vehicle_lift.tscn",
+            "target_ratio": 0.0,
+            "notch_length_m": 269.0,
+            "notch_width_m": 24.0
+        },
+        "object_type": "vehicle_lift",
+        "object_uuid": "d39e2b10-e67c-7178-cd86-b50f9ca1177a"
+    },
+    {
+        "object_data": {
+            "acceleration": 1.0,
+            "descent_depth": 757.7,
+            "guide_z_offset": 0.0,
+            "is_moving": false,
+            "is_platformsystem_spawned": false,
+            "max_speed": 5.0,
+            "name": "Vehicle Lift Cliff 3",
+            "parent_id": "_planet_SandBox",
+            "platform_progress_ratio": 0.0,
+            "position": {
+                "x": 4449415.438,
+                "y": 2635425.623,
+                "z": 3706546.107
+            },
+            "rotation": {
+                "x": -0.832602,
+                "y": -1.218415,
+                "z": -0.907757
+            },
+            "scenename": "scenes/_universe/structures/industrial/vehicle_lift/vehicle_lift.tscn",
+            "target_ratio": 0.0,
+            "notch_length_m": 270.0,
+            "notch_width_m": 24.0
+        },
+        "object_type": "vehicle_lift",
+        "object_uuid": "aed4afb0-c0e5-e65a-f370-b1489a47726e"
+    },
+    {
+        "object_data": {
+            "acceleration": 1.0,
+            "descent_depth": 764.9,
+            "guide_z_offset": 0.0,
+            "is_moving": false,
+            "is_platformsystem_spawned": false,
+            "max_speed": 5.0,
+            "name": "Vehicle Lift Cliff 4",
+            "parent_id": "_planet_SandBox",
+            "platform_progress_ratio": 0.0,
+            "position": {
+                "x": 4449446.395,
+                "y": 2635470.0,
+                "z": 3706486.807
+            },
+            "rotation": {
+                "x": -0.832602,
+                "y": -1.218415,
+                "z": -0.907744
+            },
+            "scenename": "scenes/_universe/structures/industrial/vehicle_lift/vehicle_lift.tscn",
+            "target_ratio": 0.0,
+            "notch_length_m": 271.0,
+            "notch_width_m": 24.0
+        },
+        "object_type": "vehicle_lift",
+        "object_uuid": "7b561dce-7a01-cd02-bb5a-66ae33ce2ad8"
+    },
+    {
+        "object_data": {
+            "acceleration": 1.0,
+            "descent_depth": 767.2,
+            "guide_z_offset": 0.0,
+            "is_moving": false,
+            "is_platformsystem_spawned": false,
+            "max_speed": 5.0,
+            "name": "Vehicle Lift Cliff 5",
+            "parent_id": "_planet_SandBox",
+            "platform_progress_ratio": 0.0,
+            "position": {
+                "x": 4449473.665,
+                "y": 2635513.307,
+                "z": 3706425.202
+            },
+            "rotation": {
+                "x": -0.832602,
+                "y": -1.218415,
+                "z": -0.907732
+            },
+            "scenename": "scenes/_universe/structures/industrial/vehicle_lift/vehicle_lift.tscn",
+            "target_ratio": 0.0,
+            "notch_length_m": 272.0,
+            "notch_width_m": 24.0
+        },
+        "object_type": "vehicle_lift",
+        "object_uuid": "f79f6824-135d-7b26-992e-c1e4b97f0c7a"
+    },
+    {
+        "object_data": {
+            "acceleration": 1.0,
+            "descent_depth": 771.2,
+            "guide_z_offset": 0.0,
+            "is_moving": false,
+            "is_platformsystem_spawned": false,
+            "max_speed": 5.0,
+            "name": "Vehicle Lift Cliff 6",
+            "parent_id": "_planet_SandBox",
+            "platform_progress_ratio": 0.0,
+            "position": {
+                "x": 4449503.684,
+                "y": 2635557.128,
+                "z": 3706365.119
+            },
+            "rotation": {
+                "x": -0.837519,
+                "y": -1.224162,
+                "z": -0.903458
+            },
+            "scenename": "scenes/_universe/structures/industrial/vehicle_lift/vehicle_lift.tscn",
+            "target_ratio": 0.0,
+            "notch_length_m": 274.0,
+            "notch_width_m": 24.0
+        },
+        "object_type": "vehicle_lift",
+        "object_uuid": "c03e5286-b351-2f2d-457e-befc9cf4fb2f"
     }
 ]

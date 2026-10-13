@@ -88,11 +88,9 @@ pub fn handle_object_create(
 						}
 						
 						if let Some(parent_pos) = parent_global_position {
-							obj.global_position = horizon_event_system::Vec3 {
-								x: parent_pos.x + position.x,
-								y: parent_pos.y + position.y,
-								z: parent_pos.z + position.z,
-							};
+							// Turned by the parent's frame, as Godot places it (see crate::frame).
+							let parent_basis = crate::frame::global_basis_of(&gorc_instances, parent_id_str).await;
+							obj.global_position = crate::frame::compose(parent_pos, &parent_basis, position);
 							debug!("🚀 GORC: Setting child object {} global_position based on parent {} global_position: {:?}", 
 								uuid, parent_id_str, obj.global_position);
 						} else {
@@ -133,6 +131,9 @@ pub fn handle_object_create(
 				let gorc_id = gorc_instances.register_object_with_uuid(obj, global_position, maybe_obj_id).await;
 				debug!("🚀 GORC: object register {} completed with id {}", uuid, gorc_id.to_string());
 				props.insert(uuid, gorc_id.clone());
+				// A player back within the LOD idle retention reuses its id: start its
+				// delivery streams over rather than inherit the last session's.
+				crate::lod::forget_object(gorc_id);
 				if let Some(mut object_instance) = gorc_instances.get_object(gorc_id).await {
 					// Drop subscribers that are no longer connected.
 					//

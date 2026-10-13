@@ -1,10 +1,11 @@
+use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 use horizon_event_system::{
     EventSystem, PlayerId, GorcEvent, GorcObject, GorcObjectId, ClientConnectionRef, ObjectInstance,
     EventError,
 };
 use luminal::Handle;
-use tracing::{debug, info, error};
+use tracing::{debug, info, error, warn};
 use serde_json;
 use dashmap::DashMap;
 
@@ -89,7 +90,15 @@ fn without_type_echo(object_data: &serde_json::Value, object_type: &str) -> serd
 	data
 }
 
-/// Update the global positions of all child objects when parent moves
+/// Update the global positions of every descendant of a parent that moved.
+///
+/// Descendants, not only the children: what rides a moving prop is often two levels below it. A
+/// vehicle lift moves its Platform System, the Platform hangs from it, and the players and crates on
+/// the Platform are its children; one level left them at the top of the shaft for the whole descent
+/// (their zones, and the viewer of a riding player, 180 m off). A visit costs what a direct child
+/// cost before (the index gives the children, one instance read, one zone update), and only an
+/// object that moves gets here, so the extra work is the riders of riders and nothing else. Bounded
+/// by MAX_CHAIN_DEPTH and a visited set, so a cycle in the parent ids cannot loop.
 async fn update_children_positions(
     parent_gorc_id: GorcObjectId,
     parent_position: horizon_event_system::Vec3,
@@ -97,81 +106,94 @@ async fn update_children_positions(
     gorc_instances: &horizon_event_system::GorcInstanceManager,
     events: Arc<EventSystem>,
 ) {
-    let parent_id_str = parent_gorc_id.to_string();
+    let mut visited: HashSet<GorcObjectId> = HashSet::new();
+    visited.insert(parent_gorc_id);
+    // Each level carries its own frame's orientation down: a child is placed by its parent's position
+    // AND basis, and passes `parent basis × its own rotation` to its children (crate::frame).
+    let root_basis = crate::frame::global_basis_of(gorc_instances, &parent_gorc_id.to_string()).await;
+    let mut queue: VecDeque<(GorcObjectId, horizon_event_system::Vec3, crate::frame::Basis, usize)> = VecDeque::new();
+    queue.push_back((parent_gorc_id, parent_position, root_basis, 0));
 
-    // Only the indexed children are visited, never the whole props map: this
-    // runs on every positioned update_property, and a scan of ~850 props at
-    // ~480 updates/s was enough to pin every handler thread on preprod.
-    for child_uuid in crate::children::children_of(&parent_id_str) {
-        let child_gorc_id = match props.get(&child_uuid) {
-            Some(gorc_id) => *gorc_id,
-            None => match GorcObjectId::from_str(&child_uuid) {
-                Ok(gorc_id) => gorc_id,
-                Err(_) => continue,
-            },
-        };
-        if child_gorc_id == parent_gorc_id {
+    while let Some((parent_gorc_id, parent_position, parent_basis, depth)) = queue.pop_front() {
+        if depth >= world::MAX_CHAIN_DEPTH {
+            warn!("🚀 GORC: descendants of {} deeper than {}, not followed", parent_gorc_id, world::MAX_CHAIN_DEPTH);
             continue;
         }
+        let parent_id_str = parent_gorc_id.to_string();
 
-        // Read what we need under the instance lock, without cloning the object.
-        let child = gorc_instances
-            .with_object_mut(child_gorc_id, |instance| {
-                instance.get_object::<GenericProps>().and_then(|child_props| {
-                    // The index is what brought us here; the stored parent_id is
-                    // the truth, so a stale entry is skipped rather than trusted.
-                    if child_props.parent_id().as_deref() != Some(parent_id_str.as_str()) {
-                        return None;
-                    }
-                    // The child's LOCAL position (NOT global_position, which would
-                    // produce parent_new_pos + child_global_pos instead of
-                    // parent_new_pos + child_local_pos).
-                    let child_local_position = child_props.data.values()
-                        .filter_map(|zone_data| zone_data.get("position"))
-                        .filter_map(|v| serde_json::from_value::<horizon_event_system::Vec3>(v.clone()).ok())
-                        .next()
-                        .unwrap_or(horizon_event_system::Vec3::zero());
-                    Some((child_local_position, child_props.type_name() == "player", child_props.uuid.clone()))
+        // Only the indexed children are visited, never the whole props map: this
+        // runs on every positioned update_property, and a scan of ~850 props at
+        // ~480 updates/s was enough to pin every handler thread on preprod.
+        for child_uuid in crate::children::children_of(&parent_id_str) {
+            let child_gorc_id = match props.get(&child_uuid) {
+                Some(gorc_id) => *gorc_id,
+                None => match GorcObjectId::from_str(&child_uuid) {
+                    Ok(gorc_id) => gorc_id,
+                    Err(_) => continue,
+                },
+            };
+            if !visited.insert(child_gorc_id) {
+                continue;
+            }
+
+            // Read what we need under the instance lock, without cloning the object.
+            let child = gorc_instances
+                .with_object_mut(child_gorc_id, |instance| {
+                    instance.get_object::<GenericProps>().and_then(|child_props| {
+                        // The index is what brought us here; the stored parent_id is
+                        // the truth, so a stale entry is skipped rather than trusted.
+                        if child_props.parent_id().as_deref() != Some(parent_id_str.as_str()) {
+                            return None;
+                        }
+                        // The child's LOCAL position (NOT global_position, which would
+                        // produce parent_new_pos + child_global_pos instead of
+                        // parent_new_pos + child_local_pos).
+                        let child_local_position = child_props.data.values()
+                            .filter_map(|zone_data| zone_data.get("position"))
+                            .filter_map(|v| serde_json::from_value::<horizon_event_system::Vec3>(v.clone()).ok())
+                            .next()
+                            .unwrap_or(horizon_event_system::Vec3::zero());
+                        Some((child_local_position, crate::frame::local_basis(child_props),
+                                child_props.type_name() == "player", child_props.uuid.clone()))
+                    })
                 })
-            })
-            .await
-            .flatten();
-        let Some((child_local_position, is_player, uuid)) = child else {
-            continue;
-        };
+                .await
+                .flatten();
+            let Some((child_local_position, child_rotation, is_player, uuid)) = child else {
+                continue;
+            };
 
-        // Calculate the new global position
-        let new_global_position = horizon_event_system::Vec3 {
-            x: parent_position.x + child_local_position.x,
-            y: parent_position.y + child_local_position.y,
-            z: parent_position.z + child_local_position.z,
-        };
+            // Calculate the new global position, turned by the parent's frame
+            let new_global_position = crate::frame::compose(parent_position, &parent_basis, child_local_position);
 
-        debug!(
-            "🚀 GORC: Updating child object {} global position to {:?}",
-            child_gorc_id.to_string(),
-            new_global_position
-        );
+            debug!(
+                "🚀 GORC: Updating child object {} global position to {:?}",
+                child_gorc_id.to_string(),
+                new_global_position
+            );
 
-        // Update the child's position in the GORC system and send zone
-        // entry/exit messages so nearby players get subscribed/unsubscribed.
-        if let Err(e) = events.update_object_position(child_gorc_id, new_global_position).await {
-            error!("🚀 GORC: ❌ Failed to update child object position with zone events: {}", e);
-        }
+            // Update the child's position in the GORC system and send zone
+            // entry/exit messages so nearby players get subscribed/unsubscribed.
+            if let Err(e) = events.update_object_position(child_gorc_id, new_global_position).await {
+                error!("🚀 GORC: ❌ Failed to update child object position with zone events: {}", e);
+            }
 
-        // A player riding this parent (seated in a vehicle) is also a VIEWER, and the
-        // viewer position is a separate store (player_positions) that only
-        // handle_player_movement refreshes — and a seated player, motionless in its
-        // seat, sends no movement at all. Left alone, the viewer stayed at the
-        // boarding point while the body drove away: 200 m later it "exited" the zone
-        // of the very vehicle it sat in, and of its own body, and the client obeyed by
-        // deleting both (a camera left behind a truck that stopped moving).
-        if is_player {
-            if let Ok(player_id) = PlayerId::from_str(&uuid) {
-                if let Err(e) = events.update_player_position(player_id, new_global_position).await {
-                    error!("🚀 GORC: ❌ Failed to update child player viewer position: {}", e);
+            // A player riding this parent (seated in a vehicle) is also a VIEWER, and the
+            // viewer position is a separate store (player_positions) that only
+            // handle_player_movement refreshes — and a seated player, motionless in its
+            // seat, sends no movement at all. Left alone, the viewer stayed at the
+            // boarding point while the body drove away: 200 m later it "exited" the zone
+            // of the very vehicle it sat in, and of its own body, and the client obeyed by
+            // deleting both (a camera left behind a truck that stopped moving).
+            if is_player {
+                if let Ok(player_id) = PlayerId::from_str(&uuid) {
+                    if let Err(e) = events.update_player_position(player_id, new_global_position).await {
+                        error!("🚀 GORC: ❌ Failed to update child player viewer position: {}", e);
+                    }
                 }
             }
+
+            queue.push_back((child_gorc_id, new_global_position, parent_basis.mul(&child_rotation), depth + 1));
         }
     }
 }
@@ -286,11 +308,9 @@ pub fn handle_object_update(
 								if let Some(parent_id_str) = &parent_id {
 									if let Ok(parent_gorc_id) = GorcObjectId::from_str(parent_id_str) {
 										if let Some(parent_global_position) = gorc_instances.get_object_position(parent_gorc_id).await {
-											final_position = horizon_event_system::Vec3 {
-												x: parent_global_position.x + position.x,
-												y: parent_global_position.y + position.y,
-												z: parent_global_position.z + position.z,
-											};
+											// Turned by the parent's frame, as Godot places it (crate::frame).
+											let parent_basis = crate::frame::global_basis_of(&gorc_instances, parent_id_str).await;
+											final_position = crate::frame::compose(parent_global_position, &parent_basis, position);
 										}
 									}
 								}

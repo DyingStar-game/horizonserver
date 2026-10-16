@@ -80,30 +80,70 @@ pub fn handle_initial_object(
     server: &Server,
     zones: &[Zone],
 ) -> Result<(), EventError> {
-    let websocket = server.websocket_sender.clone();
     info!("[initial_object] sending {} items, zones=[{}]", items.len(), zones_label(zones));
-
-    let mut sent = 0usize;
-    let mut skipped = 0usize;
+    let (mut sent, mut skipped) = (0usize, 0usize);
     for item in items.values() {
-        let world_object = is_world_object(&item.object_type);
-        if !world_object && !is_member(item, zones) {
-            debug!("[initial_object] item {} ({}) is outside the zones, not sent", item.object_uuid, item.object_type);
+        if send_initial(item, server, zones)? { sent += 1 } else { skipped += 1 }
+    }
+    end_initial(server, sent, skipped)
+}
+
+/// How fast `handle_initial_object_paced` sends: `batch` objects, then `pause`.
+#[derive(Debug, Clone, Copy)]
+pub struct Pace {
+    pub batch: usize,
+    pub pause: std::time::Duration,
+}
+
+/// `handle_initial_object` spread over time, for a server that keeps simulating players
+/// meanwhile: sent in one go, the 11235 objects of a merge froze the survivor 33 s with a
+/// player on it, who fell through the ground (preprod, 2026-10-17).
+pub async fn handle_initial_object_paced(
+    items: &HashMap<String, GenericPropsRequest>,
+    server: &Server,
+    zones: &[Zone],
+    pace: Pace,
+) -> Result<(), EventError> {
+    info!(
+        "[initial_object] sending {} items, zones=[{}], {} every {:?}",
+        items.len(), zones_label(zones), pace.batch, pace.pause
+    );
+    let (mut sent, mut skipped) = (0usize, 0usize);
+    for item in items.values() {
+        if send_initial(item, server, zones)? {
+            sent += 1;
+            if sent % pace.batch.max(1) == 0 {
+                tokio::time::sleep(pace.pause).await;
+            }
+        } else {
             skipped += 1;
-            continue;
-        }
-        send_ws(&websocket, "initial_object", &json!({
-            "namespace": "server",
-            "event": "initial_object",
-            "data": item_on_wire(item),
-        }))?;
-        sent += 1;
-        if !world_object {
-            track(item, server);
         }
     }
+    end_initial(server, sent, skipped)
+}
 
-    send_ws(&websocket, "initial_object", &json!({
+/// Sends one object of an initial load (world objects always, the rest when inside
+/// `zones`) and tracks it as managed. False when it is outside the zones.
+fn send_initial(item: &GenericPropsRequest, server: &Server, zones: &[Zone]) -> Result<bool, EventError> {
+    let world_object = is_world_object(&item.object_type);
+    if !world_object && !is_member(item, zones) {
+        debug!("[initial_object] item {} ({}) is outside the zones, not sent", item.object_uuid, item.object_type);
+        return Ok(false);
+    }
+    send_ws(&server.websocket_sender, "initial_object", &json!({
+        "namespace": "server",
+        "event": "initial_object",
+        "data": item_on_wire(item),
+    }))?;
+    if !world_object {
+        track(item, server);
+    }
+    Ok(true)
+}
+
+/// Closes an initial load (`initial_object_end`).
+fn end_initial(server: &Server, sent: usize, skipped: usize) -> Result<(), EventError> {
+    send_ws(&server.websocket_sender, "initial_object", &json!({
         "namespace": "server",
         "event": "initial_object_end",
         "data": {},

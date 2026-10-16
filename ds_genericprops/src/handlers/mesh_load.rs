@@ -44,7 +44,8 @@ pub fn note_placed(server_uuid: &str) {
 /// How full a server is, for the placement of new players.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Rank {
-    /// 0 = may take players, 1 = silent, loading or over its split rule.
+    /// 0 = may take players, 1 = loading or over its split rule, 2 = silent or frozen,
+    /// 3 = no running server owns the place.
     refused: u8,
     players: u32,
 }
@@ -72,9 +73,24 @@ impl LoadView {
     /// Rank of the server owning `world`; a place no running server owns comes last.
     pub fn rank(&self, world: Option<&ObjectWorld>) -> Rank {
         match world.and_then(|w| self.owner_of(w)) {
-            Some(server) => Rank { refused: u8::from(!self.accepts(server)), players: self.players(server) },
-            None => Rank { refused: 2, players: u32::MAX },
+            Some(server) => {
+                let refused = if self.accepts(server) { 0 } else if server.responsive { 1 } else { 2 };
+                Rank { refused, players: self.players(server) }
+            }
+            None => Rank { refused: 3, players: u32::MAX },
         }
+    }
+
+    /// The server owning `world` is silent or frozen. A player placed there waits for it
+    /// in the void: 276 players were sent to one frozen 2+ min (preprod, 2026-10-16).
+    pub fn owner_unresponsive(&self, world: Option<&ObjectWorld>) -> bool {
+        world.and_then(|w| self.owner_of(w)).map_or(false, |s| !s.responsive)
+    }
+
+    /// The server owning `world` may be asked for village habs now: neither frozen nor
+    /// loading the zones it was just handed. A place no running server owns may.
+    pub fn owner_takes_habs(&self, world: Option<&ObjectWorld>) -> bool {
+        world.and_then(|w| self.owner_of(w)).map_or(true, |s| s.responsive && !s.loading)
     }
 
     /// Some running server may take players.

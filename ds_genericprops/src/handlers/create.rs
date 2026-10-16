@@ -131,6 +131,10 @@ pub fn handle_object_create(
 				let gorc_id = gorc_instances.register_object_with_uuid(obj, global_position, maybe_obj_id).await;
 				debug!("🚀 GORC: object register {} completed with id {}", uuid, gorc_id.to_string());
 				props.insert(uuid, gorc_id.clone());
+				if req_data.object_type == "spawnbuilding" {
+					// Habs of a village: the players waiting for an apartment look again.
+					crate::handlers::new_player::habs_arrived();
+				}
 				// A player back within the LOD idle retention reuses its id: start its
 				// delivery streams over rather than inherit the last session's.
 				crate::lod::forget_object(gorc_id);

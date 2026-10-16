@@ -834,12 +834,15 @@ impl ServerManager {
                     (Some(rules), Some(x)) => rules.placement_full(x.tps, players),
                     _ => false,
                 };
+                let responsive = reporting
+                    && s.outbox_pending.load(std::sync::atomic::Ordering::Relaxed) < OUTBOX_BACKLOG;
                 ServerLoad {
                     uuid: s.uuid.clone(),
                     name: s.server_name.clone(),
                     players: players as u32,
-                    accepting: reporting && !loading && !overloaded
-                        && s.outbox_pending.load(std::sync::atomic::Ordering::Relaxed) < OUTBOX_BACKLOG,
+                    accepting: responsive && !loading && !overloaded,
+                    loading,
+                    responsive,
                     zones: s.zones(),
                 }
             })

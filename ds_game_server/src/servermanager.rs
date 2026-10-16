@@ -796,7 +796,7 @@ impl ServerManager {
                     "players_godot": samples.map(|x| x.players),
                     "players_horizon": s.players_count(),
                     "pending": s.pending.load(std::sync::atomic::Ordering::Relaxed),
-                    "outbox": s.outbox_pending.load(std::sync::atomic::Ordering::Relaxed),
+                    "outbox": s.outbox_pending(),
                     "split_hits": samples.map(|x| x.split_hits),
                     "settling": self.settling(&s.uuid),
                     "loading": samples.map_or(false, |x| x.loading),
@@ -835,7 +835,7 @@ impl ServerManager {
                     _ => false,
                 };
                 let responsive = reporting
-                    && s.outbox_pending.load(std::sync::atomic::Ordering::Relaxed) < OUTBOX_BACKLOG;
+                    && s.outbox_pending() < OUTBOX_BACKLOG;
                 ServerLoad {
                     uuid: s.uuid.clone(),
                     name: s.server_name.clone(),

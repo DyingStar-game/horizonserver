@@ -183,6 +183,44 @@ fn select_village<'a>(
     }
 }
 
+/// How much the cap of solo players per village rises once every village holds it.
+const CAP_STEP: usize = 10;
+
+/// The cap solo players are placed under: `base` (max_players_per_village) while some
+/// village is below it or still waits for its habs, then `base + CAP_STEP`, `+ 2 * CAP_STEP`…
+/// once every village housing players holds the current cap, as long as their buildings have
+/// room left. The villages fill to 60 together, then to 70: a full world kept spawning the
+/// arrivals at the origin with apartments still free (preprod NPC test, 2026-10-16). A village
+/// on a frozen server neither takes players nor holds the cap down.
+fn overflow_cap(villages: &[VillageState], base: usize, load: Option<&LoadView>) -> usize {
+    let usable: Vec<&VillageState> = villages
+        .iter()
+        .filter(|v| !load.is_some_and(|l| l.owner_unresponsive(v.world.as_ref())))
+        .collect();
+    let mut cap = base;
+    if base == 0 || usable.is_empty() || !usable.iter().any(|v| v.free > 0) {
+        return cap;
+    }
+    while usable.iter().all(|v| !v.buildings.is_empty() && v.occupancy >= cap) {
+        cap += CAP_STEP;
+    }
+    cap
+}
+
+/// Log the cap of `overflow_cap` when it changes.
+fn note_cap(cap: usize, base: usize) {
+    static LAST: std::sync::Mutex<usize> = std::sync::Mutex::new(0);
+    let mut last = LAST.lock().unwrap();
+    if *last != cap {
+        if cap > base {
+            info!("plugin genericprops (new_player): every village holds {} players: solo players now go up to {} per village", cap - CAP_STEP, cap);
+        } else if *last > base {
+            info!("plugin genericprops (new_player): back to {} players per village", cap);
+        }
+        *last = cap;
+    }
+}
+
 /// At most this many villages requested and not spawned yet per server: Godot freezes
 /// 16-20 s per village it spawns, and one frozen server was sent 40+ requests in a row
 /// (minikube, 2026-10-02) which kept it frozen for good.
@@ -797,7 +835,9 @@ async fn place_waiting(events: &Arc<EventSystem>, waiting: &mut VecDeque<Arrival
             info!("plugin genericprops (new_player): player {} left before getting an apartment", arrival.player_uuid);
             continue;
         }
-        let selected = select_village(&villages, &AssignRequest::default(), max, load.as_ref())
+        let cap = overflow_cap(&villages, max, load.as_ref());
+        note_cap(cap, max);
+        let selected = select_village(&villages, &AssignRequest::default(), cap, load.as_ref())
             .and_then(|chosen| villages.iter().position(|v| v.uuid == chosen.uuid));
         let Some(index) = selected else {
             // No room under the cap anywhere: none for the next ones either.
@@ -821,7 +861,7 @@ async fn place_waiting(events: &Arc<EventSystem>, waiting: &mut VecDeque<Arrival
             Some((position, uuid)) => {
                 info!(
                     "plugin genericprops (new_player): player {} gets an apartment in village {} ({}/{} players) on {}",
-                    arrival.player_uuid, village.name, village.occupancy + 1, max, owner_label(village, load.as_ref())
+                    arrival.player_uuid, village.name, village.occupancy + 1, cap, owner_label(village, load.as_ref())
                 );
                 if let Some(server) = load.as_ref().zip(village.world.as_ref()).and_then(|(l, w)| l.owner_of(w)) {
                     mesh_load::note_placed(&server.uuid);
@@ -851,8 +891,8 @@ async fn place_waiting(events: &Arc<EventSystem>, waiting: &mut VecDeque<Arrival
         for mut arrival in unplaced {
             if !habs_coming {
                 warn!(
-                    "plugin genericprops (new_player): every village is at its cap of {} players, player {} gets no apartment (raise village_free_reserve?)",
-                    max, arrival.player_uuid
+                    "plugin genericprops (new_player): no village has an apartment left under {} players, player {} gets no apartment (raise village_free_reserve?)",
+                    overflow_cap(&villages, max, load.as_ref()), arrival.player_uuid
                 );
                 warn!("plugin genericprops (new_player): no free spawnbuilding slot found for player {}, spawning at origin", arrival.player_uuid);
                 spawn_player(events, &arrival, Vec3::zero(), "", false).await;
@@ -1250,6 +1290,42 @@ mod tests {
         // Reporting again, done loading: requested.
         let back = sandbox_load_west(50, false, true, 0);
         assert_eq!(villages_to_request(&villages, &villages[0], 50, 100, Some(&back)).len(), 2);
+    }
+
+    #[test]
+    fn cap_rises_by_ten_once_every_village_holds_it() {
+        let villages = [village("mining_village_01", 50, 30, 0.0), village("mining_village_02", 50, 30, 10.0)];
+        assert_eq!(overflow_cap(&villages, 50, None), 60);
+        // Both fill to 60 before either goes to 70.
+        let villages = [village("mining_village_01", 60, 20, 0.0), village("mining_village_02", 55, 25, 10.0)];
+        assert_eq!(overflow_cap(&villages, 50, None), 60);
+        assert_eq!(select_village(&villages, &AssignRequest::default(), 60, None).unwrap().name, "mining_village_02");
+        let villages = [village("mining_village_01", 60, 20, 0.0), village("mining_village_02", 60, 20, 10.0)];
+        assert_eq!(overflow_cap(&villages, 50, None), 70);
+    }
+
+    #[test]
+    fn cap_stays_while_a_village_is_below_it_or_waits_for_habs() {
+        let villages = [village("mining_village_01", 50, 30, 0.0), village("mining_village_02", 20, 30, 10.0)];
+        assert_eq!(overflow_cap(&villages, 50, None), 50);
+        let mut requested = village("mining_village_02", 0, 0, 10.0);
+        requested.spawn_requested = true;
+        let villages = [village("mining_village_01", 50, 30, 0.0), requested];
+        assert_eq!(overflow_cap(&villages, 50, None), 50, "habs coming: they take the next players");
+        // No physical room anywhere: nothing to raise.
+        let villages = [village("mining_village_01", 50, 0, 0.0)];
+        assert_eq!(overflow_cap(&villages, 50, None), 50);
+    }
+
+    #[test]
+    fn a_frozen_village_does_not_hold_the_cap_down() {
+        let villages = [
+            on_sandbox(village("mining_village_01", 10, 40, 0.0)),    // west, frozen
+            on_sandbox(village("mining_village_09", 50, 30, 200.0)),  // east, at the cap
+        ];
+        let frozen = sandbox_load_west(10, false, false, 50);
+        assert_eq!(overflow_cap(&villages, 50, Some(&frozen)), 60);
+        assert_eq!(select_village(&villages, &AssignRequest::default(), 60, Some(&frozen)).unwrap().name, "mining_village_09");
     }
 
     #[test]

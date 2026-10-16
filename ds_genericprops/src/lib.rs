@@ -26,6 +26,7 @@ pub mod objectdefinition;
 pub mod lod;
 pub mod children;
 pub mod frame;
+pub mod memtrim;
 // Internal imports
 mod handlers;
 use handlers::*;
@@ -834,6 +835,8 @@ impl GenericPropsPlugin {
         // here at the rate each recipient's distance earns it. Started last so
         // the loop only comes up once every handler that feeds it is live.
         lod::start(Arc::clone(&events), Arc::clone(&self.definitions));
+        // Free memory back to the system: glibc keeps it otherwise (see memtrim).
+        memtrim::start();
 
         debug!("🎮 GenericPropsPlugin: handler registered");
         Ok(())

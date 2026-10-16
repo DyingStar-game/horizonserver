@@ -88,9 +88,14 @@ impl LoadView {
     }
 
     /// The server owning `world` may be asked for village habs now: neither frozen nor
-    /// loading the zones it was just handed. A place no running server owns may.
+    /// loading the zones it was just handed, and taking players while some server does.
+    /// The habs went to the most loaded server of the pool (275 players, tps 0-16) once the
+    /// accepting ones had no village left to spawn, and its fresh villages drew every arrival
+    /// (preprod, 2026-10-16). A place no running server owns may.
     pub fn owner_takes_habs(&self, world: Option<&ObjectWorld>) -> bool {
-        world.and_then(|w| self.owner_of(w)).map_or(true, |s| s.responsive && !s.loading)
+        world.and_then(|w| self.owner_of(w)).map_or(true, |s| {
+            s.responsive && !s.loading && (self.accepts(s) || !self.any_accepting())
+        })
     }
 
     /// Some running server may take players.

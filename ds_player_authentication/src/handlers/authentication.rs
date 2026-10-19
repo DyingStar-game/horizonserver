@@ -4,7 +4,7 @@ use base64;
 use uuid::Uuid;
 use ds_common::events::DSErrorMessage;
 use horizon_event_system::{
-    ClientConnectionRef, EventSystem, PlayerId, Vec3
+    current_timestamp, ClientConnectionRef, DisconnectReason, EventSystem, PlayerDisconnectedEvent, PlayerId, Vec3
 };
 use tracing::{debug, error, info, warn};
 use serde::{Deserialize, Serialize};
@@ -49,6 +49,55 @@ fn decode_jwt_payload(token: &str) -> Option<JwtClaims> {
     .ok()?;
 
     serde_json::from_slice(&decoded).ok()
+}
+
+/// Ends the previous session of `player_db_id`, if one is still open, before this
+/// connection takes the id over.
+///
+/// A client whose socket died without a close frame (network drop behind Traefik)
+/// leaves its Horizon connection open: Traefik keeps the upstream leg alive for its
+/// idleTimeout (3600 s) and nothing pings it. The player then stays registered — GORC
+/// object, genericprops `props`, Godot body — and on reconnection genericprops sees
+/// the uuid already in `props`, skips the create, never emits
+/// `plugingameserver:new_player`, and the client gives up with error 7002 after 60 s
+/// (preprod, 2026-10-14, player 488cf437).
+///
+/// The old session is closed the way a normal disconnect would close it
+/// (`player_disconnected`, which every plugin cleans up on), then kicked: the kick
+/// drops the connection from the manager, so when its socket finally dies it finds
+/// no player id and does not emit a second `player_disconnected` — which would now
+/// tear down the new session.
+async fn evict_stale_session(events: &Arc<EventSystem>, player_id: PlayerId, player_db_id: &str) {
+    let Ok(db_id) = PlayerId::from_str(player_db_id) else {
+        return;
+    };
+    // A second player_init on a connection already remapped: it is not stale, it is us.
+    if db_id == player_id {
+        return;
+    }
+    let Some(sender) = events.get_client_response_sender() else {
+        return;
+    };
+    if !sender.is_connection_active(db_id).await {
+        return;
+    }
+
+    warn!(
+        "auth (player_init): player {} already has an open connection, closing that stale session before connection {} takes over",
+        db_id, player_id
+    );
+    if let Err(e) = events.emit_core("player_disconnected", &PlayerDisconnectedEvent {
+        player_id: db_id,
+        connection_id: String::new(),
+        reason: DisconnectReason::Error("superseded by a new connection".to_string()),
+        timestamp: current_timestamp(),
+    }).await
+    {
+        error!("auth (player_init): failed to emit player_disconnected for stale session of {}: {}", db_id, e);
+    }
+    if let Err(e) = sender.kick(db_id, Some("Superseded by a new connection".to_string())).await {
+        warn!("auth (player_init): could not kick stale session of {}: {}", db_id, e);
+    }
 }
 
 pub async fn handle_player_init(
@@ -135,6 +184,8 @@ pub async fn handle_player_init(
     {
         error!("Failed to send init_ack to client: {}", e);
     }
+
+    evict_stale_session(&events, player_id, &player_db_id).await;
 
     // Update the player_id stored in the connection manager
     // This replaces the temporary connection-level player_id with the database player_id

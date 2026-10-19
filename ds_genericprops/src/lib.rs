@@ -26,6 +26,7 @@ pub mod objectdefinition;
 pub mod lod;
 pub mod children;
 pub mod frame;
+pub mod memtrim;
 // Internal imports
 mod handlers;
 use handlers::*;
@@ -765,17 +766,12 @@ impl GenericPropsPlugin {
         }).await
         .map_err(|e| PluginError::ExecutionError(e.to_string()))?;
 
-        let events_new_player = Arc::clone(&events);
-        let handle_new_player = luminal_handle.clone();
+        // Queued for the placement thread (new_player::start_placement): a player waiting for its
+        // apartment is no luminal task re-polled forever.
+        new_player::start_placement(Arc::clone(&events));
         events.on_plugin("genericprops", "new_player", move |event: serde_json::Value| {
             debug!("plugin genericprops (new_player): Receive new player message {:?}", event);
-            let events = Arc::clone(&events_new_player);
-            handle_new_player.spawn(async move {
-                if let Err(e) = new_player::handle_new_player(event, events).await {
-                    error!("plugin genericprops (new_player): handler error: {}", e);
-                }
-                Ok::<(), PluginError>(())
-            });
+            new_player::enqueue_new_player(&event);
             Ok(())
         }).await
         .map_err(|e| PluginError::ExecutionError(e.to_string()))?;
@@ -839,6 +835,8 @@ impl GenericPropsPlugin {
         // here at the rate each recipient's distance earns it. Started last so
         // the loop only comes up once every handler that feeds it is live.
         lod::start(Arc::clone(&events), Arc::clone(&self.definitions));
+        // Free memory back to the system: glibc keeps it otherwise (see memtrim).
+        memtrim::start();
 
         debug!("🎮 GenericPropsPlugin: handler registered");
         Ok(())

@@ -17,7 +17,20 @@ pub struct ServerLoad {
     /// Reporting, not loading zones it was just handed, and under its split rule:
     /// it may take new players.
     pub accepting: bool,
+    /// Loading the zones it was just handed: alive, but asking it to spawn village habs
+    /// now froze it for 2 min (preprod NPC test, 2026-10-16).
+    #[serde(default)]
+    pub loading: bool,
+    /// Reporting and reading its socket. A silent / frozen server gets neither players
+    /// nor habs requests: its players and its habs arrive only once it comes back.
+    #[serde(default = "responsive_by_default")]
+    pub responsive: bool,
     pub zones: Vec<Zone>,
+}
+
+/// A load published before the field existed: as responsive as it was accepting.
+fn responsive_by_default() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]

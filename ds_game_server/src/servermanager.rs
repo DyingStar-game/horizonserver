@@ -13,7 +13,7 @@
 //! `context.tokio_handle()` nor `block_on` (see the notes in lib.rs).
 
 use crate::handlers::initial_objects::{
-    handle_activate_objects, handle_dormant_objects, handle_drop_dormant, handle_freeze_object, handle_initial_object, handle_world_objects,
+    handle_activate_objects, handle_dormant_objects, handle_drop_dormant, handle_freeze_object, handle_initial_object, handle_initial_object_paced, handle_world_objects, Pace,
 };
 use crate::mesh::{plan_split_n, MeshRules, Rule};
 use crate::server::{Server, ServerState};
@@ -205,6 +205,13 @@ const LOADING_SILENCE_TIMEOUT: Duration = Duration::from_secs(420);
 const SETTLE_AFTER_OP: Duration = Duration::from_secs(15);
 /// A serverinfo older than this (sent once a second) cannot back a merge.
 const MERGE_SAMPLE_MAX_AGE: Duration = Duration::from_secs(3);
+/// A server merged into must run at least this fast: ex absorbed three merges in a row at
+/// tps 20-34 with a player on it, who moved in jerks and fell through the ground
+/// (preprod, 2026-10-17).
+const MERGE_MIN_TPS: u8 = 50;
+/// How fast a merge sends the released zones' objects to the survivor, which keeps
+/// simulating its players meanwhile (see handle_initial_object_paced).
+const MERGE_PACE: Pace = Pace { batch: 250, pause: Duration::from_millis(250) };
 /// Time allowed for the websocket handshake of a reconnection attempt.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// How often the manager wakes up to check for silent servers when idle.
@@ -796,7 +803,7 @@ impl ServerManager {
                     "players_godot": samples.map(|x| x.players),
                     "players_horizon": s.players_count(),
                     "pending": s.pending.load(std::sync::atomic::Ordering::Relaxed),
-                    "outbox": s.outbox_pending.load(std::sync::atomic::Ordering::Relaxed),
+                    "outbox": s.outbox_pending(),
                     "split_hits": samples.map(|x| x.split_hits),
                     "settling": self.settling(&s.uuid),
                     "loading": samples.map_or(false, |x| x.loading),
@@ -834,12 +841,15 @@ impl ServerManager {
                     (Some(rules), Some(x)) => rules.placement_full(x.tps, players),
                     _ => false,
                 };
+                let responsive = reporting
+                    && s.outbox_pending() < OUTBOX_BACKLOG;
                 ServerLoad {
                     uuid: s.uuid.clone(),
                     name: s.server_name.clone(),
                     players: players as u32,
-                    accepting: reporting && !loading && !overloaded
-                        && s.outbox_pending.load(std::sync::atomic::Ordering::Relaxed) < OUTBOX_BACKLOG,
+                    accepting: responsive && !loading && !overloaded,
+                    loading,
+                    responsive,
                     zones: s.zones(),
                 }
             })
@@ -1092,6 +1102,10 @@ impl ServerManager {
 
     fn evaluate_merge(&mut self, rules: &MeshRules) {
         let busy = self.busy_servers();
+        // One merge at a time: when the NPCs left, four ran at once and one survivor took
+        // three in a row (preprod, 2026-10-17). The pool shrinks slower, its servers stay up.
+        let merging = self.in_flight.iter().any(|op| op.label.starts_with("merge "))
+            || self.queue.iter().any(|op| matches!(op, MeshOp::Merge { .. }));
         let mut to_merge: Option<SplitRecord> = None;
         for idx in 0..self.split_history.len() {
             let record = self.split_history[idx].clone();
@@ -1127,10 +1141,11 @@ impl ServerManager {
             // reads ~0 right after a split and merged 200+ players back onto one
             // server (preprod, 2026-10-01). Horizon's own count is what was handed over.
             let players = |s: &ServerSamples, server: &Server| s.players.max(server.players_count().min(u16::MAX as usize) as u16);
-            let hit = rules.merge.merge_hit((sp.tps, players(sp, &p)), (sc.tps, players(sc, &c)));
+            let hit = rules.merge.merge_hit((sp.tps, players(sp, &p)), (sc.tps, players(sc, &c)))
+                && sp.tps >= MERGE_MIN_TPS;
             let record = &mut self.split_history[idx];
             record.merge_hits = if hit { record.merge_hits + 1 } else { 0 };
-            if record.merge_hits >= rules.merge_after && to_merge.is_none() {
+            if record.merge_hits >= rules.merge_after && to_merge.is_none() && !merging {
                 record.merge_hits = 0;
                 to_merge = Some(record.clone());
             }
@@ -1388,7 +1403,7 @@ impl MeshWorker {
         // players came from, not the one taken before the warm-up (see hand_over).
         let parent_players = parent.managed_players.lock().unwrap().clone();
         let woken = used.iter().all(|(child, _)| child.dormant_spawn());
-        let fresh = self.hand_over_many(&used, &items, self.warmup(), &parent_players).await;
+        let fresh = self.hand_over_many(&used, &items, self.warmup(), &parent_players, None).await;
         let mut current = overlay(items, fresh);
         // The children woke the players and their vehicles already (asleep path): the
         // parent lets go of them NOW, before its zones change — Godot applies a zone
@@ -1490,7 +1505,7 @@ impl MeshWorker {
         // survivor's players were spawned from) still places in its zones: a player
         // who arrived there during the warm-up must leave with the others.
         let released_players = released.managed_players.lock().unwrap().clone();
-        let fresh = self.hand_over(survivor, &to_spawn, &survivor_zones, self.warmup(), &released_players).await;
+        let fresh = self.hand_over(survivor, &to_spawn, &survivor_zones, self.warmup(), &released_players, Some(MERGE_PACE)).await;
         let to_freeze: SnapshotItems = overlay(to_move, fresh)
             .into_iter()
             .filter(|(_, i)| !is_world_object(&i.object_type))
@@ -1519,7 +1534,7 @@ impl MeshWorker {
             Ok(items) => {
                 result.planets = planets_in(&items);
                 // Nobody simulates these players any more: no point waiting.
-                self.hand_over(server, &items, &zones, Duration::ZERO, &[]).await;
+                self.hand_over(server, &items, &zones, Duration::ZERO, &[], None).await;
             }
             Err(e) => error!("[mesh] {} started on [{}] but the snapshot failed: {}", server.server_name, zones_label(&zones), e),
         }
@@ -1559,7 +1574,7 @@ impl MeshWorker {
             return result;
         }
         info!("[mesh] {} gained [{}]: sending {} objects it did not have", server.server_name, zones_label(gained), to_spawn.len());
-        self.hand_over(server, &to_spawn, &zones, Duration::ZERO, &[]).await;
+        self.hand_over(server, &to_spawn, &zones, Duration::ZERO, &[], None).await;
         result
     }
 
@@ -1577,9 +1592,9 @@ impl MeshWorker {
     /// snapshot and inside it in the fresh one; freezing from the first one erases
     /// them on the parent while the child, working from the fresh one, does not
     /// spawn them — nobody simulates them any more (preprod, 2026-09-20).
-    async fn hand_over(&self, server: &Server, items: &SnapshotItems, zones: &[Zone], warmup: Duration, also_players: &[String]) -> Option<SnapshotItems> {
+    async fn hand_over(&self, server: &Server, items: &SnapshotItems, zones: &[Zone], warmup: Duration, also_players: &[String], pace: Option<Pace>) -> Option<SnapshotItems> {
         let zones = zones.to_vec();
-        self.hand_over_many(&[(server, &zones)], items, warmup, also_players).await
+        self.hand_over_many(&[(server, &zones)], items, warmup, also_players, pace).await
     }
 
     /// `hand_over` to several servers at once, each for its own zones: the props
@@ -1590,7 +1605,9 @@ impl MeshWorker {
     /// The fresh snapshot holds the players and what they ride only: the players
     /// of `items`, `also_players` (those the releasing server simulates now, who
     /// may have arrived during the warm-up) and the objects seated players ride.
-    async fn hand_over_many(&self, targets: &[(&Server, &Vec<Zone>)], items: &SnapshotItems, warmup: Duration, also_players: &[String]) -> Option<SnapshotItems> {
+    ///
+    /// `pace` spreads the props over time (a merge: the survivor simulates players all along).
+    async fn hand_over_many(&self, targets: &[(&Server, &Vec<Zone>)], items: &SnapshotItems, warmup: Duration, also_players: &[String], pace: Option<Pace>) -> Option<SnapshotItems> {
         let (players, mut props): (SnapshotItems, SnapshotItems) =
             items.iter().map(|(k, v)| (k.clone(), v.clone())).partition(|(_, i)| i.object_type == "player");
         // A vehicle someone sits in moves with them: sent with the props, it would
@@ -1608,7 +1625,11 @@ impl MeshWorker {
         // Per target: the players sent to it asleep, when it can take them that way.
         let mut ready: Vec<(&Server, &Vec<Zone>, Option<HashSet<String>>)> = Vec::new();
         for (server, zones) in targets {
-            if let Err(e) = handle_initial_object(&props, server, zones) {
+            let sent = match pace {
+                Some(pace) => handle_initial_object_paced(&props, server, zones, pace).await,
+                None => handle_initial_object(&props, server, zones),
+            };
+            if let Err(e) = sent {
                 error!("[mesh] initial props to {} failed: {}", server.server_name, e);
                 continue;
             }

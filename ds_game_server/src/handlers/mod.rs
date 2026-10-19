@@ -25,10 +25,12 @@ pub struct Outbox {
 }
 
 impl Outbox {
-    /// Starts the writer thread of a new connection. `pending` counts the messages
-    /// queued and not written yet.
-    pub fn spawn(mut writer: Writer<TcpStream>, name: &str, pending: Arc<AtomicUsize>) -> Outbox {
-        pending.store(0, Ordering::Relaxed);
+    /// Starts the writer thread of a new connection, with its own count of the messages
+    /// queued and not written yet. Shared with the previous connection, the count was reset
+    /// here while the old writer still drained its queue and decremented it: it wrapped
+    /// around, and the server looked frozen (`outbox` >= OUTBOX_BACKLOG) for good.
+    pub fn spawn(mut writer: Writer<TcpStream>, name: &str) -> Outbox {
+        let pending = Arc::new(AtomicUsize::new(0));
         let (tx, rx) = std::sync::mpsc::channel::<OwnedMessage>();
         let counter = Arc::clone(&pending);
         let thread_name = format!("ws-out-{}", name);
@@ -47,6 +49,11 @@ impl Outbox {
             error!("could not start the websocket writer thread of {}: {}", name, e);
         }
         Outbox { tx, pending }
+    }
+
+    /// Messages queued and not written yet.
+    pub fn pending(&self) -> usize {
+        self.pending.load(Ordering::Relaxed)
     }
 }
 

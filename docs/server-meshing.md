@@ -169,8 +169,18 @@ lead to one of them: `placement_capacity` must stay above the `players:N` thresh
 of the split rule (equal to it, a full server never goes over the rule and is never
 split), and `placement_min_tps` at or under its `tps:N` threshold (above it, a server
 in between takes no player and is never split for it). Both are warned at startup.
-With no idle server left in the pool, the queue of a refusing server waits for
-players to leave it.
+When no room can come — no server takes players or is loading the zones it was just
+handed, no split or merge is running or queued, and no idle server is left (the
+`idle_servers` / `ops_running` of `servers_load`) — or when every village is spawned
+and its buildings are full, a waiting player is disconnected after 15 s of it with the
+error `All servers are full` (code 1339). Short of that it keeps waiting: a returning
+player whose server is full while others take players waits for that server.
+
+A village takes `max_players_per_village` (50) players; a village under it on any
+server taking players goes before every village above it. Only when none is left does
+the least loaded server let its villages go over, by steps of 10, as long as their
+buildings have room: the server itself bounds them, refusing players at its placement
+capacity until a split gives the village more servers.
 
 ## Configuration (`plugins.toml`, `[ds_game_server]`)
 

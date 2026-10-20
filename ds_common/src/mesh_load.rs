@@ -43,6 +43,13 @@ pub struct PoolLoad {
     /// Players a server may hold before it is split (`players:N` split rule);
     /// `None` under a `tps:` rule.
     pub capacity: Option<u32>,
+    /// Idle servers left in the pool, a split may take one; `None` from an older
+    /// publisher (then the pool is never taken as full).
+    #[serde(default)]
+    pub idle_servers: Option<u32>,
+    /// Splits and merges running or queued: room is on its way.
+    #[serde(default)]
+    pub ops_running: u32,
 }
 
 impl PoolLoad {

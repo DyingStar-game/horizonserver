@@ -157,13 +157,13 @@ impl SimplePlugin for GenericPropsPlugin {
             free_reserve: config.get_value("village_free_reserve")
                 .and_then(|v| v.as_integer())
                 .map_or(defaults.free_reserve, |v| v.max(0) as usize),
-            queue_max: config.get_value("queue_max_secs")
-                .and_then(|v| v.as_integer())
-                .map_or(defaults.queue_max, |v| std::time::Duration::from_secs(v.max(0) as u64)),
             admit_per_server: config.get_value("queue_admit_per_server")
                 .and_then(|v| v.as_integer())
                 .map_or(defaults.admit_per_server, |v| v.max(0) as usize),
         });
+        if config.get_value("queue_max_secs").is_some() {
+            warn!("plugin genericprops: queue_max_secs is ignored: a queued player waits for its server however long it takes");
+        }
         let player_save_interval = std::time::Duration::from_secs(
             config.get_value("player_save_interval_secs")
                 .and_then(|v| v.as_integer())

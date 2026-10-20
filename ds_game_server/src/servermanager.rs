@@ -100,8 +100,8 @@ impl SplitRecord {
 
 /// A zone transition, run off the manager loop by the `MeshWorker`.
 enum MeshOp {
-    /// `parent` is overloaded: part of its zones go to idle `children` (one, or two
-    /// when it holds several zones: the plan decides how many it actually uses).
+    /// `parent` is overloaded: part of its zones go to idle `children` (as many as
+    /// `MeshRules::split_children_wanted`: the plan decides how many it actually uses).
     Split { parent: Server, children: Vec<Server> },
     /// The pair of a split is under the merge rule: the child gives its zones back.
     Merge { record: SplitRecord, survivor: Server, released: Server },
@@ -377,8 +377,11 @@ impl ServerManager {
     /// The idle servers a split of `parent` may use: two when it holds several
     /// zones (one of them may carry the crowd and be cut between two children,
     /// see `plan_split_n`), else one.
-    fn split_children(&self, parent: &Server) -> Vec<Server> {
-        let wanted = if parent.zones().len() >= 2 { 2 } else { 1 };
+    /// The idle servers a split of `parent`, holding `players`, hands zones to: as many as
+    /// `MeshRules::split_children_wanted` asks for, or what the pool still has.
+    fn split_children(&self, parent: &Server, players: u32) -> Vec<Server> {
+        let zones = parent.zones().len();
+        let wanted = self.rules.as_ref().map_or(1, |r| r.split_children_wanted(zones, players));
         self.idle_servers(&parent.uuid, wanted)
     }
 
@@ -786,7 +789,7 @@ impl ServerManager {
         }
         if samples.split_hits >= rules.split_after {
             samples.split_hits = 0;
-            let children = self.split_children(&server);
+            let children = self.split_children(&server, players as u32);
             match children.is_empty() {
                 false => self.queue.push_back(MeshOp::Split { parent: server, children }),
                 true => warn!("[mesh] {} is overloaded (rule {}) but no idle server is available in the pool", server.server_name, rules.split),
@@ -933,7 +936,8 @@ impl ServerManager {
                         .map_or(false, |seen| now.duration_since(seen) > OVERLOAD_SILENCE)
                 });
             if let Some(server) = overloaded {
-                let children = self.split_children(&server);
+                let players = server.players_count().min(u32::MAX as usize) as u32;
+                let children = self.split_children(&server, players);
                 match children.is_empty() {
                     false => {
                         warn!(

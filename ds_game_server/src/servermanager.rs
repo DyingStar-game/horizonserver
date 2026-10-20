@@ -873,7 +873,9 @@ impl ServerManager {
             })
             .collect();
         let capacity = self.rules.as_ref().and_then(|r| r.placement_capacity);
-        let load = PoolLoad { servers, capacity };
+        let idle_servers = Some(self.idle_servers("", usize::MAX).len() as u32);
+        let ops_running = (self.in_flight.len() + self.queue.len()) as u32;
+        let load = PoolLoad { servers, capacity, idle_servers, ops_running };
         let events = context.events();
         crate::plugin_rt().spawn(async move {
             if let Err(e) = events.emit_plugin("genericprops", "servers_load", &load).await {

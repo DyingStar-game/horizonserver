@@ -90,7 +90,9 @@ village_free_reserve = 100
 # taking no new player (over placement_capacity, under placement_min_tps, in a split
 # or merge) waits in a queue, told so by a "queued" message, until that server takes
 # players again, however long it takes: a server that refuses is never given a
-# player. A returning player always spawns in its own apartment.
+# player. A returning player always spawns in its own apartment. When no room can
+# come (no server takes players, no split running, no idle server left) or every
+# village is full, a waiting player is disconnected after 15 s: "All servers are full".
 # Players a server is given at most every 2 s, from the queue or not (default 10,
 # 0 = no limit): letting 49 queued players in at once took a server from 61 to 14 tps.
 queue_admit_per_server = 4

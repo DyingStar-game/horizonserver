@@ -46,7 +46,7 @@ pub fn note_placed(server_uuid: &str) {
 pub struct Rank {
     /// 0 = may take players, 1 = loading or over its split rule, 2 = silent or frozen,
     /// 3 = no running server owns the place.
-    refused: u8,
+    pub(crate) refused: u8,
     players: u32,
 }
 
@@ -71,6 +71,15 @@ impl LoadView {
     /// Players of the server, counting the ones placed since the last update.
     pub fn players(&self, server: &ServerLoad) -> u32 {
         server.players + self.placed.get(&server.uuid).copied().unwrap_or(0)
+    }
+
+    /// No server can give anyone a place, now or soon: none takes players or is loading
+    /// zones it was just handed, no split or merge is running or queued, and no idle server
+    /// is left for one. Never when the publisher does not tell its idle servers.
+    pub fn all_full(&self) -> bool {
+        self.load.idle_servers == Some(0)
+            && self.load.ops_running == 0
+            && !self.load.servers.iter().any(|s| s.loading || self.accepts(s))
     }
 
     pub fn accepts(&self, server: &ServerLoad) -> bool {

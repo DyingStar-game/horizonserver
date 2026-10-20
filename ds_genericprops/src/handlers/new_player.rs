@@ -10,6 +10,7 @@ use tracing::{debug, error, warn, info};
 use crate::genericprops::{distance_squared, GenericProps};
 use crate::handlers::mesh_load::{self, LoadView};
 use crate::handlers::world::{read_own_local_and_parent, resolve_world};
+use ds_common::mesh_load::ServerLoad;
 use ds_common::world::ObjectWorld;
 
 /// How new players are spread over the mining villages (`[ds_genericprops]` in plugins.toml).
@@ -22,11 +23,18 @@ pub struct VillageConfig {
     /// Godot needs from ~15 s to minutes (during a mesh hand-over) to create a village's
     /// habs; every player arriving meanwhile with no room gets no apartment.
     pub free_reserve: usize,
+    /// How long a player waits in the queue for the server owning its village to take
+    /// players again (end of a split, tps back up) before it is spawned there anyway.
+    /// Zero: no queue, the server gets it at once.
+    pub queue_max: Duration,
+    /// Players a server is given at most per ADMIT_WINDOW: 49 queued players let in at
+    /// once took a server from 61 to 14 tps (minikube, 2026-10-20). Zero: no limit.
+    pub admit_per_server: usize,
 }
 
 impl Default for VillageConfig {
     fn default() -> Self {
-        Self { max_players_per_village: 50, free_reserve: 100 }
+        Self { max_players_per_village: 50, free_reserve: 100, queue_max: Duration::from_secs(120), admit_per_server: 10 }
     }
 }
 
@@ -297,6 +305,15 @@ const RESERVE_WARN_EVERY: Duration = Duration::from_secs(10);
 /// player_init on a server not ready yet: the client shows it and closes the connection).
 const NOT_READY_CODE: i64 = 1338;
 const NOT_READY_MESSAGE: &str = "Server not ready";
+/// The window of `admit_per_server`: as long as the retry of the waiting players, so the
+/// next pass finds the window empty again.
+const ADMIT_WINDOW: Duration = HABS_RETRY;
+/// A waiting player whose place did not move is told it is still queued this often: each
+/// `queued` message gives the client's SPAWN_TIMEOUT_MS (45 s, client.gd) a fresh start.
+const QUEUED_NOTIFY: Duration = Duration::from_secs(10);
+/// A waiting player is told its new place as soon as it moves, but not more often than
+/// this: only every 10 s, a player went from 40 to 30 and then straight to spawning.
+const QUEUED_MIN_GAP: Duration = Duration::from_secs(1);
 
 fn player_id(player_uuid: &str) -> Option<PlayerId> {
     PlayerId::from_str(player_uuid).ok()
@@ -322,6 +339,17 @@ async fn send_not_ready(events: &EventSystem, player_uuid: &str) -> bool {
         warn!("plugin genericprops (new_player): failed to send server-not-ready to player {}: {}", player_uuid, e);
     }
     true
+}
+
+/// Tell the waiting player it is queued, `position` (from 1) among the waiting players.
+async fn send_queued(events: &EventSystem, player_uuid: &str, wait: Wait, position: usize) {
+    let (Some(sender), Some(player_id)) = (events.get_client_response_sender(), player_id(player_uuid)) else {
+        return;
+    };
+    let payload = serde_json::json!({ "type": "queued", "reason": wait.reason(), "position": position });
+    if let Err(e) = sender.send_to_client(player_id, payload.to_string().into_bytes()).await {
+        debug!("plugin genericprops (new_player): failed to send queued to player {}: {}", player_uuid, e);
+    }
 }
 
 async fn kick(events: &EventSystem, player_uuid: &str) {
@@ -686,7 +714,35 @@ async fn try_assign_in_building(
 
 // ---- placement thread
 
-/// A new player waiting for an apartment, on the placement thread.
+/// Why a player is still in the placement queue, for the client and the logs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Wait {
+    /// No village has room: the requested habs have not arrived yet.
+    Habs,
+    /// Its village's server takes no new player now (full, under placement_min_tps, in a
+    /// split or merge, loading, frozen).
+    ServerFull,
+}
+
+impl Wait {
+    fn reason(self) -> &'static str {
+        match self {
+            Wait::Habs => "habs",
+            Wait::ServerFull => "server_full",
+        }
+    }
+}
+
+/// The apartment a returning player already has, waiting for its server to take it.
+#[derive(Debug, Clone)]
+struct Home {
+    /// Local to the building.
+    position: Vec3,
+    building_uuid: String,
+    world: ObjectWorld,
+}
+
+/// A player waiting for an apartment, or for the server owning it, on the placement thread.
 struct Arrival {
     player_uuid: String,
     player_name: String,
@@ -696,15 +752,145 @@ struct Arrival {
     home_checked: bool,
     /// `waits for the requested village habs` logged already.
     waiting_logged: bool,
+    /// A returning player: its `object_data` from persistence (everything it carries
+    /// survives), spawned in its apartment instead of where it was last seen.
+    stored: Option<serde_json::Value>,
+    home: Option<Home>,
+    wait: Option<Wait>,
+    notified_at: Option<Instant>,
+    /// The place it was last told, from 1.
+    notified_place: Option<usize>,
+}
+
+impl Arrival {
+    fn new(event: &serde_json::Value, stored: Option<serde_json::Value>) -> Arrival {
+        Arrival {
+            player_uuid: event["object_uuid"].as_str().unwrap_or_default().to_string(),
+            player_name: event["object_data"]["name"].as_str().unwrap_or_default().to_string(),
+            is_npc: event["object_data"]["is_npc"].as_bool().unwrap_or(false),
+            since: Instant::now(),
+            home_checked: false,
+            waiting_logged: false,
+            stored,
+            home: None,
+            wait: None,
+            notified_at: None,
+            notified_place: None,
+        }
+    }
+
+    /// Queued for `wait`: logged once per reason.
+    fn queue(&mut self, wait: Wait, why: impl FnOnce() -> String) {
+        if self.wait != Some(wait) && wait == Wait::ServerFull {
+            info!("plugin genericprops (new_player): player {} queued: {}", self.player_uuid, why());
+        }
+        self.wait = Some(wait);
+    }
+
+    /// Leaves the queue to be spawned.
+    fn log_admitted(&self) {
+        if self.wait == Some(Wait::ServerFull) {
+            info!("plugin genericprops (new_player): player {} leaves the queue after {:?}", self.player_uuid, self.since.elapsed());
+        }
+    }
 }
 
 enum Placement {
     Arrival(Arrival),
     /// Spawnbuildings were registered: the waiting players may get an apartment now.
     HabsArrived,
+    /// A new pool load: a server may take players again.
+    LoadUpdated,
 }
 
 static PLACEMENT: OnceLock<Sender<Placement>> = OnceLock::new();
+
+/// Players the placement thread let through to `create_object`: their next one is created,
+/// any other is queued (see `enqueue_returning`).
+fn admitted() -> &'static std::sync::Mutex<HashSet<String>> {
+    static ADMITTED: OnceLock<std::sync::Mutex<HashSet<String>>> = OnceLock::new();
+    ADMITTED.get_or_init(|| std::sync::Mutex::new(HashSet::new()))
+}
+
+/// True once per admission: the `create_object` of this player may create it.
+pub fn take_admitted(player_uuid: &str) -> bool {
+    admitted().lock().unwrap().remove(player_uuid)
+}
+
+/// Whether a player may be spawned in `world` now: its server takes players, or the player
+/// waited `queue_max` already (the server gets it anyway, as before the queue). No load
+/// known, or no server owning the place: nothing to protect.
+fn admits(load: Option<&LoadView>, world: Option<&ObjectWorld>, waited: Duration, queue_max: Duration) -> bool {
+    refusing_owner(load, world).is_none() || waited >= queue_max
+}
+
+/// The server owning `world` when it takes no new player now.
+fn refusing_owner<'a>(load: Option<&'a LoadView>, world: Option<&ObjectWorld>) -> Option<&'a ServerLoad> {
+    let load = load?;
+    let server = world.and_then(|w| load.owner_of(w))?;
+    (!load.accepts(server)).then_some(server)
+}
+
+/// The players given to each server over the last ADMIT_WINDOW, against `admit_per_server`.
+#[derive(Debug, Default)]
+struct Throttle {
+    limit: usize,
+    by_server: HashMap<String, VecDeque<Instant>>,
+}
+
+impl Throttle {
+    fn prune(&mut self, now: Instant) {
+        for admitted in self.by_server.values_mut() {
+            while admitted.front().is_some_and(|at| now.duration_since(*at) >= ADMIT_WINDOW) {
+                admitted.pop_front();
+            }
+        }
+        self.by_server.retain(|_, admitted| !admitted.is_empty());
+    }
+
+    fn allows(&self, server_uuid: &str) -> bool {
+        self.limit == 0 || self.by_server.get(server_uuid).map_or(0, VecDeque::len) < self.limit
+    }
+
+    fn record(&mut self, server_uuid: &str, now: Instant) {
+        if self.limit > 0 {
+            self.by_server.entry(server_uuid.to_string()).or_default().push_back(now);
+        }
+    }
+
+    /// The pool load, the servers that had their share of arrivals refusing in it: the
+    /// placement prefers the others, the queue holds the rest.
+    fn view(&self) -> Option<LoadView> {
+        mesh_load::view().map(|mut load| {
+            for server in self.by_server.keys().filter(|s| !self.allows(s)) {
+                load.refuse(server);
+            }
+            load
+        })
+    }
+}
+
+/// Whether a waiting player at `place` is told so now: never told yet, its place moved
+/// (at most every QUEUED_MIN_GAP), or still there for QUEUED_NOTIFY.
+fn queued_notice_due(notified_at: Option<Instant>, notified_place: Option<usize>, place: usize, now: Instant) -> bool {
+    let Some(at) = notified_at else { return true };
+    let since = now.duration_since(at);
+    since >= QUEUED_NOTIFY || (notified_place != Some(place) && since >= QUEUED_MIN_GAP)
+}
+
+/// Why a server takes no player now, for the queue log.
+fn refusal(server: String, throttled: bool) -> String {
+    if throttled {
+        format!("{} had its share of arrivals for now (queue_admit_per_server)", server)
+    } else {
+        format!("{} takes no player now", server)
+    }
+}
+
+/// `name (players, tps)` of a server, for the logs.
+fn server_label(load: &LoadView, server: &ServerLoad) -> String {
+    format!("{} ({} players, {} tps)", server.name, load.players(server), server.tps)
+}
 
 /// Start the placement thread. Call once, at plugin startup.
 ///
@@ -735,18 +921,26 @@ pub fn start_placement(events: Arc<EventSystem>) {
 
 /// The `new_player` event: queue the player for an apartment, return at once.
 pub fn enqueue_new_player(event: &serde_json::Value) {
-    let arrival = Arrival {
-        player_uuid: event["object_uuid"].as_str().unwrap_or_default().to_string(),
-        player_name: event["object_data"]["name"].as_str().unwrap_or_default().to_string(),
-        is_npc: event["object_data"]["is_npc"].as_bool().unwrap_or(false),
-        since: Instant::now(),
-        home_checked: false,
-        waiting_logged: false,
-    };
+    let arrival = Arrival::new(event, None);
     info!(
         "plugin genericprops (new_player): received new_player event for player_uuid={} player_name={}",
         arrival.player_uuid, arrival.player_name
     );
+    send_arrival(arrival);
+}
+
+/// The `create_object` of a player persistence knows (back from an earlier session): it
+/// goes through the queue too, and spawns in its apartment.
+pub fn enqueue_returning(event: &serde_json::Value) {
+    let arrival = Arrival::new(event, Some(event["object_data"].clone()));
+    info!(
+        "plugin genericprops (new_player): returning player player_uuid={} player_name={} queued for its apartment",
+        arrival.player_uuid, arrival.player_name
+    );
+    send_arrival(arrival);
+}
+
+fn send_arrival(arrival: Arrival) {
     let player_uuid = arrival.player_uuid.clone();
     match PLACEMENT.get() {
         Some(tx) => {
@@ -765,10 +959,18 @@ pub fn habs_arrived() {
     }
 }
 
+/// A new `servers_load`: the players waiting for their server look again.
+pub fn load_updated() {
+    if let Some(tx) = PLACEMENT.get() {
+        let _ = tx.send(Placement::LoadUpdated);
+    }
+}
+
 fn run(events: Arc<EventSystem>, rx: Receiver<Placement>) {
     let mut waiting: VecDeque<Arrival> = VecDeque::new();
     let mut kicks: Vec<(Instant, String)> = Vec::new();
     let mut retry_at: Option<Instant> = None;
+    let mut throttle = Throttle::default();
     loop {
         let next = [retry_at, kicks.iter().map(|(at, _)| *at).min()].into_iter().flatten().min();
         let first = match next {
@@ -783,6 +985,8 @@ fn run(events: Arc<EventSystem>, rx: Receiver<Placement>) {
                 let mut message = Some(message);
                 while let Some(m) = message.take() {
                     if let Placement::Arrival(arrival) = m {
+                        // Reconnected while still queued: the new session replaces the old.
+                        waiting.retain(|a| a.player_uuid != arrival.player_uuid);
                         waiting.push_back(arrival);
                     }
                     pass = true;
@@ -804,7 +1008,7 @@ fn run(events: Arc<EventSystem>, rx: Receiver<Placement>) {
             pass = true;
         }
         if pass && !waiting.is_empty() {
-            block_on(place_waiting(&events, &mut waiting, &mut kicks));
+            block_on(place_waiting(&events, &mut waiting, &mut kicks, &mut throttle));
             retry_at = None;
         }
         if waiting.is_empty() {
@@ -817,42 +1021,82 @@ fn run(events: Arc<EventSystem>, rx: Receiver<Placement>) {
 
 /// One pass over the waiting players: their apartment from an earlier session, else a new
 /// one; the rest wait for habs, are rejected past HABS_WAIT, or spawn at the origin when no
-/// habs are coming at all.
-async fn place_waiting(events: &Arc<EventSystem>, waiting: &mut VecDeque<Arrival>, kicks: &mut Vec<(Instant, String)>) {
+/// habs are coming at all. A player whose village is on a server taking no player now
+/// (split under way, tps too low, full) waits for it, up to `queue_max`.
+async fn place_waiting(
+    events: &Arc<EventSystem>,
+    waiting: &mut VecDeque<Arrival>,
+    kicks: &mut Vec<(Instant, String)>,
+    throttle: &mut Throttle,
+) {
     let Some(gorc_instances) = events.get_gorc_instances() else {
         error!("🎮 GORC: ❌ No GORC instances manager available, {} new player(s) dropped", waiting.len());
         waiting.clear();
         return;
     };
+    let config = village_config();
+    let queue_max = config.queue_max;
+    // No queue, no limit: every player goes at once, as before the queue.
+    throttle.limit = if queue_max.is_zero() { 0 } else { config.admit_per_server };
+    throttle.prune(Instant::now());
+    let mut load = throttle.view();
+    // Waiting for their server, in arrival order with the others at the end of the pass.
+    let mut queued: Vec<Arrival> = Vec::new();
 
     // Back from an earlier session: the apartment they already have.
     let unchecked: HashSet<String> = waiting.iter().filter(|a| !a.home_checked).map(|a| a.player_uuid.clone()).collect();
     let homes = if unchecked.is_empty() { HashMap::new() } else { existing_apartments(&gorc_instances, &unchecked).await };
     let mut homeless: VecDeque<Arrival> = VecDeque::new();
     for mut arrival in waiting.drain(..) {
-        arrival.home_checked = true;
-        match homes.get(&arrival.player_uuid) {
-            Some((slot, position, uuid)) => {
+        if !arrival.home_checked {
+            arrival.home_checked = true;
+            if let Some((slot, position, uuid)) = homes.get(&arrival.player_uuid) {
                 info!(
                     "plugin genericprops (new_player): player {} already has apartment {:?} in building {} → position {:?}",
                     arrival.player_uuid, slot, uuid, position
                 );
-                spawn_player(events, &arrival, *position, uuid, false).await;
+                let world = resolve_world(&gorc_instances, *position, Some(uuid.clone())).await;
+                arrival.home = Some(Home { position: *position, building_uuid: uuid.clone(), world });
             }
-            None => homeless.push_back(arrival),
         }
-    }
-    if homeless.is_empty() {
-        return;
+        let Some(home) = arrival.home.clone() else {
+            homeless.push_back(arrival);
+            continue;
+        };
+        if arrival.wait.is_some() && !player_connected(events, &arrival.player_uuid).await {
+            info!("plugin genericprops (new_player): player {} left while queued", arrival.player_uuid);
+            continue;
+        }
+        let owner = load.as_ref().and_then(|l| l.owner_of(&home.world)).map(|s| s.uuid.clone());
+        // The admission limit holds even past queue_max: the queue drains anyway.
+        let throttled = owner.as_ref().is_some_and(|uuid| !throttle.allows(uuid));
+        if throttled || !admits(load.as_ref(), Some(&home.world), arrival.since.elapsed(), queue_max) {
+            let why = refusing_owner(load.as_ref(), Some(&home.world)).zip(load.as_ref()).map(|(s, l)| server_label(l, s));
+            arrival.queue(Wait::ServerFull, || refusal(why.unwrap_or_default(), throttled));
+            queued.push(arrival);
+            continue;
+        }
+        if let Some(server) = refusing_owner(load.as_ref(), Some(&home.world)).filter(|_| !queue_max.is_zero()) {
+            warn!(
+                "plugin genericprops (new_player): player {} waited {:?} in the queue, spawned on {} anyway",
+                arrival.player_uuid, arrival.since.elapsed(), server_label(load.as_ref().unwrap(), server)
+            );
+        }
+        if let Some(uuid) = owner {
+            mesh_load::note_placed(&uuid);
+            throttle.record(&uuid, Instant::now());
+            load = throttle.view();
+        }
+        arrival.log_admitted();
+        spawn_player(events, &arrival, home.position, &home.building_uuid, false).await;
     }
 
     let max = village_config().max_players_per_village;
-    let mut villages = collect_villages(&gorc_instances).await;
-    let mut load = mesh_load::view();
+    let mut villages = if homeless.is_empty() { Vec::new() } else { collect_villages(&gorc_instances).await };
     let mut last_village: Option<usize> = None;
     let mut placed: Vec<(Arrival, Vec3, String)> = Vec::new();
     let mut unplaced: VecDeque<Arrival> = VecDeque::new();
-    while let Some(arrival) = homeless.pop_front() {
+    while let Some(mut arrival) = homeless.pop_front() {
         if !player_connected(events, &arrival.player_uuid).await {
             info!("plugin genericprops (new_player): player {} left before getting an apartment", arrival.player_uuid);
             continue;
@@ -865,6 +1109,26 @@ async fn place_waiting(events: &Arc<EventSystem>, waiting: &mut VecDeque<Arrival
             unplaced.extend(homeless.drain(..));
             break;
         };
+        // The best village is on a server that takes no player now (the accepting ones
+        // come first): wait for it rather than overload it. Its apartment is given only
+        // then, so a village or a server freed meanwhile takes the player instead.
+        let owner = load.as_ref().zip(villages[index].world.as_ref()).and_then(|(l, w)| l.owner_of(w)).map(|s| s.uuid.clone());
+        // The admission limit holds even past queue_max: the queue drains anyway.
+        let throttled = owner.as_ref().is_some_and(|uuid| !throttle.allows(uuid));
+        if let Some(server) = refusing_owner(load.as_ref(), villages[index].world.as_ref()) {
+            let label = server_label(load.as_ref().unwrap(), server);
+            if throttled || arrival.since.elapsed() < queue_max {
+                arrival.queue(Wait::ServerFull, || refusal(label, throttled));
+                queued.push(arrival);
+                continue;
+            }
+            if !queue_max.is_zero() {
+                warn!(
+                    "plugin genericprops (new_player): player {} waited {:?} in the queue, sent to {} anyway",
+                    arrival.player_uuid, arrival.since.elapsed(), label
+                );
+            }
+        }
         let cap = village_cap(&villages, &villages[index], max, load.as_ref());
         note_cap(&villages[index], cap, max, load.as_ref());
         let mut home = None;
@@ -885,10 +1149,11 @@ async fn place_waiting(events: &Arc<EventSystem>, waiting: &mut VecDeque<Arrival
                     "plugin genericprops (new_player): player {} gets an apartment in village {} ({}/{} players) on {}",
                     arrival.player_uuid, village.name, village.occupancy + 1, cap, owner_label(village, load.as_ref())
                 );
-                if let Some(server) = load.as_ref().zip(village.world.as_ref()).and_then(|(l, w)| l.owner_of(w)) {
-                    mesh_load::note_placed(&server.uuid);
+                if let Some(uuid) = &owner {
+                    mesh_load::note_placed(uuid);
+                    throttle.record(uuid, Instant::now());
                     // The next player of this pass sees it, as the next waiter used to.
-                    load = mesh_load::view();
+                    load = throttle.view();
                 }
                 village.occupancy += 1;
                 village.free = village.free.saturating_sub(1);
@@ -904,7 +1169,9 @@ async fn place_waiting(events: &Arc<EventSystem>, waiting: &mut VecDeque<Arrival
     }
 
     // Keep the reserve of places ahead of the next arrivals, counting the apartments just given.
-    keep_reserve(&gorc_instances, events, &villages, last_village.map(|i| &villages[i]), load.as_ref()).await;
+    if !villages.is_empty() {
+        keep_reserve(&gorc_instances, events, &villages, last_village.map(|i| &villages[i]), load.as_ref()).await;
+    }
 
     if !unplaced.is_empty() {
         // Habs requested and not arrived yet (Godot still loading their planet, spawning
@@ -936,13 +1203,29 @@ async fn place_waiting(events: &Arc<EventSystem>, waiting: &mut VecDeque<Arrival
                     );
                     arrival.waiting_logged = true;
                 }
+                arrival.queue(Wait::Habs, String::new);
                 waiting.push_back(arrival);
             }
         }
     }
 
     for (arrival, position, building_uuid) in placed {
+        arrival.log_admitted();
         spawn_player(events, &arrival, position, &building_uuid, true).await;
+    }
+
+    // Everyone still waiting, first arrived first: told where they stand.
+    waiting.extend(queued);
+    waiting.make_contiguous().sort_by_key(|a| a.since);
+    let now = Instant::now();
+    for (index, arrival) in waiting.iter_mut().enumerate() {
+        let Some(wait) = arrival.wait else { continue };
+        let place = index + 1;
+        if queued_notice_due(arrival.notified_at, arrival.notified_place, place, now) {
+            send_queued(events, &arrival.player_uuid, wait, place).await;
+            arrival.notified_at = Some(now);
+            arrival.notified_place = Some(place);
+        }
     }
 }
 
@@ -1034,24 +1317,43 @@ async fn spawn_player(events: &EventSystem, arrival: &Arrival, spawn_position: V
             error!("plugin genericprops (new_player): failed to broadcast building update: {}", e);
         }
     }
+    let object_data = player_object_data(arrival, spawn_position, building_uuid, broadcast);
+    admitted().lock().unwrap().insert(arrival.player_uuid.clone());
     if let Err(e) = events.emit_plugin(
         "genericprops",
         "create_object",
         &serde_json::json!({
             "object_type": "player",
             "object_uuid": arrival.player_uuid,
-            "object_data": {
-                "name": arrival.player_name,
-                "position": { "x": spawn_position.x, "y": spawn_position.y, "z": spawn_position.z },
-                "rotation": { "x": 0.0, "y": 1.708, "z": 0.0 },
-                "parent_id": building_uuid,
-                "spawn_appartment_id": building_uuid,
-                "is_npc": arrival.is_npc,
-            }
+            "object_data": object_data,
         }),
     ).await {
+        admitted().lock().unwrap().remove(&arrival.player_uuid);
         error!("plugin genericprops (new_player): failed to emit create_object: {}", e);
     }
+}
+
+/// The player's `object_data`, in its apartment. A returning player keeps everything
+/// persistence stored but where it was last seen: it wakes up at home. Its apartment is
+/// its own and never changes, so its `spawn_appartment_id` stays, unless it had none or
+/// was just given one (`new_home`: no apartment of its own was found).
+fn player_object_data(arrival: &Arrival, spawn_position: Vec3, building_uuid: &str, new_home: bool) -> serde_json::Value {
+    let mut data = arrival
+        .stored
+        .as_ref()
+        .and_then(|stored| stored.as_object())
+        .cloned()
+        .unwrap_or_default();
+    let has_home = data.get("spawn_appartment_id").and_then(|v| v.as_str()).is_some_and(|s| !s.is_empty());
+    data.insert("name".into(), serde_json::json!(arrival.player_name));
+    data.insert("position".into(), serde_json::json!({ "x": spawn_position.x, "y": spawn_position.y, "z": spawn_position.z }));
+    data.insert("rotation".into(), serde_json::json!({ "x": 0.0, "y": 1.708, "z": 0.0 }));
+    data.insert("parent_id".into(), serde_json::json!(building_uuid));
+    if new_home || !has_home {
+        data.insert("spawn_appartment_id".into(), serde_json::json!(building_uuid));
+    }
+    data.insert("is_npc".into(), serde_json::json!(arrival.is_npc));
+    serde_json::Value::Object(data)
 }
 #[cfg(test)]
 mod tests {
@@ -1174,7 +1476,7 @@ mod tests {
             min_x, max_x, min_y: -Bounds::UNBOUNDED, max_y: Bounds::UNBOUNDED, min_z: -Bounds::UNBOUNDED, max_z: Bounds::UNBOUNDED,
         });
         let server = |name: &str, players, accepting, zone: Zone| ServerLoad {
-            uuid: format!("uuid-{name}"), name: name.into(), players, accepting, loading: false, responsive: true, zones: vec![zone],
+            uuid: format!("uuid-{name}"), name: name.into(), players, accepting, tps: 60, loading: false, responsive: true, zones: vec![zone],
         };
         PoolLoad {
             servers: vec![
@@ -1260,7 +1562,7 @@ mod tests {
         let mut load = sandbox_load(70, false, 70);
         load.servers[1].accepting = false;
         load.servers.push(ServerLoad {
-            uuid: "uuid-space".into(), name: "space".into(), players: 0, accepting: true, loading: false, responsive: true, zones: vec![Zone::space()],
+            uuid: "uuid-space".into(), name: "space".into(), players: 0, accepting: true, tps: 60, loading: false, responsive: true, zones: vec![Zone::space()],
         });
         let load = mesh_load::view_of(load);
         let villages = [on_sandbox(village("mining_village_01", 0, 100, 0.0)), on_sandbox(village("mining_village_02", 0, 0, 10.0))];
@@ -1459,5 +1761,119 @@ mod tests {
         let load = mesh_load::view_of(nobody);
         let names: Vec<&str> = villages_to_request(&villages, &villages[0], 50, 1000, Some(&load)).iter().map(|v| v.name.as_str()).collect();
         assert_eq!(names, ["mining_village_06", "mining_village_02", "mining_village_03"]);
+    }
+
+    // ---- queue
+
+    #[test]
+    fn a_player_waits_for_a_refusing_server_up_to_queue_max() {
+        let west = on_sandbox(village("mining_village_01", 10, 40, 0.0));
+        let load = mesh_load::view_of(sandbox_load(70, false, 10));
+        let max = Duration::from_secs(120);
+        assert!(!admits(Some(&load), west.world.as_ref(), Duration::from_secs(5), max), "west refuses: queued");
+        assert!(admits(Some(&load), west.world.as_ref(), max, max), "waited long enough: west gets it anyway");
+        assert!(admits(Some(&load), west.world.as_ref(), Duration::ZERO, Duration::ZERO), "no queue");
+        let east = on_sandbox(village("mining_village_09", 10, 40, 200.0));
+        assert!(admits(Some(&load), east.world.as_ref(), Duration::ZERO, max), "east takes players");
+        assert!(admits(None, west.world.as_ref(), Duration::ZERO, max), "no load: as before the queue");
+    }
+
+    #[test]
+    fn a_server_at_capacity_queues_until_a_split_makes_room() {
+        let west = on_sandbox(village("mining_village_01", 10, 40, 0.0));
+        let max = Duration::from_secs(120);
+        // West at the placement capacity (75): queued.
+        let full = mesh_load::view_of(sandbox_load(75, true, 75));
+        assert!(refusing_owner(Some(&full), west.world.as_ref()).is_some());
+        assert!(!admits(Some(&full), west.world.as_ref(), Duration::from_secs(1), max));
+        // Split done, 40 players left on west: in.
+        let split = mesh_load::view_of(sandbox_load(40, true, 75));
+        assert!(admits(Some(&split), west.world.as_ref(), Duration::from_secs(1), max));
+    }
+
+    fn returning(stored: serde_json::Value) -> Arrival {
+        Arrival::new(&serde_json::json!({ "object_uuid": "p1", "object_data": stored.clone() }), Some(stored))
+    }
+
+    #[test]
+    fn a_returning_player_wakes_up_in_its_apartment_with_everything_it_had() {
+        let arrival = returning(serde_json::json!({
+            "name": "bob",
+            "position": { "x": 900.0, "y": 1.0, "z": 3.0 },
+            "rotation": { "x": 0.0, "y": 3.0, "z": 0.0 },
+            "parent_id": "truck-1",
+            "spawn_appartment_id": "building-1",
+            "inventory": ["pickaxe"],
+        }));
+        let data = player_object_data(&arrival, Vec3::new(1.0, 2.0, 3.0), "building-1", false);
+        assert_eq!(data["parent_id"], "building-1");
+        assert_eq!(data["position"]["x"], 1.0);
+        assert_eq!(data["rotation"]["y"], 1.708);
+        assert_eq!(data["spawn_appartment_id"], "building-1");
+        assert_eq!(data["inventory"][0], "pickaxe");
+        assert_eq!(data["name"], "bob");
+    }
+
+    #[test]
+    fn the_apartment_of_a_player_never_changes_unless_it_gets_a_new_one() {
+        let arrival = returning(serde_json::json!({ "name": "bob", "spawn_appartment_id": "building-1" }));
+        // Its own apartment found in another building record: the stored one stays.
+        assert_eq!(player_object_data(&arrival, Vec3::zero(), "building-2", false)["spawn_appartment_id"], "building-1");
+        // No apartment of its own was found, it was given a new one.
+        assert_eq!(player_object_data(&arrival, Vec3::zero(), "building-2", true)["spawn_appartment_id"], "building-2");
+        // A player from before the apartments.
+        let old = returning(serde_json::json!({ "name": "bob" }));
+        assert_eq!(player_object_data(&old, Vec3::zero(), "building-3", false)["spawn_appartment_id"], "building-3");
+        // A new player.
+        let new = Arrival::new(&serde_json::json!({ "object_uuid": "p2", "object_data": { "name": "ann", "is_npc": true } }), None);
+        let data = player_object_data(&new, Vec3::zero(), "building-4", true);
+        assert_eq!(data["spawn_appartment_id"], "building-4");
+        assert_eq!(data["is_npc"], true);
+    }
+
+    #[test]
+    fn an_admission_lets_one_create_object_through() {
+        admitted().lock().unwrap().insert("p-admitted".to_string());
+        assert!(take_admitted("p-admitted"));
+        assert!(!take_admitted("p-admitted"), "the next one is queued again");
+        assert!(!take_admitted("p-never"));
+    }
+
+    #[test]
+    fn a_server_gets_at_most_its_share_of_arrivals_per_window() {
+        let mut throttle = Throttle { limit: 2, ..Throttle::default() };
+        let start = Instant::now();
+        throttle.record("west", start);
+        assert!(throttle.allows("west"));
+        throttle.record("west", start);
+        assert!(!throttle.allows("west"), "two in the window: the next one waits");
+        assert!(throttle.allows("east"), "per server");
+        throttle.prune(start + ADMIT_WINDOW);
+        assert!(throttle.allows("west"), "the window is over");
+        let unlimited = Throttle::default();
+        assert!(unlimited.allows("west"));
+    }
+
+    #[test]
+    fn a_server_that_had_its_share_sends_the_arrivals_elsewhere() {
+        let villages = [
+            on_sandbox(village("mining_village_01", 10, 40, 0.0)),   // west, least loaded
+            on_sandbox(village("mining_village_09", 10, 40, 200.0)), // east
+        ];
+        let mut load = mesh_load::view_of(sandbox_load(10, true, 30));
+        assert_eq!(select_village(&villages, &AssignRequest::default(), 50, Some(&load)).unwrap().name, "mining_village_01");
+        load.refuse("uuid-west");
+        assert_eq!(select_village(&villages, &AssignRequest::default(), 50, Some(&load)).unwrap().name, "mining_village_09");
+        assert!(refusing_owner(Some(&load), villages[0].world.as_ref()).is_some());
+    }
+
+    #[test]
+    fn a_waiting_player_hears_of_every_move_of_its_place() {
+        let start = Instant::now();
+        assert!(queued_notice_due(None, None, 40, start), "first time");
+        assert!(!queued_notice_due(Some(start), Some(40), 40, start + Duration::from_secs(2)), "same place");
+        assert!(queued_notice_due(Some(start), Some(40), 30, start + Duration::from_secs(2)), "moved");
+        assert!(!queued_notice_due(Some(start), Some(40), 30, start + Duration::from_millis(500)), "not twice a second");
+        assert!(queued_notice_due(Some(start), Some(40), 40, start + QUEUED_NOTIFY), "keep-alive");
     }
 }

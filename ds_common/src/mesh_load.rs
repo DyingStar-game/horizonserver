@@ -14,9 +14,12 @@ pub struct ServerLoad {
     pub name: String,
     /// Larger of the Godot and Horizon counts (Godot's lags).
     pub players: u32,
-    /// Reporting, not loading zones it was just handed, and under its split rule:
-    /// it may take new players.
+    /// Reporting, not loading zones it was just handed, in no split / merge, under its
+    /// placement capacity and at `placement_min_tps` or more: it may take new players.
     pub accepting: bool,
+    /// Physics ticks/s of its last serverinfo (0 before the first one), for the logs.
+    #[serde(default)]
+    pub tps: u8,
     /// Loading the zones it was just handed: alive, but asking it to spawn village habs
     /// now froze it for 2 min (preprod NPC test, 2026-10-16).
     #[serde(default)]

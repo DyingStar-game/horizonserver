@@ -118,12 +118,16 @@ the running servers (`ds_common::mesh_load::PoolLoad`):
 
 ```json
 {"capacity": 75, "servers": [{"uuid": "…", "name": "vitae-33386", "players": 52,
-  "accepting": true, "zones": [{"id": "…", "world": "planet", "planet_uuid": "…", "planet_name": "SandBox", "bounds": {…}}]}]}
+  "accepting": true, "tps": 60, "zones": [{"id": "…", "world": "planet", "planet_uuid": "…", "planet_name": "SandBox", "bounds": {…}}]}]}
 ```
 
 `players` is the larger of Godot's and Horizon's counts; `accepting` = reported
-within 10 s, not loading zones it was just handed, and under its split rule;
-`capacity` is N of a `players:N` split rule.
+within 10 s, not loading zones it was just handed, in no split / merge (queued or
+running: a child warming up reports long before its players are moved), under
+`placement_capacity` and at `placement_min_tps` or more; `capacity` is
+`placement_capacity`, by default N of a `players:N` split rule. Besides every 5 s, the
+load is published at the end of each op and on the first serverinfo of a server done
+loading its new zones, so the queued players go at once.
 
 genericprops places each new player in the villages of the **least loaded server
 that accepts** (then the fullest village of that server, so villages stay compact),
@@ -137,6 +141,31 @@ one: the fullest village under the cap, the next villages requested near the las
 Why: filling villages in line sent every arrival to the server owning the next
 village, faster than splits could take them away (228 players on one server,
 minikube load test 2026-10-02).
+
+### The queue
+
+When the best village is on a refusing server (no accepting one has room), the
+player is **not** forced onto it: it waits in the placement queue
+(`genericprops-placement` thread, first arrived first served) and no apartment is
+given yet, so a village or a server freed meanwhile takes it. The players back from
+an earlier session go through the same queue: persistence's `create_object` of a
+player is held by genericprops until the server owning its apartment accepts, and
+the player always spawns in its own apartment (`spawn_appartment_id`), never where it
+was last seen. The queue is looked at again on every `servers_load` and every 2 s.
+
+A server is given at most `queue_admit_per_server` players (10) every 2 s, queued or
+not: the 49 queued players let in at once when a server came back above
+`placement_min_tps` took it from 61 to 14 tps (minikube, 2026-10-20). A server that had
+its share counts as refusing for the rest of the window, so the arrivals go to another
+server first; the rest wait their turn, past `queue_max_secs` too.
+
+A queued player gets `{"type":"queued","reason":"server_full"|"habs","position":N}`
+as soon as its place moves (at most once a second), else every 10 s; each one restarts
+the client's 45 s spawn watchdog. Past `queue_max_secs`
+(`[ds_genericprops]`, 120 s, 0 = no queue) it is spawned on its server anyway, as
+before the queue. `placement_capacity` must stay above the `players:N` split rule:
+equal to it, a full server never goes over the rule and is never split, its queue
+drained only by that timeout (warned at startup).
 
 ## Configuration (`plugins.toml`, `[ds_game_server]`)
 
@@ -152,6 +181,8 @@ snapshot_timeout_secs = 5
 split_warmup_secs = 5          # minimum wait after props + prewarm were sent
 split_warmup_max_secs = 30     # give up waiting for readiness after this
 split_ready_tps = 58           # ready = serverinfo tps >= this and chunks_loading == 0
+placement_capacity = 75        # players a server takes from the placement (default: N of players:N)
+placement_min_tps = 45         # under this tps a server takes no new player
 ```
 
 ## Lifecycle

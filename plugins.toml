@@ -2,6 +2,10 @@
 # DyingStar plugins configuration
 # ============================================================================
 #
+# log_level (every plugin): a level or EnvFilter directives, e.g.
+# "info,dyingstar_generic_props::lod=debug". The GORC per-object INFO chatter of
+# horizon_event_system (zone entered/exited, subscribed) is silenced unless the
+# directives name horizon_event_system: "info,horizon_event_system=info" restores it.
 [ds_game_server]
 log_level = "info"
 # Godot servers pool. game_servers is a static list of addresses; game_servers_dns

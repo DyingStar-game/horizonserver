@@ -157,15 +157,20 @@ A server is given at most `queue_admit_per_server` players (10) every 2 s, queue
 not: the 49 queued players let in at once when a server came back above
 `placement_min_tps` took it from 61 to 14 tps (minikube, 2026-10-20). A server that had
 its share counts as refusing for the rest of the window, so the arrivals go to another
-server first; the rest wait their turn, past `queue_max_secs` too.
+server first; the rest wait their turn.
 
 A queued player gets `{"type":"queued","reason":"server_full"|"habs","position":N}`
 as soon as its place moves (at most once a second), else every 10 s; each one restarts
-the client's 45 s spawn watchdog. Past `queue_max_secs`
-(`[ds_genericprops]`, 120 s, 0 = no queue) it is spawned on its server anyway, as
-before the queue. `placement_capacity` must stay above the `players:N` split rule:
-equal to it, a full server never goes over the rule and is never split, its queue
-drained only by that timeout (warned at startup).
+the client's 45 s spawn watchdog. However long it waits, it is never forced onto a
+server that refuses: spawned there after 120 s, returning NPCs held one server at 238
+players and 20 tps while its splits could not keep up (preprod, 2026-10-20). Only a
+split, a merge done or the tps coming back lets the queue go, so every refusal must
+lead to one of them: `placement_capacity` must stay above the `players:N` threshold
+of the split rule (equal to it, a full server never goes over the rule and is never
+split), and `placement_min_tps` at or under its `tps:N` threshold (above it, a server
+in between takes no player and is never split for it). Both are warned at startup.
+With no idle server left in the pool, the queue of a refusing server waits for
+players to leave it.
 
 ## Configuration (`plugins.toml`, `[ds_game_server]`)
 
@@ -197,12 +202,19 @@ placement_min_tps = 45         # under this tps a server takes no new player
 2. The first online server starts on `[space] + one zone per known planet` and
    receives the objects that already exist. A planet discovered later is appended
    to the server owning unbounded space.
-3. **Split** (`split_rule` true for `split_after_samples`): an idle server is
-   picked; a snapshot is taken; `mesh::plan_split`:
-   - several zones → whole zones move (heaviest first, greedy balance by players,
-     the parent keeps at least one);
-   - one zone → its bounds are cut through the players' median on the widest
-     axis (`mesh::split_bounds`), the child gets a new zone id.
+3. **Split** (`split_rule` true for `split_after_samples`): idle servers are
+   picked — one (two with several zones), or under a `players:N` rule as many as
+   it takes for each piece to fall under N (`players / N + 1` pieces: 238 players
+   at players:80 = 3 pieces), at most `MAX_SPLIT_CHILDREN` (4)
+   (`MeshRules::split_children_wanted`); a snapshot is taken; `mesh::plan_split_n`:
+   - several zones, none holding most players → whole zones move to one child
+     (heaviest first, greedy balance by players, the parent keeps at least one);
+   - one zone holding most players → it is cut in one piece per child, the parent
+     keeps the other zones (one child: the parent keeps a piece too);
+   - one zone → it is cut in one piece per server, the parent keeping the first
+     under the zone's id. A cut is made on the widest axis of the population, at
+     every 1/pieces of it (`mesh::split_bounds_n`; in two: the median or a wide gap,
+     `mesh::split_bounds`); each child's piece gets a new zone id.
    The parent gets `update_zones(keep)`, the child `start(give)`, the child
    receives every object (`initial_object`, frozen when outside its zones), the
    parent freezes what it no longer owns. A `SplitRecord` remembers the pair.

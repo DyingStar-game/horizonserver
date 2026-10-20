@@ -23,10 +23,6 @@ pub struct VillageConfig {
     /// Godot needs from ~15 s to minutes (during a mesh hand-over) to create a village's
     /// habs; every player arriving meanwhile with no room gets no apartment.
     pub free_reserve: usize,
-    /// How long a player waits in the queue for the server owning its village to take
-    /// players again (end of a split, tps back up) before it is spawned there anyway.
-    /// Zero: no queue, the server gets it at once.
-    pub queue_max: Duration,
     /// Players a server is given at most per ADMIT_WINDOW: 49 queued players let in at
     /// once took a server from 61 to 14 tps (minikube, 2026-10-20). Zero: no limit.
     pub admit_per_server: usize,
@@ -34,7 +30,7 @@ pub struct VillageConfig {
 
 impl Default for VillageConfig {
     fn default() -> Self {
-        Self { max_players_per_village: 50, free_reserve: 100, queue_max: Duration::from_secs(120), admit_per_server: 10 }
+        Self { max_players_per_village: 50, free_reserve: 100, admit_per_server: 10 }
     }
 }
 
@@ -817,11 +813,13 @@ pub fn take_admitted(player_uuid: &str) -> bool {
     admitted().lock().unwrap().remove(player_uuid)
 }
 
-/// Whether a player may be spawned in `world` now: its server takes players, or the player
-/// waited `queue_max` already (the server gets it anyway, as before the queue). No load
-/// known, or no server owning the place: nothing to protect.
-fn admits(load: Option<&LoadView>, world: Option<&ObjectWorld>, waited: Duration, queue_max: Duration) -> bool {
-    refusing_owner(load, world).is_none() || waited >= queue_max
+/// Whether a player may be spawned in `world` now: its server takes players. However long
+/// the player waited: a server that refuses is never given a player (forced in after 120 s,
+/// returning NPCs held one server at 238 players and 20 tps, preprod 2026-10-20); the split
+/// or the tps coming back lets the queue go. No load known, or no server owning the place:
+/// nothing to protect.
+fn admits(load: Option<&LoadView>, world: Option<&ObjectWorld>) -> bool {
+    refusing_owner(load, world).is_none()
 }
 
 /// The server owning `world` when it takes no new player now.
@@ -1022,7 +1020,7 @@ fn run(events: Arc<EventSystem>, rx: Receiver<Placement>) {
 /// One pass over the waiting players: their apartment from an earlier session, else a new
 /// one; the rest wait for habs, are rejected past HABS_WAIT, or spawn at the origin when no
 /// habs are coming at all. A player whose village is on a server taking no player now
-/// (split under way, tps too low, full) waits for it, up to `queue_max`.
+/// (split under way, tps too low, full) waits for it, however long it takes.
 async fn place_waiting(
     events: &Arc<EventSystem>,
     waiting: &mut VecDeque<Arrival>,
@@ -1035,9 +1033,7 @@ async fn place_waiting(
         return;
     };
     let config = village_config();
-    let queue_max = config.queue_max;
-    // No queue, no limit: every player goes at once, as before the queue.
-    throttle.limit = if queue_max.is_zero() { 0 } else { config.admit_per_server };
+    throttle.limit = config.admit_per_server;
     throttle.prune(Instant::now());
     let mut load = throttle.view();
     // Waiting for their server, in arrival order with the others at the end of the pass.
@@ -1068,19 +1064,12 @@ async fn place_waiting(
             continue;
         }
         let owner = load.as_ref().and_then(|l| l.owner_of(&home.world)).map(|s| s.uuid.clone());
-        // The admission limit holds even past queue_max: the queue drains anyway.
         let throttled = owner.as_ref().is_some_and(|uuid| !throttle.allows(uuid));
-        if throttled || !admits(load.as_ref(), Some(&home.world), arrival.since.elapsed(), queue_max) {
+        if throttled || !admits(load.as_ref(), Some(&home.world)) {
             let why = refusing_owner(load.as_ref(), Some(&home.world)).zip(load.as_ref()).map(|(s, l)| server_label(l, s));
             arrival.queue(Wait::ServerFull, || refusal(why.unwrap_or_default(), throttled));
             queued.push(arrival);
             continue;
-        }
-        if let Some(server) = refusing_owner(load.as_ref(), Some(&home.world)).filter(|_| !queue_max.is_zero()) {
-            warn!(
-                "plugin genericprops (new_player): player {} waited {:?} in the queue, spawned on {} anyway",
-                arrival.player_uuid, arrival.since.elapsed(), server_label(load.as_ref().unwrap(), server)
-            );
         }
         if let Some(uuid) = owner {
             mesh_load::note_placed(&uuid);
@@ -1113,21 +1102,12 @@ async fn place_waiting(
         // come first): wait for it rather than overload it. Its apartment is given only
         // then, so a village or a server freed meanwhile takes the player instead.
         let owner = load.as_ref().zip(villages[index].world.as_ref()).and_then(|(l, w)| l.owner_of(w)).map(|s| s.uuid.clone());
-        // The admission limit holds even past queue_max: the queue drains anyway.
         let throttled = owner.as_ref().is_some_and(|uuid| !throttle.allows(uuid));
         if let Some(server) = refusing_owner(load.as_ref(), villages[index].world.as_ref()) {
             let label = server_label(load.as_ref().unwrap(), server);
-            if throttled || arrival.since.elapsed() < queue_max {
-                arrival.queue(Wait::ServerFull, || refusal(label, throttled));
-                queued.push(arrival);
-                continue;
-            }
-            if !queue_max.is_zero() {
-                warn!(
-                    "plugin genericprops (new_player): player {} waited {:?} in the queue, sent to {} anyway",
-                    arrival.player_uuid, arrival.since.elapsed(), label
-                );
-            }
+            arrival.queue(Wait::ServerFull, || refusal(label, throttled));
+            queued.push(arrival);
+            continue;
         }
         let cap = village_cap(&villages, &villages[index], max, load.as_ref());
         note_cap(&villages[index], cap, max, load.as_ref());
@@ -1766,29 +1746,25 @@ mod tests {
     // ---- queue
 
     #[test]
-    fn a_player_waits_for_a_refusing_server_up_to_queue_max() {
+    fn a_player_waits_for_a_refusing_server_however_long_it_takes() {
         let west = on_sandbox(village("mining_village_01", 10, 40, 0.0));
         let load = mesh_load::view_of(sandbox_load(70, false, 10));
-        let max = Duration::from_secs(120);
-        assert!(!admits(Some(&load), west.world.as_ref(), Duration::from_secs(5), max), "west refuses: queued");
-        assert!(admits(Some(&load), west.world.as_ref(), max, max), "waited long enough: west gets it anyway");
-        assert!(admits(Some(&load), west.world.as_ref(), Duration::ZERO, Duration::ZERO), "no queue");
+        assert!(!admits(Some(&load), west.world.as_ref()), "west refuses: queued, never forced in");
         let east = on_sandbox(village("mining_village_09", 10, 40, 200.0));
-        assert!(admits(Some(&load), east.world.as_ref(), Duration::ZERO, max), "east takes players");
-        assert!(admits(None, west.world.as_ref(), Duration::ZERO, max), "no load: as before the queue");
+        assert!(admits(Some(&load), east.world.as_ref()), "east takes players");
+        assert!(admits(None, west.world.as_ref()), "no load: as before the queue");
     }
 
     #[test]
     fn a_server_at_capacity_queues_until_a_split_makes_room() {
         let west = on_sandbox(village("mining_village_01", 10, 40, 0.0));
-        let max = Duration::from_secs(120);
         // West at the placement capacity (75): queued.
         let full = mesh_load::view_of(sandbox_load(75, true, 75));
         assert!(refusing_owner(Some(&full), west.world.as_ref()).is_some());
-        assert!(!admits(Some(&full), west.world.as_ref(), Duration::from_secs(1), max));
+        assert!(!admits(Some(&full), west.world.as_ref()));
         // Split done, 40 players left on west: in.
         let split = mesh_load::view_of(sandbox_load(40, true, 75));
-        assert!(admits(Some(&split), west.world.as_ref(), Duration::from_secs(1), max));
+        assert!(admits(Some(&split), west.world.as_ref()));
     }
 
     fn returning(stored: serde_json::Value) -> Arrival {

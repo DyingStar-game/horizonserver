@@ -25,7 +25,8 @@ servers_mode = "single"
 # Dynamic server meshing (ignored in single mode). A Godot server owns a list of
 # zones (space, or one planet, optionally bounded). When a server saturates, whole
 # zones are handed to an idle server of the pool; a server left with a single zone
-# gets that zone cut in two. Sibling servers are merged back when the load drops.
+# gets that zone cut in pieces (players / N + 1 under a players:N rule, at most 4
+# idle servers per split). Sibling servers are merged back when the load drops.
 #
 # split_rule:
 #  * "tps:20"     => split when the achieved physics ticks/s stay under 20
@@ -48,9 +49,10 @@ split_warmup_secs = 5
 split_warmup_max_secs = 30
 split_ready_tps = 58
 # Physics ticks/s under which a server takes no new player (default 45): the
-# arrivals wait in the queue of genericprops (queue_max_secs) until it is back above,
-# or until a split gives them a server with room.
-placement_min_tps = 45
+# arrivals wait in the queue of genericprops until it is back above, or until a split
+# gives them a server with room. Keep it at or under the tps: threshold of split_rule:
+# a server in between takes no player and is never split for it (warned at startup).
+placement_min_tps = 20
 
 [ds_genericprops]
 log_level = "info"
@@ -65,12 +67,10 @@ village_free_reserve = 100
 # A player (new, or back from an earlier session) whose village is on a server
 # taking no new player (over placement_capacity, under placement_min_tps, in a split
 # or merge) waits in a queue, told so by a "queued" message, until that server takes
-# players again. Past queue_max_secs it is spawned there anyway (default 120, 0 = no
-# queue). A returning player always spawns in its own apartment.
-queue_max_secs = 120
+# players again, however long it takes: a server that refuses is never given a
+# player. A returning player always spawns in its own apartment.
 # Players a server is given at most every 2 s, from the queue or not (default 10,
 # 0 = no limit): letting 49 queued players in at once took a server from 61 to 14 tps.
-# The rest wait their turn, past queue_max_secs too.
 queue_admit_per_server = 10
 # Seconds between two saves of every connected player's position / rotation / parent
 # to persistence (default 60, 0 = on disconnect only). Saved on disconnect anyway.

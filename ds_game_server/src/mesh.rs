@@ -8,42 +8,91 @@ use ds_common::zone::{Bounds, Zone};
 use std::time::Duration;
 use tracing::warn;
 
-/// A threshold on one server metric, `"tps:20"` or `"players:50"` in the config.
+/// Thresholds on the server metrics, `"tps:20"`, `"players:50"` or both in the
+/// config: `"players:80 or tps:45"` for a split (any one over its threshold),
+/// `"players:25 and tps:55"` for a merge (all of them under it).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Rule {
+    pub tps: Option<u8>,
+    pub players: Option<u16>,
+}
+
+/// How the conditions of a rule combine: `or` for `split_rule`, `and` for `merge_rule`.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Rule {
-    Tps(u8),
-    Players(u16),
+pub enum Joiner {
+    Or,
+    And,
+}
+
+impl Joiner {
+    fn word(self) -> &'static str {
+        match self {
+            Joiner::Or => "or",
+            Joiner::And => "and",
+        }
+    }
 }
 
 impl Rule {
-    pub fn parse(s: &str) -> Result<Rule, String> {
-        let (kind, value) = s.trim().split_once(':').ok_or_else(|| format!("rule `{}` must be `tps:N` or `players:N`", s))?;
-        match kind.trim() {
-            "tps" => value.trim().parse::<u8>().map(Rule::Tps).map_err(|e| format!("bad tps in `{}`: {}", s, e)),
-            "fps" => {
-                warn!("rule `{}` uses the deprecated `fps:` prefix, read it as `tps:`", s);
-                value.trim().parse::<u8>().map(Rule::Tps).map_err(|e| format!("bad tps in `{}`: {}", s, e))
+    pub const fn tps(n: u8) -> Rule {
+        Rule { tps: Some(n), players: None }
+    }
+
+    pub const fn players(n: u16) -> Rule {
+        Rule { tps: None, players: Some(n) }
+    }
+
+    pub fn parse(s: &str, joiner: Joiner) -> Result<Rule, String> {
+        let other = match joiner {
+            Joiner::Or => Joiner::And,
+            Joiner::And => Joiner::Or,
+        };
+        let words: Vec<&str> = s.split_whitespace().collect();
+        if words.contains(&other.word()) {
+            return Err(format!("rule `{}` joins its conditions with `{}`, this rule takes `{}`", s, other.word(), joiner.word()));
+        }
+        let mut rule = Rule::default();
+        for cond in words.split(|w| *w == joiner.word()) {
+            let cond = cond.join("");
+            let (kind, value) = cond.split_once(':').ok_or_else(|| format!("rule `{}` must be `tps:N` or `players:N`", s))?;
+            let kind = match kind {
+                "fps" => {
+                    warn!("rule `{}` uses the deprecated `fps:` prefix, read it as `tps:`", s);
+                    "tps"
+                }
+                kind => kind,
+            };
+            match kind {
+                "tps" if rule.tps.is_none() => rule.tps = Some(value.parse::<u8>().map_err(|e| format!("bad tps in `{}`: {}", s, e))?),
+                "players" if rule.players.is_none() => {
+                    rule.players = Some(value.parse::<u16>().map_err(|e| format!("bad players in `{}`: {}", s, e))?)
+                }
+                "tps" | "players" => return Err(format!("rule `{}` sets `{}` twice", s, kind)),
+                other => return Err(format!("unknown rule kind `{}` in `{}`", other, s)),
             }
-            "players" => value.trim().parse::<u16>().map(Rule::Players).map_err(|e| format!("bad players in `{}`: {}", s, e)),
-            other => Err(format!("unknown rule kind `{}` in `{}`", other, s)),
         }
+        Ok(rule)
     }
 
-    /// Split when the tps falls under the threshold / the players exceed it.
+    /// Split when the tps falls under its threshold or the players exceed theirs.
     pub fn split_hit(&self, tps: u8, players: u16) -> bool {
-        match *self {
-            Rule::Tps(n) => tps < n,
-            Rule::Players(n) => players > n,
-        }
+        self.tps.is_some_and(|n| tps < n) || self.players.is_some_and(|n| players > n)
     }
 
-    /// Merge two siblings when both run above the tps threshold / their players sum
-    /// stays under it.
+    /// Merge two siblings when both run above the tps threshold and their players
+    /// sum stays under its threshold (a condition left out always holds).
     pub fn merge_hit(&self, a: (u8, u16), b: (u8, u16)) -> bool {
-        match *self {
-            Rule::Tps(n) => a.0 > n && b.0 > n,
-            Rule::Players(n) => (a.1 as u32 + b.1 as u32) < n as u32,
-        }
+        self.tps.map_or(true, |n| a.0 > n && b.0 > n) && self.players.map_or(true, |n| (a.1 as u32 + b.1 as u32) < n as u32)
+    }
+}
+
+impl std::fmt::Display for Rule {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let conds: Vec<String> = [self.players.map(|n| format!("players:{}", n)), self.tps.map(|n| format!("tps:{}", n))]
+            .into_iter()
+            .flatten()
+            .collect();
+        f.write_str(&conds.join(", "))
     }
 }
 
@@ -77,7 +126,7 @@ impl MeshRules {
     /// True when the placement must stop sending new players to this server.
     pub fn placement_full(&self, tps: u8, players: u16) -> bool {
         let full = match self.placement_capacity {
-            Some(n) => players as u32 > n || matches!(self.split, Rule::Tps(_)) && self.split.split_hit(tps, players),
+            Some(n) => players as u32 > n || self.split.tps.is_some_and(|n| tps < n),
             None => self.split.split_hit(tps, players),
         };
         full || tps < self.placement_min_tps
@@ -86,26 +135,23 @@ impl MeshRules {
 
 impl MeshRules {
     pub fn from_config(config: &Config) -> MeshRules {
-        let rule = |key: &str, default: &str| -> Rule {
+        let rule = |key: &str, default: &str, joiner: Joiner| -> Rule {
             let raw = config.get_value(key).and_then(|v| v.as_str()).unwrap_or(default);
-            Rule::parse(raw).unwrap_or_else(|e| {
+            Rule::parse(raw, joiner).unwrap_or_else(|e| {
                 warn!("[mesh] {}: {} — using default `{}`", key, e, default);
-                Rule::parse(default).expect("default rule parses")
+                Rule::parse(default, joiner).expect("default rule parses")
             })
         };
         let int = |key: &str, default: i64| -> i64 {
             config.get_value(key).and_then(|v| v.as_integer()).unwrap_or(default).max(1)
         };
-        let split = rule("split_rule", "tps:20");
+        let split = rule("split_rule", "tps:20", Joiner::Or);
         let placement_capacity = config
             .get_value("placement_capacity")
             .and_then(|v| v.as_integer())
             .map(|n| n.max(1) as u32)
-            .or(match split {
-                Rule::Players(n) => Some(n as u32),
-                Rule::Tps(_) => None,
-            });
-        if let (Rule::Players(n), Some(capacity)) = (split, placement_capacity) {
+            .or(split.players.map(u32::from));
+        if let (Some(n), Some(capacity)) = (split.players, placement_capacity) {
             if capacity <= n as u32 {
                 // The server stops taking players before it is over the rule: never split,
                 // its queued arrivals wait for genericprops' queue_max_secs.
@@ -117,7 +163,7 @@ impl MeshRules {
         }
         MeshRules {
             split,
-            merge: rule("merge_rule", "players:10"),
+            merge: rule("merge_rule", "players:10", Joiner::And),
             split_after: int("split_after_samples", 10) as u32,
             merge_after: int("merge_after_samples", 30) as u32,
             snapshot_timeout: Duration::from_secs(int("snapshot_timeout_secs", 5) as u64),
@@ -350,15 +396,36 @@ mod tests {
 
     #[test]
     fn rule_parsing() {
-        assert_eq!(Rule::parse("tps:20"), Ok(Rule::Tps(20)));
-        assert_eq!(Rule::parse("players:50"), Ok(Rule::Players(50)));
-        assert_eq!(Rule::parse("fps:15"), Ok(Rule::Tps(15)));
-        assert!(Rule::parse("cpu:3").is_err());
-        assert!(Rule::parse("tps").is_err());
-        assert!(Rule::Tps(20).split_hit(19, 0) && !Rule::Tps(20).split_hit(20, 0));
-        assert!(Rule::Players(3).split_hit(60, 4) && !Rule::Players(3).split_hit(60, 3));
-        assert!(Rule::Players(10).merge_hit((60, 4), (60, 5)) && !Rule::Players(10).merge_hit((60, 5), (60, 5)));
-        assert!(Rule::Tps(50).merge_hit((55, 0), (51, 0)) && !Rule::Tps(50).merge_hit((55, 0), (50, 0)));
+        assert_eq!(Rule::parse("tps:20", Joiner::Or), Ok(Rule::tps(20)));
+        assert_eq!(Rule::parse("players:50", Joiner::Or), Ok(Rule::players(50)));
+        assert_eq!(Rule::parse("fps:15", Joiner::Or), Ok(Rule::tps(15)));
+        assert!(Rule::parse("cpu:3", Joiner::Or).is_err());
+        assert!(Rule::parse("tps", Joiner::Or).is_err());
+        assert!(Rule::parse("", Joiner::Or).is_err());
+        assert!(Rule::tps(20).split_hit(19, 0) && !Rule::tps(20).split_hit(20, 0));
+        assert!(Rule::players(3).split_hit(60, 4) && !Rule::players(3).split_hit(60, 3));
+        assert!(Rule::players(10).merge_hit((60, 4), (60, 5)) && !Rule::players(10).merge_hit((60, 5), (60, 5)));
+        assert!(Rule::tps(50).merge_hit((55, 0), (51, 0)) && !Rule::tps(50).merge_hit((55, 0), (50, 0)));
+    }
+
+    #[test]
+    fn combined_rules() {
+        let split = Rule::parse("players:80 or tps: 45", Joiner::Or).unwrap();
+        assert_eq!(split, Rule { tps: Some(45), players: Some(80) });
+        assert_eq!(split.to_string(), "players:80, tps:45");
+        // 2026-10-20 preprod: 72 players at 30 tps never went over players:80.
+        assert!(split.split_hit(30, 72));
+        assert!(split.split_hit(60, 81));
+        assert!(!split.split_hit(45, 80));
+        let merge = Rule::parse("players:25 and tps:55", Joiner::And).unwrap();
+        assert!(merge.merge_hit((60, 10), (58, 10)));
+        assert!(!merge.merge_hit((60, 10), (50, 10)));
+        assert!(!merge.merge_hit((60, 20), (60, 10)));
+        // The joiner says how the conditions combine: the wrong one is refused.
+        assert!(Rule::parse("players:80 and tps:45", Joiner::Or).is_err());
+        assert!(Rule::parse("players:25 or tps:55", Joiner::And).is_err());
+        assert!(Rule::parse("tps:20 or tps:30", Joiner::Or).is_err());
+        assert!(Rule::parse("players:80 or", Joiner::Or).is_err());
     }
 
     #[test]
@@ -488,8 +555,8 @@ mod tests {
     #[test]
     fn placement_capacity_defaults_to_the_players_rule() {
         let mut rules = MeshRules {
-            split: Rule::Players(60),
-            merge: Rule::Players(25),
+            split: Rule::players(60),
+            merge: Rule::players(25),
             split_after: 10,
             merge_after: 15,
             snapshot_timeout: Duration::from_secs(5),
@@ -502,7 +569,7 @@ mod tests {
         assert!(!rules.placement_full(60, 75) && rules.placement_full(60, 76));
         rules.placement_capacity = None;
         assert!(rules.placement_full(60, 61) && !rules.placement_full(60, 60));
-        rules.split = Rule::Tps(20);
+        rules.split = Rule::tps(20);
         rules.placement_capacity = Some(75);
         assert!(rules.placement_full(10, 3) && !rules.placement_full(30, 3));
     }
@@ -510,8 +577,8 @@ mod tests {
     #[test]
     fn a_server_under_the_placement_min_tps_is_full() {
         let rules = MeshRules {
-            split: Rule::Players(60),
-            merge: Rule::Players(25),
+            split: Rule::players(60),
+            merge: Rule::players(25),
             split_after: 10,
             merge_after: 15,
             snapshot_timeout: Duration::from_secs(5),

@@ -32,9 +32,12 @@ servers_mode = "development"
 # When a server is split (default "tps:20"):
 #  * "tps:20"     => split when the achieved physics ticks/s stay under 20
 #  * "players:50" => split when more than 50 players are connected on a server
-split_rule = "players:80"
+#  * "players:50 or tps:20" => split on whichever comes first
+# The players count alone misses the servers whose players are costly: on
+# 2026-10-20, 72 NPCs walking in a dense village held a server at 30 tps.
+split_rule = "players:80 or tps:45"
 # Players the placement of new players gives a server at most (default: the
-# threshold of a players: split_rule, none with a tps: split_rule); past it the
+# players: threshold of split_rule, none without one); past it the
 # arrivals go to another server, or wait in genericprops' queue. Above split_rule,
 # so the split of a busy server starts while the arrivals still have room on it:
 # equal to it, the server never goes over the rule and is never split.
@@ -43,6 +46,7 @@ placement_capacity = 95
 # (default "players:10"):
 #  * "players:10" => merge when the sum of their players is under 10
 #  * "tps:50"     => merge when both run above 50 ticks/s
+#  * "players:10 and tps:50" => merge when both hold
 merge_rule = "players:25"
 # Seconds split_rule must hold without interruption before the split starts
 # (default 10). Counted in time, not in serverinfo reports: an overloaded Godot

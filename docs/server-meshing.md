@@ -173,8 +173,8 @@ drained only by that timeout (warned at startup).
 servers_mode = "development"   # single: one server, no split/merge
 game_servers = ["ws://127.0.0.1:8980", "ws://127.0.0.1:8981"]   # static pool
 game_servers_dns = "godotserver:8980"  # + every address this name resolves to
-split_rule = "tps:20"          # or "players:50"
-merge_rule = "players:10"      # or "tps:50"
+split_rule = "tps:20"          # or "players:50", or "players:50 or tps:20" (any one)
+merge_rule = "players:10"      # or "tps:50", or "players:10 and tps:50" (all of them)
 split_after_samples = 10       # consecutive 1 s samples
 merge_after_samples = 30
 snapshot_timeout_secs = 5
@@ -270,8 +270,9 @@ consuming `serverinfo` meanwhile and applies the `OpResult` when it lands
   `update_zones`, then erases the players it lost a few per second, so the
   parent still reports its old `players_number` for a while). Split/merge hit
   counters are reset, and nothing is evaluated while an op is in flight.
-- A split under a `players:N` rule whose plan gives away zero players is
-  skipped (the count still describes players already handed over).
+- A split under a rule with a `players:N` condition whose plan gives away zero
+  players is skipped (the count still describes players already handed over;
+  moving only empty zones would not lighten a slow server either).
 - Re-homing and grants queue up behind the op in flight; a split or merge is
   only decided when nothing is in flight (its rule re-fires if still true).
 

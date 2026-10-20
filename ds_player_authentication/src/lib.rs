@@ -128,19 +128,7 @@ impl SimplePlugin for DsPlayerAuthenticationPlugin {
             .and_then(|v| v.as_str())
             .unwrap_or("info");
        
-        // Set up tracing subscriber with the configured level
-        let filter_level = match log_level {
-            "error" => tracing::Level::ERROR,
-            "warn" => tracing::Level::WARN,
-            "info" => tracing::Level::INFO,
-            "debug" => tracing::Level::DEBUG,
-            "trace" => tracing::Level::TRACE,
-            _ => tracing::Level::INFO,
-        };
-        tracing_subscriber::fmt()
-            .with_max_level(filter_level)
-            .try_init()
-            .ok(); // Ignore errors if already initialized
+        ds_common::logging::init(log_level);
 
         info!("🔧 DsPlayerAuthenticationPlugin: ✅ Initialization complete!");
         Ok(())

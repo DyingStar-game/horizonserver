@@ -148,15 +148,6 @@ impl SimplePlugin for GenericPropsPlugin {
             .and_then(|v| v.as_str())
             .unwrap_or("info");
        
-        // Set up tracing subscriber with the configured level
-        let filter_level = match log_level {
-            "error" => tracing::Level::ERROR,
-            "warn" => tracing::Level::WARN,
-            "info" => tracing::Level::INFO,
-            "debug" => tracing::Level::DEBUG,
-            "trace" => tracing::Level::TRACE,
-            _ => tracing::Level::INFO,
-        };
 
         let defaults = new_player::VillageConfig::default();
         new_player::set_village_config(new_player::VillageConfig {
@@ -167,10 +158,7 @@ impl SimplePlugin for GenericPropsPlugin {
                 .and_then(|v| v.as_integer())
                 .map_or(defaults.free_reserve, |v| v.max(0) as usize),
         });
-        tracing_subscriber::fmt()
-            .with_max_level(filter_level)
-            .try_init()
-            .ok(); // Ignore errors if already initialized
+        ds_common::logging::init(log_level);
 
         let props_path = if fs::metadata("props").is_ok() {
             "props/"

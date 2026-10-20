@@ -15,7 +15,7 @@
 use crate::handlers::initial_objects::{
     handle_activate_objects, handle_dormant_objects, handle_drop_dormant, handle_freeze_object, handle_initial_object, handle_initial_object_paced, handle_world_objects, Pace,
 };
-use crate::mesh::{plan_split_n, MeshRules, Rule};
+use crate::mesh::{plan_split_n, MeshRules};
 use crate::server::{Server, ServerState};
 
 use ds_common::events::GenericPropsRequest;
@@ -789,7 +789,7 @@ impl ServerManager {
             let children = self.split_children(&server);
             match children.is_empty() {
                 false => self.queue.push_back(MeshOp::Split { parent: server, children }),
-                true => warn!("[mesh] {} is overloaded (rule {:?}) but no idle server is available in the pool", server.server_name, rules.split),
+                true => warn!("[mesh] {} is overloaded (rule {}) but no idle server is available in the pool", server.server_name, rules.split),
             }
             return;
         }
@@ -1373,9 +1373,10 @@ impl MeshWorker {
             error!("[mesh] {} has no zones to split", parent.server_name);
             return result;
         };
-        // Over the players rule with nobody in its zones to give away: the count
-        // still describes players it already handed over. Nothing to gain here.
-        if plan.give_players() == 0 && matches!(self.rules.as_ref().map(|r| r.split), Some(Rule::Players(_))) {
+        // Nobody in its zones to give away: over the players rule, the count still
+        // describes players it already handed over; under the tps rule, moving only
+        // empty zones would not lighten it. Nothing to gain here.
+        if plan.give_players() == 0 && self.rules.as_ref().is_some_and(|r| r.split.players.is_some()) {
             warn!(
                 "[mesh] split of {} skipped: its zones [{}] hold no player to give away (count not settled yet?)",
                 parent.server_name, zones_label(&parent_zones)

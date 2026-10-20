@@ -515,7 +515,12 @@ impl ServerManager {
                 }
                 ManagerMessage::ServerOffline(uuid) => self.on_server_offline(uuid, &context),
                 ManagerMessage::ServerReconnected { uuid, zones } => self.on_server_reconnected(uuid, zones, &context),
-                ManagerMessage::OpDone(result) => self.on_op_done(result),
+                ManagerMessage::OpDone(result) => {
+                    self.on_op_done(result);
+                    // Its servers are no longer busy: the queued arrivals may go now, not
+                    // at the next periodic publication.
+                    self.publish_load(&context);
+                }
             }
         }
         warn!("[mesh] ServerManager channel closed, stopping");
@@ -754,12 +759,17 @@ impl ServerManager {
         // Godot's count lags (stuck at 68 while 91 players were assigned to it,
         // 2026-10-02): judge the split on the larger of the two counts.
         let players = info.players_number.max(server.players_count().min(u16::MAX as usize) as u16);
-        samples.loading = false;
-
-        let Some(rules) = self.rules.clone() else { return };
+        let was_loading = std::mem::replace(&mut samples.loading, false);
         // While zones move around, every count describes a layout that is about
         // to change: no decision on it, and no run-up of hits either.
         let settling = samples.settle_until.map_or(false, |until| now < until);
+        if was_loading {
+            // Done loading the zones it was handed (end of a split / merge): it may take
+            // the queued arrivals again, tell genericprops now.
+            self.publish_load(context);
+        }
+
+        let Some(rules) = self.rules.clone() else { return };
         if settling || self.busy_servers().contains(&info.uuid) {
             if let Some(samples) = self.samples.get_mut(&info.uuid) {
                 samples.split_hits = 0;
@@ -824,6 +834,10 @@ impl ServerManager {
     /// Sends the load of the running servers to genericprops, which places the new
     /// players in the villages of the least loaded server that can take them.
     fn publish_load(&self, context: &Arc<dyn ServerContext>) {
+        // A server in a split / merge is about to lose or gain zones, and a child warming
+        // up reports a serverinfo (so "accepting") long before its players are moved: the
+        // arrivals wait for the op, in genericprops' queue.
+        let busy = self.busy_servers();
         let servers: Vec<ServerLoad> = self
             .running_servers()
             .into_iter()
@@ -847,7 +861,8 @@ impl ServerManager {
                     uuid: s.uuid.clone(),
                     name: s.server_name.clone(),
                     players: players as u32,
-                    accepting: responsive && !loading && !overloaded,
+                    accepting: responsive && !loading && !overloaded && !busy.contains(&s.uuid),
+                    tps: samples.map_or(0, |x| x.tps),
                     loading,
                     responsive,
                     zones: s.zones(),

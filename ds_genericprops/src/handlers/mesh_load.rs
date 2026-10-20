@@ -57,6 +57,13 @@ pub struct LoadView {
 }
 
 impl LoadView {
+    /// Take no new player on this server in this view (it had its share of arrivals for now).
+    pub fn refuse(&mut self, server_uuid: &str) {
+        if let Some(server) = self.load.servers.iter_mut().find(|s| s.uuid == server_uuid) {
+            server.accepting = false;
+        }
+    }
+
     pub fn owner_of(&self, world: &ObjectWorld) -> Option<&ServerLoad> {
         self.load.owner_of(world)
     }

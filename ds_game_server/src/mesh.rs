@@ -68,15 +68,19 @@ pub struct MeshRules {
     /// rule; set it above that threshold so a server is split before it fills up
     /// while the new players keep arriving on it.
     pub placement_capacity: Option<u32>,
+    /// Under this tps a server takes no new player (`placement_min_tps`): the arrivals
+    /// wait in genericprops' queue until it recovers or is split.
+    pub placement_min_tps: u8,
 }
 
 impl MeshRules {
     /// True when the placement must stop sending new players to this server.
     pub fn placement_full(&self, tps: u8, players: u16) -> bool {
-        match self.placement_capacity {
+        let full = match self.placement_capacity {
             Some(n) => players as u32 > n || matches!(self.split, Rule::Tps(_)) && self.split.split_hit(tps, players),
             None => self.split.split_hit(tps, players),
-        }
+        };
+        full || tps < self.placement_min_tps
     }
 }
 
@@ -101,6 +105,16 @@ impl MeshRules {
                 Rule::Players(n) => Some(n as u32),
                 Rule::Tps(_) => None,
             });
+        if let (Rule::Players(n), Some(capacity)) = (split, placement_capacity) {
+            if capacity <= n as u32 {
+                // The server stops taking players before it is over the rule: never split,
+                // its queued arrivals wait for genericprops' queue_max_secs.
+                warn!(
+                    "[mesh] placement_capacity {} is not above the split rule players:{}: a full server is never split",
+                    capacity, n
+                );
+            }
+        }
         MeshRules {
             split,
             merge: rule("merge_rule", "players:10"),
@@ -111,6 +125,11 @@ impl MeshRules {
             warmup_max: Duration::from_secs(int("split_warmup_max_secs", 30) as u64),
             ready_tps: int("split_ready_tps", 58).clamp(1, 255) as u8,
             placement_capacity,
+            placement_min_tps: config
+                .get_value("placement_min_tps")
+                .and_then(|v| v.as_integer())
+                .unwrap_or(45)
+                .clamp(0, 255) as u8,
         }
     }
 }
@@ -478,6 +497,7 @@ mod tests {
             warmup_max: Duration::from_secs(30),
             ready_tps: 58,
             placement_capacity: Some(75),
+            placement_min_tps: 0,
         };
         assert!(!rules.placement_full(60, 75) && rules.placement_full(60, 76));
         rules.placement_capacity = None;
@@ -485,6 +505,25 @@ mod tests {
         rules.split = Rule::Tps(20);
         rules.placement_capacity = Some(75);
         assert!(rules.placement_full(10, 3) && !rules.placement_full(30, 3));
+    }
+
+    #[test]
+    fn a_server_under_the_placement_min_tps_is_full() {
+        let rules = MeshRules {
+            split: Rule::Players(60),
+            merge: Rule::Players(25),
+            split_after: 10,
+            merge_after: 15,
+            snapshot_timeout: Duration::from_secs(5),
+            warmup: Duration::from_secs(5),
+            warmup_max: Duration::from_secs(30),
+            ready_tps: 58,
+            placement_capacity: Some(75),
+            placement_min_tps: 45,
+        };
+        // Far under the capacity, but too slow to take more players.
+        assert!(rules.placement_full(44, 10));
+        assert!(!rules.placement_full(45, 10));
     }
 
     #[test]

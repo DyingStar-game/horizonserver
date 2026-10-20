@@ -157,7 +157,25 @@ impl SimplePlugin for GenericPropsPlugin {
             free_reserve: config.get_value("village_free_reserve")
                 .and_then(|v| v.as_integer())
                 .map_or(defaults.free_reserve, |v| v.max(0) as usize),
+            queue_max: config.get_value("queue_max_secs")
+                .and_then(|v| v.as_integer())
+                .map_or(defaults.queue_max, |v| std::time::Duration::from_secs(v.max(0) as u64)),
+            admit_per_server: config.get_value("queue_admit_per_server")
+                .and_then(|v| v.as_integer())
+                .map_or(defaults.admit_per_server, |v| v.max(0) as usize),
         });
+        let player_save_interval = std::time::Duration::from_secs(
+            config.get_value("player_save_interval_secs")
+                .and_then(|v| v.as_integer())
+                .unwrap_or(60)
+                .max(0) as u64,
+        );
+        player_state::start_periodic(
+            context.events(),
+            Arc::clone(&self.props),
+            Arc::clone(&self.live_players),
+            player_save_interval,
+        );
         ds_common::logging::init(log_level);
 
         let props_path = if fs::metadata("props").is_ok() {
@@ -293,6 +311,15 @@ impl GenericPropsPlugin {
         
         events.on_plugin("genericprops", "create_object", move |event: serde_json::Value| {
             debug!("plugin genericprops (create): Receive object message {:?}", event);
+            // A player is created once the placement thread let it through (new players, and
+            // the ones persistence sends back from an earlier session): the others wait there
+            // for their apartment and for the server owning it to take players.
+            if event["object_type"].as_str() == Some("player")
+                && !new_player::take_admitted(event["object_uuid"].as_str().unwrap_or_default())
+            {
+                new_player::enqueue_returning(&event);
+                return Ok(());
+            }
             if let Err(e) = create::handle_object_create(
                                 definitions2.clone(),
                                 props2.clone(),
@@ -543,6 +570,9 @@ impl GenericPropsPlugin {
                     return Ok(()); // Not a fatal error, just log and continue
                 };
 
+                // Where it was, for persistence, before its instance is gone.
+                player_state::save(&events_core, &gorc_instances, &event.player_id.to_string(), gorc_id).await;
+
                 gorc_instances.remove_player(event.player_id).await;
                 gorc_instances.unregister_object(gorc_id).await;
                 children::forget(&event.player_id.to_string());
@@ -747,7 +777,10 @@ impl GenericPropsPlugin {
         // Load of the Godot servers, from ds_game_server every 5 s: where new players go.
         events.on_plugin("genericprops", "servers_load", move |event: serde_json::Value| {
             match serde_json::from_value::<ds_common::mesh_load::PoolLoad>(event) {
-                Ok(load) => handlers::mesh_load::set(load),
+                Ok(load) => {
+                    handlers::mesh_load::set(load);
+                    new_player::load_updated();
+                }
                 Err(e) => warn!("plugin genericprops (servers_load): unreadable load: {}", e),
             }
             Ok(())

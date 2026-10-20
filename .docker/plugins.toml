@@ -28,31 +28,48 @@ servers_mode = "development"
 # of its players, that zone is cut in two and each half goes to its own idle
 # server; a server left with a single zone gets that zone cut in two and keeps one
 # half. Sibling servers are merged back when the load drops.
-#
-# split_rule:
+
+# When a server is split (default "tps:20"):
 #  * "tps:20"     => split when the achieved physics ticks/s stay under 20
 #  * "players:50" => split when more than 50 players are connected on a server
-# merge_rule (mirror of split_rule, on the two sibling servers of a split):
+split_rule = "players:80"
+# Players the placement of new players gives a server at most (default: the
+# threshold of a players: split_rule, none with a tps: split_rule); past it the
+# arrivals go to another server, or wait in genericprops' queue. Above split_rule,
+# so the split of a busy server starts while the arrivals still have room on it:
+# equal to it, the server never goes over the rule and is never split.
+placement_capacity = 95
+# When the two sibling servers of a split are merged back, mirror of split_rule
+# (default "players:10"):
 #  * "players:10" => merge when the sum of their players is under 10
 #  * "tps:50"     => merge when both run above 50 ticks/s
-# A rule must hold for N consecutive 1 s samples before acting.
-split_rule = "players:60"
-# Players the placement of new players gives a server at most (default: the
-# threshold of a players: split_rule). Above split_rule, so the split of a busy
-# server starts while the arrivals still have room on it.
-placement_capacity = 75
 merge_rule = "players:25"
+# Seconds split_rule must hold without interruption before the split starts
+# (default 10). Counted in time, not in serverinfo reports: an overloaded Godot
+# reports late, its late sample counts for the whole gap.
 split_after_samples = 10
+# Seconds merge_rule must hold without interruption before the merge starts
+# (default 30). Longer than split_after_samples so a passing dip in the load does
+# not merge servers that would be split again right after.
 merge_after_samples = 15
-# Seconds to wait for the genericprops objects snapshot used to plan a split/merge.
+# Seconds to wait for the genericprops objects snapshot used to plan a split/merge
+# (default 5).
 snapshot_timeout_secs = 5
 # Hand-over of players to a server (split, merge, re-homing): the props are sent
-# first, then Horizon waits at least split_warmup_secs and until the server reports
-# a serverinfo with tps >= split_ready_tps and no terrain chunk left to load
-# (at most split_warmup_max_secs), and only then moves the players.
+# first, then Horizon waits for the server to be ready, and only then moves the
+# players.
+# Minimum wait, in seconds, after the props were sent (default 5).
 split_warmup_secs = 5
+# Maximum wait, in seconds, when the server never reports itself ready: the
+# players are moved anyway (default 30).
 split_warmup_max_secs = 30
+# The server is ready once a serverinfo reports at least this tps with no terrain
+# chunk left to load (default 58).
 split_ready_tps = 58
+# Physics ticks/s under which a server takes no new player (default 45): the
+# arrivals wait in the queue of genericprops (queue_max_secs) until it is back above,
+# or until a split gives them a server with room.
+placement_min_tps = 50
 
 [ds_genericprops]
 log_level = "info"
@@ -62,6 +79,19 @@ log_level = "info"
 # plugins.toml).
 max_players_per_village = 50
 village_free_reserve = 100
+# A player (new, or back from an earlier session) whose village is on a server
+# taking no new player (over placement_capacity, under placement_min_tps, in a split
+# or merge) waits in a queue, told so by a "queued" message, until that server takes
+# players again. Past queue_max_secs it is spawned there anyway (default 120, 0 = no
+# queue). A returning player always spawns in its own apartment.
+queue_max_secs = 120
+# Players a server is given at most every 2 s, from the queue or not (default 10,
+# 0 = no limit): letting 49 queued players in at once took a server from 61 to 14 tps.
+# The rest wait their turn, past queue_max_secs too.
+queue_admit_per_server = 10
+# Seconds between two saves of every connected player's position / rotation / parent
+# to persistence (default 60, 0 = on disconnect only). Saved on disconnect anyway.
+player_save_interval_secs = 60
 
 [ds_player_authentication]
 log_level = "info"
@@ -110,6 +140,9 @@ subscribe = [
     "plugin:genericprops:delete_object",
     "plugin:bridge_persistence:get_all_items",
     "plugin:bridge_persistence:player_spawn",
+    # Position / rotation / parent of the players (on disconnect, and every
+    # player_save_interval_secs), merged by persistence like an update_object.
+    "plugin:bridge_persistence:update_object",
 ]
 
 # ── Monitoring service ── forwards events used for Prometheus metrics

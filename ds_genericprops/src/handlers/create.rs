@@ -218,11 +218,23 @@ pub fn handle_object_create(
 				// the Godot server create the player a second time from a payload without
 				// `_global_position`, which drops the first instance
 				// ("Player reconnecting, removing stale instance").
-				if spawn_in_gameserver && req_data.object_type != "player" {
+				// A prop a Godot server created (a village's habs) lives on the server owning
+				// its own position, which may not be its creator: sent on to every server but
+				// the creator, ds_game_server keeps the one whose zones hold it. Without it,
+				// players given an apartment in a hab across a zone border landed on a server
+				// without the hab ("parent_id not found", preprod 2026-10-20).
+				let source_server = event_clone["_source_server"].as_str().map(str::to_string);
+				if (spawn_in_gameserver || source_server.is_some()) && req_data.object_type != "player" {
 					// Send to ds_game_server to spawn in game world. A copy carries the
 					// object's world + global position (Horizon-internal keys, stripped
 					// before the Godot wire); the persisted event stays untouched.
 					let mut spawn_event = event_clone.clone();
+					if let Some(fields) = spawn_event.as_object_mut() {
+						fields.remove("_source_server");
+						if let (false, Some(source)) = (spawn_in_gameserver, &source_server) {
+							fields.insert("_except_server".to_string(), serde_json::Value::String(source.clone()));
+						}
+					}
 					let object_world = world::resolve_world(&gorc_instances, position, parent_id.clone()).await;
 					world::inject_global_position(&mut spawn_event["object_data"], global_position);
 					world::inject_world(&mut spawn_event["object_data"], &object_world);

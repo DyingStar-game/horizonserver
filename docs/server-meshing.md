@@ -182,6 +182,16 @@ the least loaded server let its villages go over, by steps of 10, as long as the
 buildings have room: the server itself bounds them, refusing players at its placement
 capacity until a split gives the village more servers.
 
+A village's habs are spawned by the Godot server owning the village's centre, but each
+hab has its own coordinates: a zone border can run through a village. A prop a Godot
+server creates is therefore sent on to the server owning its own position
+(`_source_server` on `create_object_from_gameserver`, `_except_server` on `spawn_object`),
+and a new player is admitted, throttled and capped on the server owning **its hab**, the
+one it lands on: a village across a border counts as one entry per server, with the habs
+of that server and the whole village's occupancy. Admitted on the centre's server, 119
+players were sent to a server that never had their hab ("parent_id not found",
+preprod 2026-10-20).
+
 ## Configuration (`plugins.toml`, `[ds_game_server]`)
 
 ```toml

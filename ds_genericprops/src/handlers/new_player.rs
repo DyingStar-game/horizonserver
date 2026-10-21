@@ -70,7 +70,18 @@ struct VillageState {
     occupancy: usize,
     /// Physical free apartments left in its buildings.
     free: usize,
-    buildings: Vec<GorcObjectId>,
+    buildings: Vec<Building>,
+}
+
+/// A spawnbuilding (hab) of a village.
+#[derive(Debug, Clone)]
+struct Building {
+    gorc_id: GorcObjectId,
+    /// Its own planet-local position: a village's habs each have their own coordinates, so
+    /// a zone border can leave some of them on another server than the village's centre.
+    world: Option<ObjectWorld>,
+    /// Free apartments left in it.
+    free: usize,
 }
 
 impl VillageState {
@@ -533,21 +544,30 @@ async fn collect_villages(gorc_instances: &Arc<GorcInstanceManager>) -> Vec<Vill
                 instance.get_object::<GenericProps>().map(|b| {
                     let poi_uuid = prop_value(b, "poi_uuid").and_then(|p| p.as_str()).unwrap_or_default().to_string();
                     let occupancy = prop_value(b, "apartments").and_then(|a| a.as_array()).map_or(0, |a| a.len());
-                    (poi_uuid, occupancy, prop_i64(b, "available", 0).max(0) as usize)
+                    (poi_uuid, b.uuid.clone(), occupancy, prop_i64(b, "available", 0).max(0) as usize, read_own_local_and_parent(b))
                 })
             })
             .await
             .flatten();
-        let Some((poi_uuid, occupancy, available)) = building else { continue };
-        match index.get(&poi_uuid) {
-            Some(&i) => {
-                let village = &mut villages[i];
-                village.occupancy += occupancy;
-                village.free += available;
-                village.buildings.push(gorc_id);
+        let Some((poi_uuid, uuid, occupancy, available, (own_local, parent_id))) = building else { continue };
+        let Some(&i) = index.get(&poi_uuid) else {
+            orphans += 1;
+            continue;
+        };
+        // Habs never move either: their world is resolved once.
+        let cached = village_worlds().lock().await.get(&uuid).cloned();
+        let world = match cached {
+            Some(world) => world,
+            None => {
+                let world = resolve_world(gorc_instances, own_local, parent_id).await;
+                village_worlds().lock().await.insert(uuid, world.clone());
+                world
             }
-            None => orphans += 1,
-        }
+        };
+        let village = &mut villages[i];
+        village.occupancy += occupancy;
+        village.free += available;
+        village.buildings.push(Building { gorc_id, world: Some(world), free: available });
     }
     if orphans > 0 {
         warn!("plugin genericprops (new_player): {} spawnbuilding(s) not linked to a known poi_village (poi_uuid), never used for new players", orphans);
@@ -555,6 +575,42 @@ async fn collect_villages(gorc_instances: &Arc<GorcInstanceManager>) -> Vec<Vill
     villages
 }
 
+/// One entry per server holding some of a village's habs, with those habs, their free
+/// apartments and a world in that server's zones: a new player lands on the server owning
+/// its apartment, so that server is the one to admit, throttle and cap it. Admitted on the
+/// server owning the village's centre, 119 players were sent to a server that never had their
+/// hab, its village raised to 120 while that server held 163 players (preprod, 2026-10-20).
+/// The occupancy stays the whole village's: the cap is about players in one place.
+fn by_hab_owner(villages: Vec<VillageState>, load: Option<&LoadView>) -> Vec<VillageState> {
+    let Some(load) = load else { return villages };
+    let mut parts = Vec::with_capacity(villages.len());
+    for village in villages {
+        if village.buildings.is_empty() {
+            parts.push(village);
+            continue;
+        }
+        let mut by_owner: Vec<(Option<String>, Vec<Building>)> = Vec::new();
+        for building in &village.buildings {
+            let owner = building.world.as_ref().or(village.world.as_ref())
+                .and_then(|w| load.owner_of(w))
+                .map(|s| s.uuid.clone());
+            match by_owner.iter_mut().find(|(o, _)| *o == owner) {
+                Some((_, buildings)) => buildings.push(building.clone()),
+                None => by_owner.push((owner, vec![building.clone()])),
+            }
+        }
+        for (_, buildings) in by_owner {
+            let mut part = village.clone();
+            part.world = buildings.iter().find_map(|b| b.world.clone()).or_else(|| village.world.clone());
+            part.free = buildings.iter().map(|b| b.free).sum();
+            part.buildings = buildings;
+            parts.push(part);
+        }
+    }
+    parts
+}
+
+/// Worlds of the villages and of their habs, by uuid.
 fn village_worlds() -> &'static Mutex<HashMap<String, ObjectWorld>> {
     static WORLDS: OnceLock<Mutex<HashMap<String, ObjectWorld>>> = OnceLock::new();
     WORLDS.get_or_init(|| Mutex::new(HashMap::new()))
@@ -1126,7 +1182,7 @@ async fn place_waiting(
     }
 
     let max = village_config().max_players_per_village;
-    let mut villages = if homeless.is_empty() { Vec::new() } else { collect_villages(&gorc_instances).await };
+    let mut villages = if homeless.is_empty() { Vec::new() } else { by_hab_owner(collect_villages(&gorc_instances).await, load.as_ref()) };
     let mut last_village: Option<usize> = None;
     let mut placed: Vec<(Arrival, Vec3, String)> = Vec::new();
     let mut unplaced: VecDeque<Arrival> = VecDeque::new();
@@ -1135,8 +1191,9 @@ async fn place_waiting(
             info!("plugin genericprops (new_player): player {} left before getting an apartment", arrival.player_uuid);
             continue;
         }
+        // By identity: a village across a zone border has one entry per server (by_hab_owner).
         let selected = select_village(&villages, &AssignRequest::default(), max, load.as_ref())
-            .and_then(|chosen| villages.iter().position(|v| v.uuid == chosen.uuid));
+            .and_then(|chosen| villages.iter().position(|v| std::ptr::eq(v, chosen)));
         let Some(index) = selected else {
             // No room under the caps anywhere: none for the next ones either.
             unplaced.push_back(arrival);
@@ -1161,7 +1218,8 @@ async fn place_waiting(
         let cap = village_cap(&villages, &villages[index], max, load.as_ref());
         note_cap(&villages[index], cap, max, load.as_ref());
         let mut home = None;
-        for gorc_id in villages[index].buildings.clone() {
+        let buildings: Vec<GorcObjectId> = villages[index].buildings.iter().map(|b| b.gorc_id).collect();
+        for gorc_id in buildings {
             match try_assign_in_building(&gorc_instances, events, gorc_id, &arrival.player_uuid, &arrival.player_name).await {
                 Ok(Some(found)) => {
                     home = Some(found);
@@ -1171,9 +1229,9 @@ async fn place_waiting(
                 Err(e) => error!("plugin genericprops (new_player): apartment in building {} for player {}: {}", gorc_id, arrival.player_uuid, e),
             }
         }
-        let village = &mut villages[index];
         match home {
             Some((position, uuid)) => {
+                let village = &villages[index];
                 info!(
                     "plugin genericprops (new_player): player {} gets an apartment in village {} ({}/{} players) on {}",
                     arrival.player_uuid, village.name, village.occupancy + 1, cap, owner_label(village, load.as_ref())
@@ -1184,14 +1242,18 @@ async fn place_waiting(
                     // The next player of this pass sees it, as the next waiter used to.
                     load = throttle.view();
                 }
-                village.occupancy += 1;
+                let village_uuid = village.uuid.clone();
+                for part in villages.iter_mut().filter(|v| v.uuid == village_uuid) {
+                    part.occupancy += 1;
+                }
+                let village = &mut villages[index];
                 village.free = village.free.saturating_sub(1);
                 last_village = Some(index);
                 placed.push((arrival, position, uuid));
             }
             None => {
                 // Its buildings are full after all: `free` came from a stale `available`.
-                village.free = 0;
+                villages[index].free = 0;
                 homeless.push_front(arrival);
             }
         }
@@ -1406,7 +1468,7 @@ mod tests {
             spawn_requested: false,
             occupancy,
             free,
-            buildings: if free > 0 || occupancy > 0 { vec![GorcObjectId::new()] } else { Vec::new() },
+            buildings: if free > 0 || occupancy > 0 { vec![Building { gorc_id: GorcObjectId::new(), world: None, free }] } else { Vec::new() },
         }
     }
 
@@ -1574,6 +1636,29 @@ mod tests {
         // East has fewer players but is at the split rule (75): west takes them.
         let load = mesh_load::view_of(sandbox_load(74, true, 75));
         assert_eq!(select_village(&villages, &AssignRequest::default(), 50, Some(&load)).unwrap().name, "mining_village_01");
+    }
+
+    fn hab_at(x: f64, free: usize) -> Building {
+        let world = on_sandbox(village("hab", 0, 0, x)).world;
+        Building { gorc_id: GorcObjectId::new(), world, free }
+    }
+
+    #[test]
+    fn a_village_across_a_zone_border_counts_on_the_server_of_each_hab() {
+        // Centre in west (x = 90), one hab on each side of the border at x = 100.
+        let mut across = on_sandbox(village("mining_village_01", 30, 0, 90.0));
+        across.buildings = vec![hab_at(95.0, 0), hab_at(105.0, 20)];
+        across.free = 20;
+        let load = mesh_load::view_of(sandbox_load(60, false, 10));
+        let parts = by_hab_owner(vec![across.clone()], Some(&load));
+        assert_eq!(parts.len(), 2);
+        let east = parts.iter().find(|p| load.owner_of(p.world.as_ref().unwrap()).unwrap().name == "east").unwrap();
+        assert_eq!((east.free, east.occupancy, east.buildings.len()), (20, 30, 1), "its own room, the whole village's occupancy");
+        // West refuses, but the free apartments are in east: the player is placed there.
+        let chosen = select_village(&parts, &AssignRequest::default(), 50, Some(&load)).unwrap();
+        assert!(std::ptr::eq(chosen, east));
+        // Without the load nothing is cut.
+        assert_eq!(by_hab_owner(vec![across], None).len(), 1);
     }
 
     #[test]

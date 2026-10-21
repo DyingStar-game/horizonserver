@@ -274,9 +274,10 @@ fn room_can_come(villages: &[VillageState], max: usize, load: Option<&LoadView>)
         || load.is_some_and(LoadView::split_coming)
 }
 
-/// A waiting player is let into a village over `max_players_per_village` after this long
-/// even when room can still come: habs late or a split slow, it would otherwise reach
-/// HABS_WAIT and be disconnected.
+/// A player waiting for village habs is let into a village over `max_players_per_village`
+/// after this long even when room can still come: it would otherwise reach HABS_WAIT and be
+/// disconnected. Only the habs wait counts: players queued 55 s for a full server, then
+/// split, were sent over the cap the moment they got out (preprod, 2026-10-21).
 const OVERFLOW_AFTER: Duration = Duration::from_secs(30);
 
 /// Without `overflow`, `base` for every server.
@@ -923,6 +924,9 @@ struct Arrival {
     notified_place: Option<usize>,
     /// Since when no server can give it a place (see FULL_GRACE).
     full_since: Option<Instant>,
+    /// Since when it waits for village habs (see HABS_WAIT, OVERFLOW_AFTER): the time it
+    /// was queued for a full server before does not count.
+    habs_since: Option<Instant>,
 }
 
 impl Arrival {
@@ -940,6 +944,7 @@ impl Arrival {
             notified_at: None,
             notified_place: None,
             full_since: None,
+            habs_since: None,
         }
     }
 
@@ -948,7 +953,16 @@ impl Arrival {
         if self.wait != Some(wait) && wait == Wait::ServerFull {
             info!("plugin genericprops (new_player): player {} queued: {}", self.player_uuid, why());
         }
+        match wait {
+            Wait::Habs => { self.habs_since.get_or_insert_with(Instant::now); }
+            Wait::ServerFull => self.habs_since = None,
+        }
         self.wait = Some(wait);
+    }
+
+    /// How long it has been waiting for village habs.
+    fn habs_waited(&self) -> Duration {
+        self.habs_since.map_or(Duration::ZERO, |at| at.elapsed())
     }
 
     /// Whether no server could give it a place (`full` now) for FULL_GRACE in a row.
@@ -1276,7 +1290,7 @@ async fn place_waiting(
             info!("plugin genericprops (new_player): player {} left before getting an apartment", arrival.player_uuid);
             continue;
         }
-        let overflow = !room_coming || arrival.since.elapsed() >= OVERFLOW_AFTER;
+        let overflow = !room_coming || arrival.habs_waited() >= OVERFLOW_AFTER;
         // By identity: a village across a zone border has one entry per server (by_hab_owner).
         let selected = select_village(&villages, &AssignRequest::default(), max, load.as_ref(), overflow)
             .and_then(|chosen| villages.iter().position(|v| std::ptr::eq(v, chosen)));
@@ -1369,7 +1383,7 @@ async fn place_waiting(
                 // or every apartment taken for less than FULL_GRACE: wait, never at the origin.
                 arrival.queue(Wait::ServerFull, || "no village has an apartment it can be given now".to_string());
                 waiting.push_back(arrival);
-            } else if arrival.since.elapsed() >= HABS_WAIT {
+            } else if arrival.habs_waited() >= HABS_WAIT {
                 warn!(
                     "plugin genericprops (new_player): the village habs did not arrive within {:?}, player {} disconnected (server not ready)",
                     HABS_WAIT, arrival.player_uuid

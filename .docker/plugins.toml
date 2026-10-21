@@ -77,6 +77,13 @@ split_ready_tps = 58
 # gives them a server with room. Keep it at or under the tps: threshold of split_rule:
 # a server in between takes no player and is never split for it (warned at startup).
 placement_min_tps = 45
+# Split a server for its villages (default true): when the villages cannot be
+# spawned fast enough (the servers owning unspawned ones already wait for 2 each),
+# part of such a server's zones and villages goes to an idle server, which spawns
+# them in parallel. The cut shares the villages to spawn, moves at most 25 % of its
+# players, keeps 2 idle servers for the splits for players, and the pair is not
+# merged back for 180 s.
+village_split = true
 
 [ds_genericprops]
 log_level = "info"

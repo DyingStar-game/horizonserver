@@ -257,6 +257,14 @@ placement_min_tps = 45         # under this tps a server takes no new player
      the closest village edge clear of every village that keeps the balance (the
      middle half of the population; half a piece around each cut in pieces); with
      none, it stays: a village cut in two stays correct, its habs follow their zone.
+   **Split for villages** (`village_split`, default on): genericprops sends
+   `gameserver:villages_wanted {server_uuid, villages}` (at most every 10 s per server)
+   when its reserve stays under target only because the servers owning unspawned villages
+   already wait for 2 each. The ServerManager splits that server onto one idle server
+   (keeping 2 idle for the splits for players) with `mesh::plan_village_split`: the
+   villages to spawn are the population of the cut, the child gets the piece with fewer
+   players, and the split is skipped if that piece holds over 25 % of the players. The
+   pair is not merged back for 180 s (`VILLAGE_SPLIT_HOLD`).
    The parent gets `update_zones(keep)`, the child `start(give)`, the child
    receives every object (`initial_object`, frozen when outside its zones), the
    parent freezes what it no longer owns. A `SplitRecord` remembers the pair.

@@ -15,7 +15,7 @@
 use crate::handlers::initial_objects::{
     handle_activate_objects, handle_dormant_objects, handle_drop_dormant, handle_freeze_object, handle_initial_object, handle_initial_object_paced, handle_world_objects, Pace,
 };
-use crate::mesh::{plan_split_n, MeshRules};
+use crate::mesh::{plan_split_n, plan_village_split, MeshRules, VILLAGE_SPLIT_MAX_PLAYERS_SHARE};
 use crate::server::{Server, ServerState};
 
 use ds_common::events::GenericPropsRequest;
@@ -64,6 +64,9 @@ pub enum ManagerMessage {
     ServerReconnected { uuid: String, zones: Vec<Zone> },
     /// The transition in flight finished (well or not).
     OpDone(OpResult),
+    /// genericprops cannot get villages spawned fast enough: `server_uuid` owns these
+    /// unspawned villages (their worlds) but already waits for as many as it may spawn.
+    VillagesWanted { server_uuid: String, villages: Vec<ObjectWorld> },
 }
 
 #[derive(Debug, Default, Clone)]
@@ -90,6 +93,9 @@ struct SplitRecord {
     /// Exact zones of the parent before the split, restored on merge.
     parent_zones_before: Vec<Zone>,
     merge_hits: u32,
+    /// A split for villages: not merged back before then, the child starts with no player
+    /// and its villages take a while to spawn (see VILLAGE_SPLIT_HOLD).
+    hold_until: Option<Instant>,
 }
 
 impl SplitRecord {
@@ -102,7 +108,9 @@ impl SplitRecord {
 enum MeshOp {
     /// `parent` is overloaded: part of its zones go to idle `children` (as many as
     /// `MeshRules::split_children_wanted`: the plan decides how many it actually uses).
-    Split { parent: Server, children: Vec<Server> },
+    /// With `villages` (a split for villages): the cut shares out those unspawned villages
+    /// instead of the players, onto one child (see `mesh::plan_village_split`).
+    Split { parent: Server, children: Vec<Server>, villages: Option<Vec<ObjectWorld>> },
     /// The pair of a split is under the merge rule: the child gives its zones back.
     Merge { record: SplitRecord, survivor: Server, released: Server },
     /// Zones nobody simulates (first start, owner gone) go to `server`.
@@ -116,10 +124,11 @@ enum MeshOp {
 impl MeshOp {
     fn label(&self) -> String {
         match self {
-            MeshOp::Split { parent, children } => format!(
-                "split {} -> {}",
+            MeshOp::Split { parent, children, villages } => format!(
+                "split {} -> {}{}",
                 parent.server_name,
-                children.iter().map(|c| c.server_name.as_str()).collect::<Vec<_>>().join(",")
+                children.iter().map(|c| c.server_name.as_str()).collect::<Vec<_>>().join(","),
+                if villages.is_some() { " (villages)" } else { "" }
             ),
             MeshOp::Merge { survivor, released, .. } => format!("merge {} into {}", released.server_name, survivor.server_name),
             MeshOp::Adopt { server, zones } => format!("adopt [{}] on {}", zones_label(zones), server.server_name),
@@ -132,7 +141,7 @@ impl MeshOp {
     /// are not held to the silence timeout while it runs.
     fn servers(&self) -> Vec<String> {
         match self {
-            MeshOp::Split { parent, children } => std::iter::once(parent).chain(children).map(|s| s.uuid.clone()).collect(),
+            MeshOp::Split { parent, children, .. } => std::iter::once(parent).chain(children).map(|s| s.uuid.clone()).collect(),
             MeshOp::Merge { survivor, released, .. } => vec![survivor.uuid.clone(), released.uuid.clone()],
             MeshOp::Adopt { server, .. } | MeshOp::Grant { server, .. } | MeshOp::Reseed { server } => vec![server.uuid.clone()],
         }
@@ -231,6 +240,11 @@ const ACCEPT_SILENCE: Duration = Duration::from_secs(10);
 const OUTBOX_BACKLOG: usize = 1000;
 /// Port of a Godot server when `GAME_SERVER_HOST` gives only a host.
 const GAME_SERVER_PORT: u16 = 8980;
+/// A pair split for villages is not merged back before this: the child starts with no
+/// player and the merge rule (players:25) would undo it before its villages are spawned.
+const VILLAGE_SPLIT_HOLD: Duration = Duration::from_secs(180);
+/// Idle servers a split for villages leaves to the splits for players.
+const VILLAGE_SPLIT_SPARE_IDLE: usize = 2;
 
 /// The pool read from DNS: `host` resolves to every Godot server (on kubernetes, a
 /// headless service answers with the IP of each ready pod). It is resolved again
@@ -518,6 +532,7 @@ impl ServerManager {
                 }
                 ManagerMessage::ServerOffline(uuid) => self.on_server_offline(uuid, &context),
                 ManagerMessage::ServerReconnected { uuid, zones } => self.on_server_reconnected(uuid, zones, &context),
+                ManagerMessage::VillagesWanted { server_uuid, villages } => self.on_villages_wanted(server_uuid, villages),
                 ManagerMessage::OpDone(result) => {
                     self.on_op_done(result);
                     // Its servers are no longer busy: the queued arrivals may go now, not
@@ -546,6 +561,21 @@ impl ServerManager {
         }).await;
         if let Err(e) = result {
             error!("[mesh] failed to register props:planet handler: {}", e);
+        }
+
+        let tx = self.tx.clone();
+        let result = events.on_plugin("gameserver", "villages_wanted", move |event: serde_json::Value| {
+            let server_uuid = event["server_uuid"].as_str().unwrap_or_default().to_string();
+            let villages: Vec<ObjectWorld> = serde_json::from_value(event["villages"].clone()).unwrap_or_default();
+            if server_uuid.is_empty() || villages.is_empty() {
+                return Ok(());
+            }
+            // Dropped when the loop is busy: genericprops asks again 10 s later.
+            let _ = tx.try_send(ManagerMessage::VillagesWanted { server_uuid, villages });
+            Ok(())
+        }).await;
+        if let Err(e) = result {
+            error!("[mesh] failed to register gameserver:villages_wanted handler: {}", e);
         }
 
         let pending = Arc::clone(&self.pending_snapshots);
@@ -721,6 +751,29 @@ impl ServerManager {
 
     // ----------------------------------------------------------- messages
 
+    /// genericprops cannot get villages spawned fast enough (VillagesWanted): split
+    /// `server_uuid` for its villages onto an idle server when it is free to, leaving
+    /// VILLAGE_SPLIT_SPARE_IDLE idle servers to the splits for players.
+    fn on_villages_wanted(&mut self, server_uuid: String, villages: Vec<ObjectWorld>) {
+        if !self.rules.as_ref().is_some_and(|r| r.village_split) {
+            return;
+        }
+        let Some(server) = self.server(&server_uuid).filter(|s| s.is_running()) else { return };
+        let loading = self.samples.get(&server_uuid).is_some_and(|s| s.loading);
+        let queued = self.queue.iter().any(|op| op.servers().contains(&server_uuid));
+        if loading || queued || self.settling(&server_uuid) || self.busy_servers().contains(&server_uuid) {
+            return;
+        }
+        let idle = self.idle_servers(&server_uuid, VILLAGE_SPLIT_SPARE_IDLE + 1);
+        if idle.len() <= VILLAGE_SPLIT_SPARE_IDLE {
+            debug!("[mesh] {} wants its {} villages spawned elsewhere but the pool is short", server.server_name, villages.len());
+            return;
+        }
+        info!("[mesh] {} owns {} villages to spawn and waits for its own: splitting it for villages", server.server_name, villages.len());
+        let children = idle.into_iter().take(1).collect();
+        self.queue.push_back(MeshOp::Split { parent: server, children, villages: Some(villages) });
+    }
+
     fn on_planets_discovered(&mut self, planets: Vec<(String, String)>) {
         let new_zones: Vec<Zone> = planets
             .into_iter()
@@ -791,7 +844,7 @@ impl ServerManager {
             samples.split_hits = 0;
             let children = self.split_children(&server, players as u32);
             match children.is_empty() {
-                false => self.queue.push_back(MeshOp::Split { parent: server, children }),
+                false => self.queue.push_back(MeshOp::Split { parent: server, children, villages: None }),
                 true => warn!("[mesh] {} is overloaded (rule {}) but no idle server is available in the pool", server.server_name, rules.split),
             }
             return;
@@ -946,7 +999,7 @@ impl ServerManager {
                             "[mesh] {} sent no serverinfo for {:?}: overloaded, splitting it",
                             server.server_name, OVERLOAD_SILENCE
                         );
-                        self.queue.push_back(MeshOp::Split { parent: server, children });
+                        self.queue.push_back(MeshOp::Split { parent: server, children, villages: None });
                     }
                     true => debug!("[mesh] {} is silent but no idle server is available in the pool", server.server_name),
                 }
@@ -1134,7 +1187,8 @@ impl ServerManager {
                 self.split_history[idx].merge_hits = 0;
                 continue;
             };
-            if !p.is_running() || !c.is_running() || self.settling(&p.uuid) || self.settling(&c.uuid)
+            let held = record.hold_until.is_some_and(|until| Instant::now() < until);
+            if held || !p.is_running() || !c.is_running() || self.settling(&p.uuid) || self.settling(&c.uuid)
                 || busy.contains(&p.uuid) || busy.contains(&c.uuid)
             {
                 self.split_history[idx].merge_hits = 0;
@@ -1309,7 +1363,7 @@ impl MeshWorker {
     async fn run(self, op: MeshOp) -> OpResult {
         let servers = op.servers();
         match op {
-            MeshOp::Split { parent, children } => self.split(&parent, &children, &servers).await,
+            MeshOp::Split { parent, children, villages } => self.split(&parent, &children, &servers, villages).await,
             MeshOp::Merge { record, survivor, released } => self.merge(record, &survivor, &released, &servers).await,
             MeshOp::Adopt { server, zones } => self.adopt_zones(&server, zones, &servers).await,
             MeshOp::Grant { server, gained } => self.grant_zones(&server, &gained, &servers).await,
@@ -1358,7 +1412,7 @@ impl MeshWorker {
 
     // ------------------------------------------------------ split / merge
 
-    async fn split(&self, parent: &Server, children: &[Server], op_servers: &[String]) -> OpResult {
+    async fn split(&self, parent: &Server, children: &[Server], op_servers: &[String], villages: Option<Vec<ObjectWorld>>) -> OpResult {
         let mut result = OpResult::nothing(op_servers);
         let items = match self.request_snapshot().await {
             Ok(items) => items,
@@ -1383,15 +1437,32 @@ impl MeshWorker {
                 habs.entry(village.to_string()).or_default().push(world);
             }
         }
-        let villages: Vec<Vec<ObjectWorld>> = habs.into_values().collect();
-        let Some(plan) = plan_split_n(&parent_zones, &players, children.len(), &villages) else {
-            error!("[mesh] {} has no zones to split", parent.server_name);
-            return result;
+        let spawned: Vec<Vec<ObjectWorld>> = habs.into_values().collect();
+        let for_villages = villages.is_some();
+        let plan = match &villages {
+            // A split for villages: its villages to spawn are shared out, not its players.
+            Some(wanted) => match plan_village_split(&parent_zones, wanted, &players, &spawned) {
+                Some(plan) => plan,
+                None => {
+                    info!(
+                        "[mesh] split of {} for villages skipped: no cut gives a village to spawn without moving over {:.0}% of its players",
+                        parent.server_name, VILLAGE_SPLIT_MAX_PLAYERS_SHARE * 100.0
+                    );
+                    return result;
+                }
+            },
+            None => match plan_split_n(&parent_zones, &players, children.len(), &spawned) {
+                Some(plan) => plan,
+                None => {
+                    error!("[mesh] {} has no zones to split", parent.server_name);
+                    return result;
+                }
+            },
         };
         // Nobody in its zones to give away: over the players rule, the count still
         // describes players it already handed over; under the tps rule, moving only
         // empty zones would not lighten it. Nothing to gain here.
-        if plan.give_players() == 0 && self.rules.as_ref().is_some_and(|r| r.split.players.is_some()) {
+        if !for_villages && plan.give_players() == 0 && self.rules.as_ref().is_some_and(|r| r.split.players.is_some()) {
             warn!(
                 "[mesh] split of {} skipped: its zones [{}] hold no player to give away (count not settled yet?)",
                 parent.server_name, zones_label(&parent_zones)
@@ -1484,6 +1555,7 @@ impl MeshWorker {
                 child_uuid: child.uuid.clone(),
                 parent_zones_before: before.clone(),
                 merge_hits: 0,
+                hold_until: for_villages.then(|| Instant::now() + VILLAGE_SPLIT_HOLD),
             });
             before = plan.keep.iter().cloned().chain(plan.gives[i + 1..].iter().flat_map(|(z, _)| z.clone())).collect();
         }

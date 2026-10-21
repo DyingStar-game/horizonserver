@@ -120,6 +120,11 @@ pub struct MeshRules {
     /// Under this tps a server takes no new player (`placement_min_tps`): the arrivals
     /// wait in genericprops' queue until it recovers or is split.
     pub placement_min_tps: u8,
+    /// Split a server for its villages (`village_split`): when genericprops cannot get
+    /// villages spawned fast enough because the servers owning unspawned ones already
+    /// wait for 2, part of such a server's zones and villages goes to an idle server,
+    /// which spawns them in parallel (see plan_village_split).
+    pub village_split: bool,
 }
 
 /// Most idle servers one split hands zones to.
@@ -198,6 +203,7 @@ impl MeshRules {
             ready_tps: int("split_ready_tps", 58).clamp(1, 255) as u8,
             placement_capacity,
             placement_min_tps,
+            village_split: config.get_value("village_split").and_then(|v| v.as_bool()).unwrap_or(true),
         }
     }
 }
@@ -342,6 +348,36 @@ fn round3(v: f64) -> f64 {
 /// servers at every step. When the crowd has no such gap the median is used
 /// anyway — an overloaded server must be split, ping-pong or not.
 pub const MIN_CUT_GAP: f64 = 20.0;
+
+/// Most of the parent's players a split for villages may move to the child: it is made
+/// to spread the villages to spawn, a hand-over of players costs a freeze and a load.
+pub const VILLAGE_SPLIT_MAX_PLAYERS_SHARE: f64 = 0.25;
+
+/// A split for villages, with one child: `plan_split_n` with the villages to spawn
+/// (`wanted`, their centres) as the population, clear of the `spawned` villages. The
+/// child gets the piece with fewer `players` (the parent keeps the cut zone's identity on
+/// the other); `give_players` counts the players. None when the child would get no village
+/// to spawn, or more than VILLAGE_SPLIT_MAX_PLAYERS_SHARE of the parent's players.
+pub fn plan_village_split(zones: &[Zone], wanted: &[ObjectWorld], players: &[ObjectWorld], spawned: &[Vec<ObjectWorld>]) -> Option<SplitPlanN> {
+    let mut plan = plan_split_n(zones, wanted, 1, spawned)?;
+    if plan.gives.len() != 1 {
+        return None;
+    }
+    let count = |zs: &[Zone], worlds: &[ObjectWorld]| worlds.iter().filter(|w| zs.iter().any(|z| z.contains(w))).count();
+    if count(&plan.gives[0].0, players) > count(&plan.keep, players) && plan.gives[0].0.len() == 1 {
+        let give = &mut plan.gives[0].0[0];
+        if let Some(kept) = plan.keep.iter_mut().find(|z| z.world == give.world && !zones.contains(z)) {
+            std::mem::swap(&mut kept.bounds, &mut give.bounds);
+        }
+    }
+    let moved = count(&plan.gives[0].0, players);
+    if count(&plan.gives[0].0, wanted) == 0 || moved as f64 > VILLAGE_SPLIT_MAX_PLAYERS_SHARE * count(zones, players) as f64 {
+        return None;
+    }
+    plan.keep_players = count(&plan.keep, players);
+    plan.gives[0].1 = moved;
+    Some(plan)
+}
 
 /// Metres a cut keeps from a village's habs: a hab spans ~20 m past its origin and a cut
 /// 3.9 m past one left its occupants on another server (preprod, 2026-10-21); 300 m keeps
@@ -627,6 +663,28 @@ mod tests {
     }
 
     #[test]
+    fn a_split_for_villages_shares_the_villages_to_spawn_not_the_players() {
+        let zones = vec![Zone::planet("p", "x")];
+        let wanted: Vec<ObjectWorld> = [2000.0, 3000.0, 4000.0, 5000.0].iter().map(|&x| on_planet("p", x, 0.0, 0.0)).collect();
+        let spawned = vec![vec![on_planet("p", 0.0, 0.0, 0.0), on_planet("p", 30.0, 0.0, 0.0)]];
+        // The players are in the spawned village, on the left: the child gets the right half.
+        let players: Vec<ObjectWorld> = (0..50).map(|i| on_planet("p", i as f64 * 0.5, 0.0, 0.0)).collect();
+        let plan = plan_village_split(&zones, &wanted, &players, &spawned).unwrap();
+        assert_eq!(plan.keep[0].id, zones[0].id);
+        assert_eq!(plan.keep[0].bounds.as_ref().unwrap().max_x, 3500.0);
+        assert_eq!((plan.keep_players, plan.gives[0].1), (50, 0));
+        // On the right: the halves swap, the child still gets the one without players.
+        let players: Vec<ObjectWorld> = (0..50).map(|i| on_planet("p", 6000.0 + i as f64 * 0.5, 0.0, 0.0)).collect();
+        let plan = plan_village_split(&zones, &wanted, &players, &[]).unwrap();
+        assert_eq!(plan.keep[0].id, zones[0].id, "the parent keeps the zone's identity");
+        assert_eq!(plan.gives[0].0[0].bounds.as_ref().unwrap().max_x, 3500.0);
+        assert_eq!((plan.keep_players, plan.gives[0].1), (50, 0));
+        // Players on both sides: either half moves half of them, over 25 %.
+        let spread: Vec<ObjectWorld> = (0..40).map(|i| on_planet("p", i as f64 * 150.0, 0.0, 0.0)).collect();
+        assert!(plan_village_split(&zones, &wanted, &spread, &[]).is_none());
+    }
+
+    #[test]
     fn a_cut_stays_put_when_no_village_edge_keeps_the_balance() {
         // One single crowded village: no edge within the middle half of its players.
         let players: Vec<ObjectWorld> = (0..40).map(|i| on_planet("p", i as f64, 0.0, 0.0)).collect();
@@ -796,6 +854,7 @@ mod tests {
             ready_tps: 58,
             placement_capacity: Some(95),
             placement_min_tps: 45,
+            village_split: true,
         };
         // one zone: the parent keeps a piece
         assert_eq!(rules.split_children_wanted(1, 81), 1, "just over: halved");
@@ -823,6 +882,7 @@ mod tests {
             ready_tps: 58,
             placement_capacity: Some(75),
             placement_min_tps: 0,
+            village_split: true,
         };
         assert!(!rules.placement_full(60, 75) && rules.placement_full(60, 76));
         rules.placement_capacity = None;
@@ -845,6 +905,7 @@ mod tests {
             ready_tps: 58,
             placement_capacity: Some(75),
             placement_min_tps: 45,
+            village_split: true,
         };
         // Far under the capacity, but too slow to take more players.
         assert!(rules.placement_full(44, 10));

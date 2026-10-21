@@ -577,6 +577,72 @@ fn villages_to_request<'a>(
     chosen
 }
 
+/// The servers held back by MAX_PENDING_VILLAGES_PER_SERVER while the reserve stays under
+/// `target` once `chosen` are requested: each with the unspawned villages it could be asked
+/// for (2 at least), for the ServerManager to give part of them to an idle server
+/// (`gameserver:villages_wanted`). Villages arrived 2 by 2 per server owning some while
+/// 600 players waited 110 s and servers stood idle (preprod, 2026-10-21). Only with the load.
+fn villages_wanted<'a>(
+    villages: &'a [VillageState],
+    chosen: &[&VillageState],
+    max: usize,
+    target: usize,
+    load: Option<&LoadView>,
+) -> Vec<(String, Vec<&'a VillageState>)> {
+    let Some(load) = load else { return Vec::new() };
+    if free_reserve(villages, max, Some(load)) + max * chosen.len() >= target {
+        return Vec::new();
+    }
+    let owner = |v: &VillageState| v.world.as_ref().and_then(|w| load.owner_of(w)).map(|s| s.uuid.clone());
+    let mut pending: HashMap<String, usize> = HashMap::new();
+    for v in villages.iter().filter(|v| v.is_spawn_pending()).chain(chosen.iter().copied()) {
+        if let Some(uuid) = owner(v) {
+            *pending.entry(uuid).or_default() += 1;
+        }
+    }
+    let mut held: Vec<(String, Vec<&VillageState>)> = Vec::new();
+    for v in villages.iter().filter(|v| !v.is_spawn_pending_or_done() && !chosen.iter().any(|c| c.uuid == v.uuid)) {
+        let Some(uuid) = owner(v) else { continue };
+        if pending.get(&uuid).copied().unwrap_or(0) < MAX_PENDING_VILLAGES_PER_SERVER || !load.owner_takes_habs(v.world.as_ref()) {
+            continue;
+        }
+        match held.iter_mut().find(|(u, _)| *u == uuid) {
+            Some((_, list)) => list.push(v),
+            None => held.push((uuid, vec![v])),
+        }
+    }
+    held.retain(|(_, list)| list.len() >= 2);
+    held
+}
+
+/// Ask the ServerManager to split the servers `villages_wanted` returns, at most every
+/// VILLAGES_WANTED_EVERY per server.
+async fn send_villages_wanted(events: &EventSystem, wanted: Vec<(String, Vec<&VillageState>)>) {
+    static LAST: std::sync::Mutex<Option<HashMap<String, Instant>>> = std::sync::Mutex::new(None);
+    for (server_uuid, list) in wanted {
+        {
+            let mut last = LAST.lock().unwrap();
+            let last = last.get_or_insert_with(HashMap::new);
+            if last.get(&server_uuid).is_some_and(|at| at.elapsed() < VILLAGES_WANTED_EVERY) {
+                continue;
+            }
+            last.insert(server_uuid.clone(), Instant::now());
+        }
+        let worlds: Vec<&ObjectWorld> = list.iter().filter_map(|v| v.world.as_ref()).collect();
+        info!(
+            "plugin genericprops (new_player): server {} waits for its villages, {} more to spawn there: asking for a split",
+            server_uuid, worlds.len()
+        );
+        let payload = serde_json::json!({ "server_uuid": server_uuid, "villages": worlds });
+        if let Err(e) = events.emit_plugin("gameserver", "villages_wanted", &payload).await {
+            error!("plugin genericprops (new_player): failed to emit villages_wanted: {}", e);
+        }
+    }
+}
+
+/// How often one server is asked for a split for villages.
+const VILLAGES_WANTED_EVERY: Duration = Duration::from_secs(10);
+
 /// Every poi_village that houses players (see houses_players), with the occupancy of the
 /// spawnbuildings linked to it by `poi_uuid`.
 async fn collect_villages(gorc_instances: &Arc<GorcInstanceManager>) -> Vec<VillageState> {
@@ -718,6 +784,8 @@ async fn request_villages(
     let config = village_config();
     let target = reserve_target(villages, &config, mesh_load::view().as_ref());
     let targets = villages_to_request(villages, reference, config.max_players_per_village, target, config.village_radius, load);
+    let wanted = villages_wanted(villages, &targets, config.max_players_per_village, target, load);
+    send_villages_wanted(events, wanted).await;
     if targets.is_empty() {
         let reserve = free_reserve(villages, config.max_players_per_village, load);
         if reserve < target && reserve_warning_due() {
@@ -1863,6 +1931,35 @@ mod tests {
         let villages = [reference.clone(), near_border, inside];
         let names: Vec<&str> = villages_to_request(&villages, &reference, 50, 50, 200.0, Some(&load)).iter().map(|v| v.name.as_str()).collect();
         assert_eq!(names, ["mining_village_03"], "farther, but its habs all land on west");
+    }
+
+    #[test]
+    fn a_server_held_back_by_its_pending_villages_asks_for_a_split() {
+        let pending = |name: &str, x: f64| {
+            let mut v = on_sandbox(village(name, 0, 0, x));
+            v.spawn_requested = true;
+            v
+        };
+        let unspawned = |name: &str, x: f64| on_sandbox(village(name, 0, 0, x));
+        // West: 2 villages waiting for their habs, 3 more to spawn; east: one full village.
+        let villages = vec![
+            pending("mining_village_01", 0.0),
+            pending("mining_village_02", 10.0),
+            unspawned("mining_village_03", 20.0),
+            unspawned("mining_village_04", 30.0),
+            unspawned("mining_village_05", 40.0),
+            on_sandbox(village("mining_village_09", 50, 0, 200.0)),
+        ];
+        let load = mesh_load::view_of(sandbox_load(0, true, 50));
+        let wanted = villages_wanted(&villages, &[], 50, 750, Some(&load));
+        assert_eq!(wanted.len(), 1);
+        assert_eq!(wanted[0].0, "uuid-west");
+        assert_eq!(wanted[0].1.len(), 3);
+        // The reserve is met (2 villages on their way = 100), nothing to ask.
+        assert!(villages_wanted(&villages, &[], 50, 100, Some(&load)).is_empty());
+        // A single village left to spawn there: not worth a split.
+        assert!(villages_wanted(&villages[..3], &[], 50, 750, Some(&load)).is_empty());
+        assert!(villages_wanted(&villages, &[], 50, 750, None).is_empty());
     }
 
     #[test]

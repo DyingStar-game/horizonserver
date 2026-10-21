@@ -8,6 +8,13 @@ use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+/// A server that takes no new player may still be asked for village habs at this tps or
+/// more: a village spawns in under a second when the server is idle (preprod, 2026-10-21)
+/// but takes longer and costs more on a loaded one, so only a server with headroom, never
+/// in a split or merge. Its villages are then ready when its split for players hands them
+/// over, instead of being released one split at a time while 760 players waited.
+pub const HABS_MIN_TPS: u8 = 55;
+
 /// Older than this, the load is ignored and new players are placed as before.
 const MAX_AGE: Duration = Duration::from_secs(30);
 
@@ -116,10 +123,17 @@ impl LoadView {
     /// The habs went to the most loaded server of the pool (275 players, tps 0-16) once the
     /// accepting ones had no village left to spawn, and its fresh villages drew every arrival
     /// (preprod, 2026-10-16). A place no running server owns may.
+    /// A server refusing players with HABS_MIN_TPS or more, not in a split or merge, may too.
     pub fn owner_takes_habs(&self, world: Option<&ObjectWorld>) -> bool {
         world.and_then(|w| self.owner_of(w)).map_or(true, |s| {
-            s.responsive && !s.loading && (self.accepts(s) || !self.any_accepting())
+            s.responsive && !s.loading
+                && (self.accepts(s) || !self.any_accepting() || (!s.busy && s.tps >= HABS_MIN_TPS))
         })
+    }
+
+    /// The server owning `world` takes new players (a place no running server owns does not).
+    pub fn owner_accepts(&self, world: Option<&ObjectWorld>) -> bool {
+        world.and_then(|w| self.owner_of(w)).is_some_and(|s| self.accepts(s))
     }
 
     /// The server owning `world` answers but takes no new player (full, too slow, in a

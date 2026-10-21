@@ -320,6 +320,8 @@ fn note_cap(village: &VillageState, cap: usize, base: usize, load: Option<&LoadV
 /// 16-20 s per village it spawns, and one frozen server was sent 40+ requests in a row
 /// (minikube, 2026-10-02) which kept it frozen for good.
 const MAX_PENDING_VILLAGES_PER_SERVER: usize = 2;
+/// On a server that takes no new player but has the tps for it (see HABS_MIN_TPS).
+const MAX_PENDING_VILLAGES_ON_REFUSING: usize = 1;
 
 fn in_accepting_zone(village: &VillageState, load: &LoadView) -> bool {
     village.world.as_ref().and_then(|w| load.owner_of(w)).map_or(false, |s| load.accepts(s))
@@ -564,9 +566,15 @@ fn villages_to_request<'a>(
         if reserve >= target {
             break;
         }
-        if load.is_some() {
+        if let Some(load) = load {
+            // One at a time on a server refusing players: a spawn costs more on a loaded one.
+            let limit = if load.owner_accepts(village.world.as_ref()) || !load.any_accepting() {
+                MAX_PENDING_VILLAGES_PER_SERVER
+            } else {
+                MAX_PENDING_VILLAGES_ON_REFUSING
+            };
             let waiting = pending.entry(owner(village)).or_default();
-            if *waiting >= MAX_PENDING_VILLAGES_PER_SERVER {
+            if *waiting >= limit {
                 continue;
             }
             *waiting += 1;
@@ -1770,7 +1778,9 @@ mod tests {
             min_x, max_x, min_y: -Bounds::UNBOUNDED, max_y: Bounds::UNBOUNDED, min_z: -Bounds::UNBOUNDED, max_z: Bounds::UNBOUNDED,
         });
         let server = |name: &str, players, accepting, zone: Zone| ServerLoad {
-            uuid: format!("uuid-{name}"), name: name.into(), players, accepting, tps: 60, loading: false, responsive: true, zones: vec![zone],
+            // A refusing server here is an overloaded one: under HABS_MIN_TPS.
+            uuid: format!("uuid-{name}"), name: name.into(), players, accepting, tps: if accepting { 60 } else { 40 }, loading: false,
+            responsive: true, busy: false, zones: vec![zone],
         };
         PoolLoad {
             servers: vec![
@@ -2013,7 +2023,7 @@ mod tests {
         let mut load = sandbox_load(70, false, 70);
         load.servers[1].accepting = false;
         load.servers.push(ServerLoad {
-            uuid: "uuid-space".into(), name: "space".into(), players: 0, accepting: true, tps: 60, loading: false, responsive: true, zones: vec![Zone::space()],
+            uuid: "uuid-space".into(), name: "space".into(), players: 0, accepting: true, tps: 60, loading: false, responsive: true, busy: false, zones: vec![Zone::space()],
         });
         let load = mesh_load::view_of(load);
         let villages = [on_sandbox(village("mining_village_01", 0, 100, 0.0)), on_sandbox(village("mining_village_02", 0, 0, 10.0))];
@@ -2195,7 +2205,28 @@ mod tests {
         ];
         let load = mesh_load::view_of(sandbox_load(50, true, 230));
         assert_eq!(select_village(&villages, &AssignRequest::default(), 50, Some(&load), true).unwrap().name, "mining_village_01");
-        assert!(villages_to_request(&villages, &villages[0], 50, 100, 0.0, Some(&load)).is_empty());
+        // East is full but at 60 tps: one village at a time may spawn there, ready for the
+        // split that hands it over (see HABS_MIN_TPS).
+        let names: Vec<&str> = villages_to_request(&villages, &villages[0], 50, 1000, 0.0, Some(&load)).iter().map(|v| v.name.as_str()).collect();
+        assert_eq!(names, ["mining_village_10"]);
+        // Under HABS_MIN_TPS, or in a split: no habs at all.
+        let mut slow = sandbox_load(50, true, 230);
+        slow.servers[1].tps = 40;
+        assert!(villages_to_request(&villages, &villages[0], 50, 1000, 0.0, Some(&mesh_load::view_of(slow))).is_empty());
+        let mut busy = sandbox_load(50, true, 230);
+        busy.servers[1].busy = true;
+        assert!(villages_to_request(&villages, &villages[0], 50, 1000, 0.0, Some(&mesh_load::view_of(busy))).is_empty());
+    }
+
+    #[test]
+    fn a_refusing_server_spawns_one_village_at_a_time() {
+        let villages = [
+            on_sandbox(village("mining_village_01", 50, 0, 0.0)),    // west, accepting, full village
+            on_sandbox(village("mining_village_10", 0, 0, 210.0)),   // east, unspawned
+            on_sandbox(village("mining_village_11", 0, 0, 220.0)),   // east, unspawned
+        ];
+        let load = mesh_load::view_of(sandbox_load(50, true, 230));
+        assert_eq!(villages_to_request(&villages, &villages[0], 50, 1000, 0.0, Some(&load)).len(), 1);
     }
 
     #[test]

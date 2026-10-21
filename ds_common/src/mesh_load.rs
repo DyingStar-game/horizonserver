@@ -28,6 +28,9 @@ pub struct ServerLoad {
     /// nor habs requests: its players and its habs arrive only once it comes back.
     #[serde(default = "responsive_by_default")]
     pub responsive: bool,
+    /// In a split or merge: its zones are about to change, no habs are asked of it.
+    #[serde(default)]
+    pub busy: bool,
     pub zones: Vec<Zone>,
 }
 

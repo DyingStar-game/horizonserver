@@ -931,6 +931,7 @@ impl ServerManager {
                     tps: samples.map_or(0, |x| x.tps),
                     loading,
                     responsive,
+                    busy: busy.contains(&s.uuid),
                     zones: s.zones(),
                 }
             })

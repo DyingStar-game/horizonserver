@@ -142,7 +142,10 @@ villages fill up on every server at once, and never less than `prespawn_villages
 villages: the reserve is also kept with nobody arriving (on every `servers_load` and every
 hab registered), so the villages are spawned before the players come. Among the accepting servers, a village whose
 `village_radius` disc lies in one zone is asked for before one across a zone border.
-A village's world is resolved again whenever its own position changes: Godot stands it
+A server refusing players may still be asked for habs when it has the tps for it
+(`HABS_MIN_TPS`, 55) and is in no split or merge (`busy` in `servers_load`), one village at a
+time: a spawn costs more on a loaded server, but its villages are then ready when its split
+for players hands them over. A village's world is resolved again whenever its own position changes: Godot stands it
 on its ground (radially, possibly by kilometres) before spawning its habs. A refusing server still gets players when no accepting one has room, and
 without a fresh load (none yet, or older than 30 s) the placement is the historical
 one: the fullest village under the cap, the next villages requested near the last.

@@ -551,17 +551,8 @@ async fn collect_villages(gorc_instances: &Arc<GorcInstanceManager>) -> Vec<Vill
         }
     }
 
-    // Villages never move: their world is resolved once.
     for (i, own_local, parent_id) in anchors {
-        let cached = village_worlds().lock().await.get(&villages[i].uuid).cloned();
-        let world = match cached {
-            Some(world) => world,
-            None => {
-                let world = resolve_world(gorc_instances, own_local, parent_id).await;
-                village_worlds().lock().await.insert(villages[i].uuid.clone(), world.clone());
-                world
-            }
-        };
+        let world = world_of(gorc_instances, &villages[i].uuid, own_local, parent_id).await;
         villages[i].world = Some(world);
     }
 
@@ -583,16 +574,7 @@ async fn collect_villages(gorc_instances: &Arc<GorcInstanceManager>) -> Vec<Vill
             orphans += 1;
             continue;
         };
-        // Habs never move either: their world is resolved once.
-        let cached = village_worlds().lock().await.get(&uuid).cloned();
-        let world = match cached {
-            Some(world) => world,
-            None => {
-                let world = resolve_world(gorc_instances, own_local, parent_id).await;
-                village_worlds().lock().await.insert(uuid, world.clone());
-                world
-            }
-        };
+        let world = world_of(gorc_instances, &uuid, own_local, parent_id).await;
         let village = &mut villages[i];
         village.occupancy += occupancy;
         village.free += available;
@@ -639,9 +621,24 @@ fn by_hab_owner(villages: Vec<VillageState>, load: Option<&LoadView>) -> Vec<Vil
     parts
 }
 
-/// Worlds of the villages and of their habs, by uuid.
-fn village_worlds() -> &'static Mutex<HashMap<String, ObjectWorld>> {
-    static WORLDS: OnceLock<Mutex<HashMap<String, ObjectWorld>>> = OnceLock::new();
+/// The world of a village or a hab, resolved again only when its own position moved. A
+/// village is stood on its ground by Godot before it spawns its habs (radially, possibly by
+/// kilometres: startup_items.json does not know the terrain), and a hab settles on its
+/// terrain pad: a world cached from the first position put a village on the wrong server.
+async fn world_of(gorc_instances: &Arc<GorcInstanceManager>, uuid: &str, own_local: Vec3, parent_id: Option<String>) -> ObjectWorld {
+    if let Some((at, world)) = village_worlds().lock().await.get(uuid) {
+        if *at == own_local {
+            return world.clone();
+        }
+    }
+    let world = resolve_world(gorc_instances, own_local, parent_id).await;
+    village_worlds().lock().await.insert(uuid.to_string(), (own_local, world.clone()));
+    world
+}
+
+/// Worlds of the villages and of their habs, by uuid, with the own position they come from.
+fn village_worlds() -> &'static Mutex<HashMap<String, (Vec3, ObjectWorld)>> {
+    static WORLDS: OnceLock<Mutex<HashMap<String, (Vec3, ObjectWorld)>>> = OnceLock::new();
     WORLDS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 

@@ -86,6 +86,14 @@ log_level = "info"
 # plugins.toml).
 max_players_per_village = 50
 village_free_reserve = 100
+# On top of village_free_reserve: villages kept ahead for each server that owns
+# villages and takes players (default 1). A village takes Godot 16-20 s to spawn,
+# while every server is given players: one reserve for the whole pool ran dry.
+village_reserve_per_server = 1
+# Metres around a village's centre its habs stand in (default 200; the mining
+# layout spans ~165 m): a village whose disc crosses a zone border is asked for
+# after the ones inside one zone, its habs would be split between two servers.
+village_radius = 200
 # A player (new, or back from an earlier session) whose village is on a server
 # taking no new player (over placement_capacity, under placement_min_tps, in a split
 # or merge) waits in a queue, told so by a "queued" message, until that server takes

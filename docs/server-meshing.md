@@ -135,7 +135,13 @@ counting the players it placed since the last update. Its reserve of free places
 kept in the zones of accepting servers only (when one of them owns a village at all:
 an accepting server holding space and the other planets cannot take arrivals), and
 new villages are requested there first, never more than 2 waiting to be spawned per
-server (Godot freezes 16-20 s per village; 40+ requests in a row kept one frozen). A refusing server still gets players when no accepting one has room, and
+server (Godot freezes 16-20 s per village; 40+ requests in a row kept one frozen).
+The reserve is `village_free_reserve` plus `village_reserve_per_server` villages for
+each accepting server that owns villages, so habs are asked for before the open
+villages fill up on every server at once. Among the accepting servers, a village whose
+`village_radius` disc lies in one zone is asked for before one across a zone border.
+A village's world is resolved again whenever its own position changes: Godot stands it
+on its ground (radially, possibly by kilometres) before spawning its habs. A refusing server still gets players when no accepting one has room, and
 without a fresh load (none yet, or older than 30 s) the placement is the historical
 one: the fullest village under the cap, the next villages requested near the last.
 Why: filling villages in line sent every arrival to the server owning the next

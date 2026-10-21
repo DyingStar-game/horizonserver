@@ -26,11 +26,26 @@ pub struct VillageConfig {
     /// Players a server is given at most per ADMIT_WINDOW: 49 queued players let in at
     /// once took a server from 61 to 14 tps (minikube, 2026-10-20). Zero: no limit.
     pub admit_per_server: usize,
+    /// Villages (of max_players_per_village places) kept ahead on top of `free_reserve`
+    /// for each server taking players that owns villages: a village takes Godot 16-20 s
+    /// to spawn while a server is given admit_per_server players every 2 s, so a reserve
+    /// sized for one server ran dry once the splits had spread the arrivals over 30.
+    pub reserve_per_server: usize,
+    /// Metres around a village's centre its habs stand in: a village whose disc crosses a
+    /// zone border is asked for only when no other is left (its habs would be split
+    /// between two servers). The mining village layout spans ~165 m.
+    pub village_radius: f64,
 }
 
 impl Default for VillageConfig {
     fn default() -> Self {
-        Self { max_players_per_village: 50, free_reserve: 100, admit_per_server: 10 }
+        Self {
+            max_players_per_village: 50,
+            free_reserve: 100,
+            admit_per_server: 10,
+            reserve_per_server: 1,
+            village_radius: 200.0,
+        }
     }
 }
 
@@ -456,15 +471,49 @@ fn free_reserve(villages: &[VillageState], max: usize, load: Option<&LoadView>) 
         .sum()
 }
 
+/// The reserve to keep: `free_reserve`, plus `reserve_per_server` villages for each server
+/// that owns villages and takes players (`load` as published: one refused only by the
+/// throttle takes players again 2 s later).
+fn reserve_target(villages: &[VillageState], config: &VillageConfig, load: Option<&LoadView>) -> usize {
+    let Some(load) = load else { return config.free_reserve };
+    let servers: HashSet<&str> = villages
+        .iter()
+        .filter_map(|v| v.world.as_ref().and_then(|w| load.owner_of(w)))
+        .filter(|s| load.accepts(s))
+        .map(|s| s.uuid.as_str())
+        .collect();
+    config.free_reserve + config.reserve_per_server * config.max_players_per_village * servers.len()
+}
+
+/// Whether the disc of `radius` metres around the village's centre lies in the zones of
+/// one server: its habs would all spawn there. True without the load.
+fn inside_one_zone(village: &VillageState, radius: f64, load: Option<&LoadView>) -> bool {
+    let (Some(load), Some(world)) = (load, village.world.as_ref()) else { return true };
+    let owner = |w: &ObjectWorld| load.owner_of(w).map(|s| s.uuid.clone());
+    let centre = owner(world);
+    let p = world.local_position;
+    [(radius, 0.0, 0.0), (-radius, 0.0, 0.0), (0.0, radius, 0.0), (0.0, -radius, 0.0), (0.0, 0.0, radius), (0.0, 0.0, -radius)]
+        .iter()
+        .all(|(dx, dy, dz)| {
+            let mut edge = world.clone();
+            edge.local_position.x = p.x + dx;
+            edge.local_position.y = p.y + dy;
+            edge.local_position.z = p.z + dz;
+            owner(&edge) == centre
+        })
+}
+
 /// The unspawned villages to request so the reserve gets back to `target`: in the zones
 /// of the least loaded server taking players when the load is known, then closest to
 /// `reference`. Several can be requested at once: a wave of arrivals outruns one
-/// village at a time (preprod, 2026-10-01: 16 players without apartment in 14 s).
+/// village at a time (preprod, 2026-10-01: 16 players without apartment in 14 s). Among
+/// the servers taking players, a village whose `radius` disc lies in one zone goes first.
 fn villages_to_request<'a>(
     villages: &'a [VillageState],
     reference: &VillageState,
     max: usize,
     target: usize,
+    radius: f64,
     load: Option<&LoadView>,
 ) -> Vec<&'a VillageState> {
     let mut reserve = free_reserve(villages, max, load);
@@ -481,10 +530,16 @@ fn villages_to_request<'a>(
         .collect();
     candidates.sort_by(|a, b| {
         let rank = |v: &VillageState| load.map(|l| l.rank(v.world.as_ref()));
-        rank(a).cmp(&rank(b)).then_with(|| {
-            distance_squared(a.position, reference.position)
-                .total_cmp(&distance_squared(b.position, reference.position))
-        })
+        let refused = |v: &VillageState| rank(v).map(|r| r.refused);
+        let crosses = |v: &VillageState| !inside_one_zone(v, radius, load);
+        refused(a)
+            .cmp(&refused(b))
+            .then_with(|| crosses(a).cmp(&crosses(b)))
+            .then_with(|| rank(a).cmp(&rank(b)))
+            .then_with(|| {
+                distance_squared(a.position, reference.position)
+                    .total_cmp(&distance_squared(b.position, reference.position))
+            })
     });
     // With the load known, no more than MAX_PENDING_VILLAGES_PER_SERVER waiting per server.
     let owner = |v: &VillageState| -> Option<String> {
@@ -642,9 +697,9 @@ fn village_worlds() -> &'static Mutex<HashMap<String, (Vec3, ObjectWorld)>> {
     WORLDS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Keep `free_reserve` places ahead of the arrivals: mark the closest unspawned villages to
-/// `reference` as `spawn_requested`. Godot (the server owning each zone) then spawns their
-/// habs, which come back as spawnbuildings with the village's poi_uuid.
+/// Keep the reserve of places (reserve_target) ahead of the arrivals: mark the closest
+/// unspawned villages to `reference` as `spawn_requested`. Godot (the server owning each
+/// zone) then spawns their habs, which come back as spawnbuildings with the village's poi_uuid.
 async fn request_villages(
     gorc_instances: &GorcInstanceManager,
     events: &EventSystem,
@@ -653,24 +708,26 @@ async fn request_villages(
     load: Option<&LoadView>,
 ) {
     let config = village_config();
-    let targets = villages_to_request(villages, reference, config.max_players_per_village, config.free_reserve, load);
+    let target = reserve_target(villages, &config, mesh_load::view().as_ref());
+    let targets = villages_to_request(villages, reference, config.max_players_per_village, target, config.village_radius, load);
     if targets.is_empty() {
         let reserve = free_reserve(villages, config.max_players_per_village, load);
-        if reserve < config.free_reserve && reserve_warning_due() {
+        if reserve < target && reserve_warning_due() {
             warn!(
                 "plugin genericprops (new_player): no unspawned poi_village left to request near {} ({} free places, reserve {})",
-                reference.name, reserve, config.free_reserve
+                reference.name, reserve, target
             );
         }
         return;
     }
-    for target in targets {
+    for village in targets {
         info!(
-            "plugin genericprops (new_player): requesting the habs of village {} ({}) near {} on {} (free places: {}, reserve: {})",
-            target.name, target.uuid, reference.name, owner_label(target, load),
-            free_reserve(villages, config.max_players_per_village, load), config.free_reserve
+            "plugin genericprops (new_player): requesting the habs of village {} ({}) near {} on {} (free places: {}, reserve: {}{})",
+            village.name, village.uuid, reference.name, owner_label(village, load),
+            free_reserve(villages, config.max_players_per_village, load), target,
+            if inside_one_zone(village, config.village_radius, load) { "" } else { ", across a zone border" }
         );
-        request_village(gorc_instances, events, target).await;
+        request_village(gorc_instances, events, village).await;
     }
 }
 
@@ -1566,10 +1623,10 @@ mod tests {
         assert_eq!(reference.name, "mining_village_01");
         assert_eq!(free_reserve(&villages, 50, None), 5);
         // 5 free places, 100 wanted: two villages at once, closest first.
-        let names: Vec<&str> = villages_to_request(&villages, reference, 50, 100, None).iter().map(|v| v.name.as_str()).collect();
+        let names: Vec<&str> = villages_to_request(&villages, reference, 50, 100, 0.0, None).iter().map(|v| v.name.as_str()).collect();
         assert_eq!(names, ["mining_village_02", "mining_village_04"]);
         // Reserve already met: nothing.
-        assert!(villages_to_request(&villages, reference, 50, 5, None).is_empty());
+        assert!(villages_to_request(&villages, reference, 50, 5, 0.0, None).is_empty());
     }
 
     #[test]
@@ -1585,9 +1642,9 @@ mod tests {
         assert_eq!(free_reserve(&villages, 50, None), 55);
         let reference = &villages[0];
         // 55 < 100: one more, never the one already requested.
-        let names: Vec<&str> = villages_to_request(&villages, reference, 50, 100, None).iter().map(|v| v.name.as_str()).collect();
+        let names: Vec<&str> = villages_to_request(&villages, reference, 50, 100, 0.0, None).iter().map(|v| v.name.as_str()).collect();
         assert_eq!(names, ["mining_village_04"]);
-        assert!(villages_to_request(&villages, reference, 50, 50, None).is_empty());
+        assert!(villages_to_request(&villages, reference, 50, 50, 0.0, None).is_empty());
     }
 
     // ---- placement by pool load (servers_load)
@@ -1741,6 +1798,33 @@ mod tests {
     }
 
     #[test]
+    fn the_reserve_grows_with_the_servers_taking_players() {
+        let config = VillageConfig::default(); // 100 + 1 village of 50 per server
+        let villages = [on_sandbox(village("mining_village_01", 10, 40, 0.0)), on_sandbox(village("mining_village_09", 10, 40, 200.0))];
+        assert_eq!(reserve_target(&villages, &config, None), 100);
+        assert_eq!(reserve_target(&villages, &config, Some(&mesh_load::view_of(sandbox_load(10, true, 10)))), 200);
+        // West refuses: one server takes players.
+        assert_eq!(reserve_target(&villages, &config, Some(&mesh_load::view_of(sandbox_load(10, false, 10)))), 150);
+        // East owns no village: it does not count.
+        let west_only = [on_sandbox(village("mining_village_01", 10, 40, 0.0))];
+        assert_eq!(reserve_target(&west_only, &config, Some(&mesh_load::view_of(sandbox_load(10, true, 10)))), 150);
+    }
+
+    #[test]
+    fn a_village_inside_one_zone_is_asked_for_first() {
+        let load = mesh_load::view_of(sandbox_load(10, true, 10));
+        let near_border = on_sandbox(village("mining_village_02", 0, 0, 90.0)); // 10 m from x = 100
+        let inside = on_sandbox(village("mining_village_03", 0, 0, -300.0));
+        assert!(!inside_one_zone(&near_border, 200.0, Some(&load)));
+        assert!(inside_one_zone(&inside, 200.0, Some(&load)));
+        assert!(inside_one_zone(&near_border, 200.0, None));
+        let reference = on_sandbox(village("mining_village_01", 50, 0, 80.0));
+        let villages = [reference.clone(), near_border, inside];
+        let names: Vec<&str> = villages_to_request(&villages, &reference, 50, 50, 200.0, Some(&load)).iter().map(|v| v.name.as_str()).collect();
+        assert_eq!(names, ["mining_village_03"], "farther, but its habs all land on west");
+    }
+
+    #[test]
     fn reserve_is_kept_in_the_zones_that_take_players() {
         let villages = [
             on_sandbox(village("mining_village_01", 0, 100, 0.0)),    // west: refusing, 50 places
@@ -1753,7 +1837,7 @@ mod tests {
         assert_eq!(free_reserve(&villages, 50, Some(&load)), 0);
         assert_eq!(free_reserve(&villages, 50, None), 50);
         let reference = &villages[0];
-        let names: Vec<&str> = villages_to_request(&villages, reference, 50, 100, Some(&load)).iter().map(|v| v.name.as_str()).collect();
+        let names: Vec<&str> = villages_to_request(&villages, reference, 50, 100, 0.0, Some(&load)).iter().map(|v| v.name.as_str()).collect();
         assert_eq!(names, ["mining_village_10", "mining_village_09"]);
     }
 
@@ -1769,7 +1853,7 @@ mod tests {
         let load = mesh_load::view_of(load);
         let villages = [on_sandbox(village("mining_village_01", 0, 100, 0.0)), on_sandbox(village("mining_village_02", 0, 0, 10.0))];
         assert_eq!(free_reserve(&villages, 50, Some(&load)), 50);
-        assert_eq!(villages_to_request(&villages, &villages[0], 50, 50, Some(&load)).len(), 0);
+        assert_eq!(villages_to_request(&villages, &villages[0], 50, 50, 0.0, Some(&load)).len(), 0);
     }
 
     /// `sandbox_load` with west silent / frozen (or only loading its new zones).
@@ -1804,7 +1888,7 @@ mod tests {
         let frozen = sandbox_load_west(50, false, false, 70);
         assert_eq!(free_reserve(&villages, 50, Some(&frozen)), 0);
         // So the reserve is requested on east instead.
-        let names: Vec<&str> = villages_to_request(&villages, &villages[0], 50, 50, Some(&frozen)).iter().map(|v| v.name.as_str()).collect();
+        let names: Vec<&str> = villages_to_request(&villages, &villages[0], 50, 50, 0.0, Some(&frozen)).iter().map(|v| v.name.as_str()).collect();
         assert_eq!(names, ["mining_village_09"]);
     }
 
@@ -1816,11 +1900,11 @@ mod tests {
             on_sandbox(village("mining_village_03", 0, 0, 20.0)),    // west, unspawned
         ];
         for load in [sandbox_load_west(50, false, false, 0), sandbox_load_west(50, true, true, 0)] {
-            assert!(villages_to_request(&villages, &villages[0], 50, 100, Some(&load)).is_empty());
+            assert!(villages_to_request(&villages, &villages[0], 50, 100, 0.0, Some(&load)).is_empty());
         }
         // Reporting again, done loading: requested.
         let back = mesh_load::view_of(sandbox_load(50, true, 0));
-        assert_eq!(villages_to_request(&villages, &villages[0], 50, 100, Some(&back)).len(), 2);
+        assert_eq!(villages_to_request(&villages, &villages[0], 50, 100, 0.0, Some(&back)).len(), 2);
     }
 
     /// `sandbox_load` with no placement capacity: every server under its split rule.
@@ -1946,7 +2030,7 @@ mod tests {
         ];
         let load = mesh_load::view_of(sandbox_load(50, true, 230));
         assert_eq!(select_village(&villages, &AssignRequest::default(), 50, Some(&load), true).unwrap().name, "mining_village_01");
-        assert!(villages_to_request(&villages, &villages[0], 50, 100, Some(&load)).is_empty());
+        assert!(villages_to_request(&villages, &villages[0], 50, 100, 0.0, Some(&load)).is_empty());
     }
 
     #[test]
@@ -1974,14 +2058,14 @@ mod tests {
             on_sandbox(village("mining_village_07", 0, 0, 320.0)),
         ];
         let load = mesh_load::view_of(sandbox_load(50, false, 0));
-        let names: Vec<&str> = villages_to_request(&villages, &villages[0], 50, 1000, Some(&load)).iter().map(|v| v.name.as_str()).collect();
+        let names: Vec<&str> = villages_to_request(&villages, &villages[0], 50, 1000, 0.0, Some(&load)).iter().map(|v| v.name.as_str()).collect();
         // East (accepting): one more there (2 waiting). West refuses players: none there.
         assert_eq!(names, ["mining_village_06"]);
         // Nobody accepting: the refusing servers are asked too, east first.
         let mut nobody = sandbox_load(50, false, 0);
         nobody.servers[1].accepting = false;
         let load = mesh_load::view_of(nobody);
-        let names: Vec<&str> = villages_to_request(&villages, &villages[0], 50, 1000, Some(&load)).iter().map(|v| v.name.as_str()).collect();
+        let names: Vec<&str> = villages_to_request(&villages, &villages[0], 50, 1000, 0.0, Some(&load)).iter().map(|v| v.name.as_str()).collect();
         assert_eq!(names, ["mining_village_06", "mining_village_02", "mining_village_03"]);
     }
 

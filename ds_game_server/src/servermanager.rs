@@ -764,6 +764,16 @@ impl ServerManager {
         if loading || queued || self.settling(&server_uuid) || self.busy_servers().contains(&server_uuid) {
             return;
         }
+        // Over its split rule: the split for players goes first (it hands villages over
+        // too). Split for villages every 10 s, two servers at 95 players and 37-42 tps were
+        // kept settling and never split for their players (preprod, 2026-10-21).
+        let players = |s: &ServerSamples| s.players.max(server.players_count().min(u16::MAX as usize) as u16);
+        let overloaded = self.samples.get(&server_uuid).zip(self.rules.as_ref())
+            .is_some_and(|(s, rules)| rules.split.split_hit(s.tps, players(s)));
+        if overloaded {
+            debug!("[mesh] {} is over its split rule: no split for villages, the one for players goes first", server.server_name);
+            return;
+        }
         let idle = self.idle_servers(&server_uuid, VILLAGE_SPLIT_SPARE_IDLE + 1);
         if idle.len() <= VILLAGE_SPLIT_SPARE_IDLE {
             debug!("[mesh] {} wants its {} villages spawned elsewhere but the pool is short", server.server_name, villages.len());

@@ -232,13 +232,28 @@ impl Server {
     /// Connects the websocket. Writes INTO the shared Arcs so the handler closures
     /// registered earlier keep talking to the live socket after a reconnection.
     pub fn connect(&mut self) -> Result<(), WebSocketError> {
-        let client = websocket::client::ClientBuilder::new(&self.address).unwrap().connect_insecure()?;
+        let client = Self::open_socket(&self.address)?;
+        self.install(client);
+        Ok(())
+    }
+
+    /// Opens a websocket to `address` without touching any server: blocking, the
+    /// handshake has no timeout of its own.
+    pub fn open_socket(address: &str) -> Result<websocket::sync::Client<std::net::TcpStream>, WebSocketError> {
+        websocket::client::ClientBuilder::new(address).unwrap().connect_insecure()
+    }
+
+    /// Makes `client` this server's connection: Online, writes go through it. Its reader
+    /// is started by `receive_messages`. Installed only once the caller knows it is
+    /// waited for: a handshake completing after its timeout used to install the socket
+    /// with nobody reading it — sends worked, the serverinfo never came back, and the
+    /// server sat "loading" with its players for good (preprod, 2026-10-21).
+    pub fn install(&mut self, client: websocket::sync::Client<std::net::TcpStream>) {
         let (receiver, sender) = client.split().unwrap();
         *self.websocket_sender.lock().unwrap() = Some(Outbox::spawn(sender, &self.server_name));
         *self.websocket_receiver.lock().unwrap() = Some(receiver);
         self.connection_generation.fetch_add(1, Ordering::SeqCst);
         self.set_state(ServerState::Online);
-        Ok(())
     }
 
     fn send_zones(&self, tag: &str) -> bool {

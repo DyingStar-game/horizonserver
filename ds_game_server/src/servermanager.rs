@@ -1150,20 +1150,24 @@ impl ServerManager {
                 if server.state() != ServerState::Offline {
                     return;
                 }
-                // connect() blocks (no handshake timeout in the websocket crate): run it
-                // on a blocking thread and give up after a while — a hung Godot accepts
-                // the TCP connection but never answers the handshake.
-                let attempt = server.clone();
-                let connected = tokio::time::timeout(
+                // The handshake blocks (no timeout in the websocket crate): opened on a
+                // blocking thread and given up after a while — a hung Godot accepts the
+                // TCP connection but never answers it. Only a socket opened in time is
+                // installed: one completing later is dropped (closed) with its task, it
+                // must not become a connection nobody reads.
+                let address = server.address.clone();
+                let opened = tokio::time::timeout(
                     CONNECT_TIMEOUT,
-                    crate::plugin_rt().spawn_blocking(move || {
-                        let mut attempt = attempt;
-                        attempt.connect().map_err(|e| format!("{:?}", e))
-                    }),
+                    crate::plugin_rt().spawn_blocking(move || Server::open_socket(&address).map_err(|e| format!("{:?}", e))),
                 )
                 .await;
-                let result = match connected {
-                    Ok(Ok(result)) => result,
+                let result = match opened {
+                    Ok(Ok(Ok(client))) => {
+                        let mut server = server.clone();
+                        server.install(client);
+                        Ok(())
+                    }
+                    Ok(Ok(Err(e))) => Err(e),
                     Ok(Err(e)) => Err(format!("connect task failed: {}", e)),
                     Err(_) => Err(format!("no websocket handshake within {:?}", CONNECT_TIMEOUT)),
                 };

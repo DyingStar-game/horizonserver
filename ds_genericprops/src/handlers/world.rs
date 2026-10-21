@@ -135,6 +135,53 @@ pub async fn resolve_world(
     fold_world(own_local, &chain)
 }
 
+/// Parents a player belongs with on the mesh: a player in its apartment is on the server
+/// of its hab, wherever the apartment lies. Godot already moves a player on a prop with the
+/// prop; ruled by its own position, a player whose apartment was 3.9 m across a zone border
+/// from its hab's origin landed on a server without the hab ("parent_id not found",
+/// preprod 2026-10-21).
+const CARRIERS: &[&str] = &["spawnbuilding"];
+
+/// The world of a player for the mesh: `resolve_world`, except that a player whose direct
+/// parent is a carrier (CARRIERS) takes the carrier's world (its position, the carrier first
+/// in the chain), so every server decision keeps it with its hab.
+pub async fn resolve_player_world(
+    gorc: &Arc<GorcInstanceManager>,
+    own_local: Vec3,
+    parent_id: Option<String>,
+) -> ObjectWorld {
+    let carrier = match parent_id.as_deref().and_then(|pid| GorcObjectId::from_str(pid).ok()) {
+        Some(gorc_id) => gorc
+            .with_object_mut(gorc_id, |instance| instance.get_object::<GenericProps>().map(chain_node_of))
+            .await
+            .flatten()
+            .filter(|node| CARRIERS.contains(&node.object_type.as_str())),
+        None => None,
+    };
+    match carrier {
+        Some(node) => {
+            let mut world = resolve_world(gorc, node.local_position, node.parent_id.clone()).await;
+            world.chain.insert(0, WorldChainEntry { uuid: node.uuid, object_type: node.object_type });
+            world
+        }
+        None => resolve_world(gorc, own_local, parent_id).await,
+    }
+}
+
+/// `resolve_player_world` for a player, `resolve_world` for anything else.
+pub async fn resolve_world_of(
+    gorc: &Arc<GorcInstanceManager>,
+    object_type: &str,
+    own_local: Vec3,
+    parent_id: Option<String>,
+) -> ObjectWorld {
+    if object_type == "player" {
+        resolve_player_world(gorc, own_local, parent_id).await
+    } else {
+        resolve_world(gorc, own_local, parent_id).await
+    }
+}
+
 /// The full item of an object as ds_game_server expects it in a snapshot: every
 /// property flattened, plus `_global_position` and `_world`.
 pub async fn full_item(gorc: &Arc<GorcInstanceManager>, uuid: &str) -> Option<GenericPropsRequest> {
@@ -150,7 +197,7 @@ pub async fn full_item(gorc: &Arc<GorcInstanceManager>, uuid: &str) -> Option<Ge
         })
         .await
         .flatten()?;
-    let object_world = resolve_world(gorc, own_local, parent_id).await;
+    let object_world = resolve_world_of(gorc, &object_type, own_local, parent_id).await;
     let mut object_data = Value::Object(props);
     inject_global_position(&mut object_data, global_position);
     inject_world(&mut object_data, &object_world);

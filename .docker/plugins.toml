@@ -37,13 +37,13 @@ servers_mode = "development"
 #  * "players:50 or tps:20" => split on whichever comes first
 # The players count alone misses the servers whose players are costly: on
 # 2026-10-20, 72 NPCs walking in a dense village held a server at 30 tps.
-split_rule = "players:80 or tps:45"
+split_rule = "players:65 or tps:50"
 # Players the placement of new players gives a server at most (default: the
 # players: threshold of split_rule, none without one); past it the
 # arrivals go to another server, or wait in genericprops' queue. Above split_rule,
 # so the split of a busy server starts while the arrivals still have room on it:
 # equal to it, the server never goes over the rule and is never split.
-placement_capacity = 95
+placement_capacity = 80
 # When the two sibling servers of a split are merged back, mirror of split_rule
 # (default "players:10"):
 #  * "players:10" => merge when the sum of their players is under 10
@@ -77,6 +77,13 @@ split_ready_tps = 58
 # gives them a server with room. Keep it at or under the tps: threshold of split_rule:
 # a server in between takes no player and is never split for it (warned at startup).
 placement_min_tps = 45
+# Split a server for its villages (default true): when the villages cannot be
+# spawned fast enough (the servers owning unspawned ones already wait for 2 each),
+# part of such a server's zones and villages goes to an idle server, which spawns
+# them in parallel. The cut shares the villages to spawn, moves at most 25 % of its
+# players, keeps 2 idle servers for the splits for players, and the pair is not
+# merged back for 180 s.
+village_split = true
 
 [ds_genericprops]
 log_level = "info"
@@ -86,6 +93,19 @@ log_level = "info"
 # plugins.toml).
 max_players_per_village = 50
 village_free_reserve = 100
+# On top of village_free_reserve: villages kept ahead for each server that owns
+# villages and takes players (default 1). A village takes Godot 16-20 s to spawn,
+# while every server is given players: one reserve for the whole pool ran dry.
+village_reserve_per_server = 1
+# Metres around a village's centre its habs stand in (default 200; the mining
+# layout spans ~165 m): a village whose disc crosses a zone border is asked for
+# after the ones inside one zone, its habs would be split between two servers.
+village_radius = 200
+# Villages kept spawned ahead even with nobody arriving, from the start (default
+# 15, 0 = only on arrivals): spawned on arrivals only, 600 players waited 110 s in
+# the queue. Spawned villages are persisted: only a persistence reset costs again.
+# At startup new players wait in the queue until those villages all have their habs.
+prespawn_villages = 15
 # A player (new, or back from an earlier session) whose village is on a server
 # taking no new player (over placement_capacity, under placement_min_tps, in a split
 # or merge) waits in a queue, told so by a "queued" message, until that server takes
@@ -95,7 +115,7 @@ village_free_reserve = 100
 # village is full, a waiting player is disconnected after 15 s: "All servers are full".
 # Players a server is given at most every 2 s, from the queue or not (default 10,
 # 0 = no limit): letting 49 queued players in at once took a server from 61 to 14 tps.
-queue_admit_per_server = 4
+queue_admit_per_server = 8
 # Seconds between two saves of every connected player's position / rotation / parent
 # to persistence (default 60, 0 = on disconnect only). Saved on disconnect anyway.
 player_save_interval_secs = 60

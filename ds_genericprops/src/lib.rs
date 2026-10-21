@@ -160,6 +160,15 @@ impl SimplePlugin for GenericPropsPlugin {
             admit_per_server: config.get_value("queue_admit_per_server")
                 .and_then(|v| v.as_integer())
                 .map_or(defaults.admit_per_server, |v| v.max(0) as usize),
+            reserve_per_server: config.get_value("village_reserve_per_server")
+                .and_then(|v| v.as_integer())
+                .map_or(defaults.reserve_per_server, |v| v.max(0) as usize),
+            village_radius: config.get_value("village_radius")
+                .and_then(|v| v.as_float().or_else(|| v.as_integer().map(|i| i as f64)))
+                .map_or(defaults.village_radius, |v| v.max(0.0)),
+            prespawn_villages: config.get_value("prespawn_villages")
+                .and_then(|v| v.as_integer())
+                .map_or(defaults.prespawn_villages, |v| v.max(0) as usize),
         });
         if config.get_value("queue_max_secs").is_some() {
             warn!("plugin genericprops: queue_max_secs is ignored: a queued player waits for its server however long it takes");
@@ -437,7 +446,7 @@ impl GenericPropsPlugin {
                         debug!("plugin genericprops (get_objects_snapshot): {} not in GORC, skipped", prop_uuid);
                         continue;
                     };
-                    let object_world = world::resolve_world(&gorc_instances, own_local, parent_id).await;
+                    let object_world = world::resolve_world_of(&gorc_instances, &object_type, own_local, parent_id).await;
                     let mut object_data = Value::Object(prop_properties);
                     world::inject_global_position(&mut object_data, global_position);
                     world::inject_world(&mut object_data, &object_world);

@@ -53,6 +53,13 @@ split_ready_tps = 58
 # gives them a server with room. Keep it at or under the tps: threshold of split_rule:
 # a server in between takes no player and is never split for it (warned at startup).
 placement_min_tps = 20
+# Split a server for its villages (default true): when the villages cannot be
+# spawned fast enough (the servers owning unspawned ones already wait for 2 each),
+# part of such a server's zones and villages goes to an idle server, which spawns
+# them in parallel. The cut shares the villages to spawn, moves at most 25 % of its
+# players, keeps 2 idle servers for the splits for players, and the pair is not
+# merged back for 180 s.
+village_split = true
 
 [ds_genericprops]
 log_level = "info"
@@ -64,6 +71,19 @@ log_level = "info"
 # ~15 s to minutes to build: players arriving with no room get no apartment.
 max_players_per_village = 50
 village_free_reserve = 100
+# On top of village_free_reserve: villages kept ahead for each server that owns
+# villages and takes players (default 1). A village takes Godot 16-20 s to spawn,
+# while every server is given players: one reserve for the whole pool ran dry.
+village_reserve_per_server = 1
+# Metres around a village's centre its habs stand in (default 200; the mining
+# layout spans ~165 m): a village whose disc crosses a zone border is asked for
+# after the ones inside one zone, its habs would be split between two servers.
+village_radius = 200
+# Villages kept spawned ahead even with nobody arriving, from the start (default
+# 15, 0 = only on arrivals): spawned on arrivals only, 600 players waited 110 s in
+# the queue. Spawned villages are persisted: only a persistence reset costs again.
+# At startup new players wait in the queue until those villages all have their habs.
+prespawn_villages = 15
 # A player (new, or back from an earlier session) whose village is on a server
 # taking no new player (over placement_capacity, under placement_min_tps, in a split
 # or merge) waits in a queue, told so by a "queued" message, until that server takes

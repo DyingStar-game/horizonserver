@@ -232,13 +232,28 @@ impl Server {
     /// Connects the websocket. Writes INTO the shared Arcs so the handler closures
     /// registered earlier keep talking to the live socket after a reconnection.
     pub fn connect(&mut self) -> Result<(), WebSocketError> {
-        let client = websocket::client::ClientBuilder::new(&self.address).unwrap().connect_insecure()?;
+        let client = Self::open_socket(&self.address)?;
+        self.install(client);
+        Ok(())
+    }
+
+    /// Opens a websocket to `address` without touching any server: blocking, the
+    /// handshake has no timeout of its own.
+    pub fn open_socket(address: &str) -> Result<websocket::sync::Client<std::net::TcpStream>, WebSocketError> {
+        websocket::client::ClientBuilder::new(address).unwrap().connect_insecure()
+    }
+
+    /// Makes `client` this server's connection: Online, writes go through it. Its reader
+    /// is started by `receive_messages`. Installed only once the caller knows it is
+    /// waited for: a handshake completing after its timeout used to install the socket
+    /// with nobody reading it — sends worked, the serverinfo never came back, and the
+    /// server sat "loading" with its players for good (preprod, 2026-10-21).
+    pub fn install(&mut self, client: websocket::sync::Client<std::net::TcpStream>) {
         let (receiver, sender) = client.split().unwrap();
         *self.websocket_sender.lock().unwrap() = Some(Outbox::spawn(sender, &self.server_name));
         *self.websocket_receiver.lock().unwrap() = Some(receiver);
         self.connection_generation.fetch_add(1, Ordering::SeqCst);
         self.set_state(ServerState::Online);
-        Ok(())
     }
 
     fn send_zones(&self, tag: &str) -> bool {
@@ -442,6 +457,11 @@ impl Server {
                 if !(if world_object { server.is_connected() } else { server.is_running() }) {
                     return Ok(());
                 }
+                // A prop a Godot server created itself, sent on to its zone's owner: the
+                // creator already has it.
+                if event["_except_server"].as_str() == Some(server.uuid.as_str()) {
+                    return Ok(());
+                }
                 debug!("🔧 DsGameServerPlugin: Adding prop with event: {:?}", event);
 
                 if !world_object {
@@ -453,12 +473,19 @@ impl Server {
                         debug!("🔧 DsGameServerPlugin: prop {} is outside our zones, skipping spawn.", object_uuid);
                         return Ok(());
                     }
+                    if event["_except_server"].is_string() {
+                        info!("🔧 DsGameServerPlugin: {} {} created by another server lands in our zones, spawned on {}",
+                            object_type, object_uuid, server.server_name);
+                    }
                     server.managed_objects.lock().unwrap().insert(object_uuid);
                 }
 
                 let websocket_sender = Arc::clone(&server.websocket_sender);
                 let mut wire = event.clone();
                 ObjectWorld::strip_internal_keys(&mut wire["object_data"]);
+                if let Some(wire) = wire.as_object_mut() {
+                    wire.remove("_except_server");
+                }
                 rt.spawn(async move {
                     let _ = spawn_prop::handle_spawn_prop(wire, websocket_sender).await;
                 });
@@ -936,10 +963,14 @@ impl Server {
                     }
                 }
                 GameServerMessage::PropCreate(prop_data) => {
+                    // `_source_server`: genericprops sends the prop on to the server owning
+                    // its zone when that is not us (a village's habs spawn here but each has
+                    // its own coordinates).
                     if let Err(e) = events_processor.emit_plugin("genericprops", "create_object_from_gameserver", &json!({
                         "object_type": prop_data["type"],
                         "object_uuid": prop_data["uuid"],
                         "object_data": prop_data,
+                        "_source_server": self.uuid,
                     })).await {
                         error!("Failed to emit plugin event to propsplugin: {}", e);
                     }

@@ -8,6 +8,13 @@ use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+/// A server that takes no new player may still be asked for village habs at this tps or
+/// more: a village spawns in under a second when the server is idle (preprod, 2026-10-21)
+/// but takes longer and costs more on a loaded one, so only a server with headroom, never
+/// in a split or merge. Its villages are then ready when its split for players hands them
+/// over, instead of being released one split at a time while 760 players waited.
+pub const HABS_MIN_TPS: u8 = 55;
+
 /// Older than this, the load is ignored and new players are placed as before.
 const MAX_AGE: Duration = Duration::from_secs(30);
 
@@ -82,6 +89,14 @@ impl LoadView {
             && !self.load.servers.iter().any(|s| s.loading || self.accepts(s))
     }
 
+    /// A split or merge is running or queued, or one will come: a server refuses players
+    /// while an idle server is left to take part of them.
+    pub fn split_coming(&self) -> bool {
+        self.load.ops_running > 0
+            || (self.load.idle_servers.is_some_and(|idle| idle > 0)
+                && self.load.servers.iter().any(|s| s.responsive && !self.accepts(s)))
+    }
+
     pub fn accepts(&self, server: &ServerLoad) -> bool {
         server.accepting && self.load.capacity.map_or(true, |cap| self.players(server) < cap)
     }
@@ -108,10 +123,26 @@ impl LoadView {
     /// The habs went to the most loaded server of the pool (275 players, tps 0-16) once the
     /// accepting ones had no village left to spawn, and its fresh villages drew every arrival
     /// (preprod, 2026-10-16). A place no running server owns may.
+    /// A server refusing players with HABS_MIN_TPS or more may too. Never one in a split or
+    /// merge, even when no server takes players: during a split nobody does, 6 villages went
+    /// to its fresh child and their 469 items to the parent at 95 players, down to 14 tps
+    /// (preprod, 2026-10-21).
     pub fn owner_takes_habs(&self, world: Option<&ObjectWorld>) -> bool {
         world.and_then(|w| self.owner_of(w)).map_or(true, |s| {
-            s.responsive && !s.loading && (self.accepts(s) || !self.any_accepting())
+            s.responsive && !s.loading && !s.busy
+                && (self.accepts(s) || !self.any_accepting() || s.tps >= HABS_MIN_TPS)
         })
+    }
+
+    /// The server owning `world` takes new players (a place no running server owns does not).
+    pub fn owner_accepts(&self, world: Option<&ObjectWorld>) -> bool {
+        world.and_then(|w| self.owner_of(w)).is_some_and(|s| self.accepts(s))
+    }
+
+    /// The server owning `world` answers but takes no new player (full, too slow, in a
+    /// split or merge), and is not loading zones it was just handed.
+    pub fn owner_refusing(&self, world: Option<&ObjectWorld>) -> bool {
+        world.and_then(|w| self.owner_of(w)).is_some_and(|s| s.responsive && !s.loading && !self.accepts(s))
     }
 
     /// Some running server may take players.

@@ -30,6 +30,18 @@
 //! the key goes out once per recipient and per declaration, exactly as if the
 //! original packet had been delivered.
 //!
+//! A payload carrying [`RECEIVED_STAMP_KEY`] (the time Horizon read the update
+//! from the game server) is also stamped with [`SENT_STAMP_KEY`] when it goes
+//! out, so a client can tell the time spent here from the time spent on the
+//! wire. Such a stream keeps its payload and is serialized again on each tick it
+//! sends on — once for every recipient of that tick, not once per recipient.
+//!
+//! A stream queued with an owner ([`queue_sticky_owned`]: the player's own
+//! `move`) serves that owner at the channel's base `frequency`, whatever the
+//! ladder says: the ladder is for watching someone else, and the owner, at
+//! distance 0, otherwise fell into its innermost rung — 15 Hz for its own
+//! position (MovementProbe, 2026-10-22).
+//!
 //! Recipients are computed here rather than read from
 //! `ObjectInstance::subscribers` on purpose: `GorcInstanceManager::get_object`
 //! deep-clones the whole instance (boxed object, zone manager, subscriber sets)
@@ -73,6 +85,14 @@ const IDLE_RETENTION: Duration = Duration::from_secs(30);
 /// Ticks between two sweeps for expired streams. Cheap enough at this spacing
 /// that it need not be smarter than a full pass over the map.
 const GC_EVERY_TICKS: u64 = 500;
+
+/// Payload key holding the time (unix ms) Horizon received the update from the
+/// game server. Its presence asks for [`SENT_STAMP_KEY`] on delivery.
+pub const RECEIVED_STAMP_KEY: &str = "horizon_received_ms";
+
+/// Payload key set to the time (unix ms) the payload was handed to the client
+/// connection, on streams whose payload carries [`RECEIVED_STAMP_KEY`].
+pub const SENT_STAMP_KEY: &str = "horizon_sent_ms";
 
 /// Time between two `[lod]` report lines. Measured in time, not in ticks: a loop
 /// running late is exactly when the line is needed, and 1000 slow ticks once
@@ -244,6 +264,37 @@ struct Stream {
     /// instead of running radius queries for them.
     next_due: Option<Instant>,
     last_queued: Instant,
+    /// The player this object is (its own `move` stream), served at the
+    /// channel's base frequency instead of the ladder's.
+    owner: Option<PlayerId>,
+    /// The payloads to stamp with [`SENT_STAMP_KEY`] on delivery, or `None`
+    /// when the payload asks for no stamp and `bytes` go out as they are.
+    stamped: Option<Stamped>,
+}
+
+/// What a stamped stream needs to serialize its envelope again at send time.
+#[derive(Clone)]
+struct Stamped {
+    data: serde_json::Value,
+    /// The payload with the sticky keys merged, when it differs from `data`.
+    data_sticky: Option<serde_json::Value>,
+    timestamp: u64,
+}
+
+/// Wall-clock time in unix milliseconds.
+pub fn unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
+}
+
+/// `data` with [`SENT_STAMP_KEY`] set to `sent_ms` (unchanged if not an object).
+fn with_sent_stamp(data: &serde_json::Value, sent_ms: u64) -> serde_json::Value {
+    let mut stamped = data.clone();
+    if let Some(map) = stamped.as_object_mut() {
+        map.insert(SENT_STAMP_KEY.to_string(), json!(sent_ms));
+    }
+    stamped
 }
 
 fn streams() -> &'static DashMap<StreamKey, Stream> {
@@ -290,6 +341,32 @@ pub fn queue_sticky(
     data: &serde_json::Value,
     sticky_keys: &[&str],
 ) {
+    enqueue(gorc_id, channel, object_type, event_name, data, sticky_keys, None);
+}
+
+/// [`queue_sticky`] for the stream of a player's own object: `owner` is served
+/// at the channel's base frequency, everyone else by the ladder.
+pub fn queue_sticky_owned(
+    gorc_id: GorcObjectId,
+    channel: u8,
+    object_type: &str,
+    event_name: &str,
+    data: &serde_json::Value,
+    sticky_keys: &[&str],
+    owner: PlayerId,
+) {
+    enqueue(gorc_id, channel, object_type, event_name, data, sticky_keys, Some(owner));
+}
+
+fn enqueue(
+    gorc_id: GorcObjectId,
+    channel: u8,
+    object_type: &str,
+    event_name: &str,
+    data: &serde_json::Value,
+    sticky_keys: &[&str],
+    owner: Option<PlayerId>,
+) {
     // One timestamp for both variants: they are the same update.
     let timestamp = current_timestamp();
     let Some(bytes) = serialize_envelope(gorc_id, channel, object_type, event_name, data, timestamp) else {
@@ -310,12 +387,17 @@ pub fn queue_sticky(
         pending: false,
         next_due: None,
         last_queued: now,
+        owner,
+        stamped: None,
     });
 
     stream.version = stream.version.wrapping_add(1);
     stream.bytes = bytes;
     stream.pending = true;
     stream.last_queued = now;
+    stream.owner = owner;
+    let stamp = data.get(RECEIVED_STAMP_KEY).is_some();
+    let mut data_sticky: Option<serde_json::Value> = None;
 
     if let Some(payload) = data.as_object() {
         for sticky_key in sticky_keys {
@@ -342,16 +424,14 @@ pub fn queue_sticky(
             for (k, v) in &stream.sticky {
                 merged.entry(k.clone()).or_insert_with(|| v.clone());
             }
-            stream.bytes_sticky = serialize_envelope(
-                gorc_id,
-                channel,
-                object_type,
-                event_name,
-                &serde_json::Value::Object(merged),
-                timestamp,
-            );
+            let merged = serde_json::Value::Object(merged);
+            stream.bytes_sticky = serialize_envelope(gorc_id, channel, object_type, event_name, &merged, timestamp);
+            if stamp {
+                data_sticky = Some(merged);
+            }
         }
     }
+    stream.stamped = stamp.then(|| Stamped { data: data.clone(), data_sticky, timestamp });
 }
 
 /// The client envelope around a channel payload, serialized.
@@ -465,7 +545,7 @@ async fn flush(events: &Arc<EventSystem>, definitions: &Arc<DashMap<String, Obje
         let (gorc_id, channel) = (*gorc_id, *channel);
 
         // Snapshot what we need; the map is never held across an await.
-        let (version, bytes, bytes_sticky, sticky_version, object_type) = {
+        let (version, bytes, bytes_sticky, sticky_version, object_type, owner, stamped) = {
             let Some(stream) = streams().get(&key) else {
                 continue;
             };
@@ -481,10 +561,12 @@ async fn flush(events: &Arc<EventSystem>, definitions: &Arc<DashMap<String, Obje
                 stream.bytes_sticky.clone(),
                 stream.sticky_version,
                 stream.object_type.clone(),
+                stream.owner,
+                stream.stamped.clone(),
             )
         };
 
-        let Some(tiers) = resolve_tiers(definitions, &object_type, channel) else {
+        let Some((tiers, base_frequency)) = resolve_tiers(definitions, &object_type, channel) else {
             // Unreachable by construction: `object_type` is the definition's own
             // name and channels come from the same definition. Dropping the
             // stream is still the right answer over guessing a radius — an
@@ -512,7 +594,7 @@ async fn flush(events: &Arc<EventSystem>, definitions: &Arc<DashMap<String, Obje
                 .iter()
                 .find(|tier| distance_sq <= tier.distance * tier.distance)
                 .map_or(outer.frequency, |tier| tier.frequency);
-            rates.insert(player_id, frequency);
+            rates.insert(player_id, owner_rate(owner, player_id, frequency, base_frequency));
         });
         counters.evaluated += 1;
         counters.radius_scans += 1;
@@ -576,6 +658,24 @@ async fn flush(events: &Arc<EventSystem>, definitions: &Arc<DashMap<String, Obje
         }
 
         *counters.sent.entry(event_name.clone()).or_default() += due.len() as u64;
+        // A stamped stream is serialized again now, with the time it leaves.
+        let (bytes, bytes_sticky) = match &stamped {
+            Some(stamped) if !due.is_empty() => {
+                let sent_ms = unix_ms();
+                let envelope = |data: &serde_json::Value| {
+                    serialize_envelope(gorc_id, channel, &object_type, event_name, &with_sent_stamp(data, sent_ms),
+                        stamped.timestamp)
+                };
+                let Some(fresh) = envelope(&stamped.data) else { continue };
+                let fresh_sticky = match (&bytes_sticky, &stamped.data_sticky) {
+                    (None, _) => None,
+                    (Some(_), Some(merged)) => envelope(merged),
+                    (Some(_), None) => Some(Arc::clone(&fresh)),
+                };
+                (fresh, fresh_sticky)
+            }
+            _ => (bytes, bytes_sticky),
+        };
         for (player_id, owed_sticky) in due {
             let payload = match (&bytes_sticky, owed_sticky) {
                 (Some(sticky), true) => sticky,
@@ -589,6 +689,16 @@ async fn flush(events: &Arc<EventSystem>, definitions: &Arc<DashMap<String, Obje
     }
 }
 
+/// The rate `player_id` is served at: the ladder's `frequency`, or for the
+/// object's `owner` the channel's `base_frequency` when that is higher.
+fn owner_rate(owner: Option<PlayerId>, player_id: PlayerId, frequency: f64, base_frequency: f64) -> f64 {
+    if owner == Some(player_id) {
+        frequency.max(base_frequency)
+    } else {
+        frequency
+    }
+}
+
 fn interval(frequency: f64) -> Duration {
     if frequency.is_finite() && frequency > 0.0 {
         Duration::from_secs_f64(1.0 / frequency)
@@ -597,7 +707,8 @@ fn interval(frequency: f64) -> Duration {
     }
 }
 
-/// Rate ladder declared for a channel, innermost tier first.
+/// Rate ladder declared for a channel, innermost tier first, and the channel's
+/// base frequency.
 ///
 /// Cloned per call rather than borrowed: the ladder is one or two elements and
 /// holding a `DashMap` guard across the awaits that follow would put the
@@ -606,10 +717,10 @@ fn resolve_tiers(
     definitions: &Arc<DashMap<String, ObjectDefinition>>,
     object_type: &str,
     channel: u8,
-) -> Option<Vec<LodTier>> {
+) -> Option<(Vec<LodTier>, f64)> {
     let definition = definitions.get(object_type)?;
     let channel = definition.channel(channel)?;
-    Some(channel.lod.clone())
+    Some((channel.lod.clone(), channel.frequency))
 }
 
 #[cfg(test)]
@@ -708,6 +819,35 @@ mod tests {
         assert!(!streams().iter().any(|entry| entry.key().0 == id));
         assert!(streams().contains_key(&(other, 0, "move".to_string())));
         streams().remove(&(other, 0, "move".to_string()));
+    }
+
+    #[test]
+    fn the_owner_is_served_at_the_base_rate_others_by_the_ladder() {
+        let (owner, other) = (PlayerId::new(), PlayerId::new());
+        assert_eq!(owner_rate(Some(owner), owner, 15.0, 30.0), 30.0);
+        assert_eq!(owner_rate(Some(owner), other, 15.0, 30.0), 15.0);
+        assert_eq!(owner_rate(None, owner, 15.0, 30.0), 15.0);
+        assert_eq!(owner_rate(Some(owner), owner, 60.0, 30.0), 60.0, "never slower than the ladder");
+    }
+
+    #[test]
+    fn a_received_stamp_keeps_the_payload_to_stamp_on_send() {
+        let id = GorcObjectId::new();
+        let owner = PlayerId::new();
+        queue_sticky_owned(id, 0, "player", "move",
+            &json!({"position": 1, "parent_id": "planet", RECEIVED_STAMP_KEY: 10}), &["parent_id"], owner);
+        queue_sticky_owned(id, 0, "player", "move", &json!({"position": 2, RECEIVED_STAMP_KEY: 20}), &["parent_id"], owner);
+        {
+            let stream = streams().get(&(id, 0, "move".to_string())).expect("stream queued");
+            assert_eq!(stream.owner, Some(owner));
+            let stamped = stream.stamped.as_ref().expect("a received stamp asks for a sent one");
+            assert_eq!(stamped.data[RECEIVED_STAMP_KEY], json!(20));
+            assert_eq!(stamped.data_sticky.as_ref().unwrap()["parent_id"], json!("planet"));
+        }
+        assert_eq!(with_sent_stamp(&json!({"position": 2}), 30), json!({"position": 2, SENT_STAMP_KEY: 30}));
+        queue(id, 0, "player", "move", &json!({"position": 3}));
+        assert!(streams().get(&(id, 0, "move".to_string())).unwrap().stamped.is_none());
+        streams().remove(&(id, 0, "move".to_string()));
     }
 
     #[test]

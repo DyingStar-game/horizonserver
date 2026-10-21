@@ -40,9 +40,25 @@ pub const PREWARM_DISTANCE: f64 = 300.0;
 /// Minimum interval between two prewarms for the same player.
 const PREWARM_REPEAT: std::time::Duration = std::time::Duration::from_secs(3);
 
+/// One player's entry of a `players/position` message.
+#[derive(Debug, Clone, PartialEq)]
+struct PlayerPosition {
+    player_id: PlayerId,
+    position: (f64, f64, f64),
+    rotation: (f64, f64, f64),
+    out_of_zone: Option<String>,
+    parent_id: Option<String>,
+    /// The game server's simulation time (ms) of this position, sent for the
+    /// players who asked for the clocks of their moves (handlers::move_clocks).
+    servergodot_ms: Option<f64>,
+    /// When we read the message from the game server (unix ms), for those same
+    /// positions only.
+    horizon_received_ms: Option<u64>,
+}
+
 #[derive(Debug)]
 enum GameServerMessage {
-    PlayerPositions(Vec<(GorcObjectId, PlayerId, f64, f64, f64, f64, f64, f64, Option<String>, Option<String>)>),
+    PlayerPositions(Vec<PlayerPosition>),
     PropPosition(serde_json::Value),
     PropCreate(serde_json::Value),
     PropDelete(serde_json::Value),
@@ -97,6 +113,13 @@ pub struct Server {
     /// Grows when the processor cannot keep up, e.g. the burst a Godot server
     /// flushes after a long frame.
     pub pending: Arc<AtomicUsize>,
+}
+
+/// Wall-clock time in unix milliseconds.
+fn unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
 }
 
 /// The servers the plugin's handlers dispatch to: every server whose handlers were
@@ -643,6 +666,7 @@ impl Server {
         // of the two runs second is a no-op (`is_managed_player` is false by then).
         {
             on_each_core(&events, "player_disconnected", move |server: &Server, event: &PlayerDisconnectedEvent| {
+                crate::handlers::move_clocks::forget(&event.player_id.to_string());
                 server.quit_player(json!({
                     "object_type": "player",
                     "object_uuid": event.player_id.to_string(),
@@ -926,7 +950,9 @@ impl Server {
             debug!("🔧 DsGameServerPlugin: Processing message: {:?}", msg);
             match msg {
                 GameServerMessage::PlayerPositions(position_updates) => {
-                    for (_gorc_id, player_id, x, y, z, rotx, roty, rotz, out_of_zone, parent_id) in position_updates {
+                    for update in position_updates {
+                        let PlayerPosition { player_id, position: (x, y, z), rotation: (rotx, roty, rotz), out_of_zone,
+                            parent_id, servergodot_ms, horizon_received_ms } = update;
                         let player_uuid = player_id.to_string();
                         if let Some(planet_uuid) = self.near_own_border(&player_uuid, parent_id.as_deref(), Point3::new(x, y, z)) {
                             if let Err(e) = events_processor.emit_plugin("gameserverplugin", "prewarm", &json!({
@@ -947,6 +973,8 @@ impl Server {
                                 "rotation": Vec3::new(rotx, roty, rotz),
                                 "out_of_zone": out_of_zone,
                                 "parent_id": parent_id,
+                                "servergodot_ms": servergodot_ms,
+                                "horizon_received_ms": horizon_received_ms,
                             },
                         })).await {
                             error!("Failed to emit plugin event to propsplugin: {}", e);
@@ -1002,8 +1030,9 @@ impl Server {
         warn!("🔧 DsGameServerPlugin: Async processor channel closed for {}", self.server_name);
     }
 
-    /// Parses one `players/position` message into position updates.
-    fn parse_player_positions(value: &serde_json::Value) -> Vec<(GorcObjectId, PlayerId, f64, f64, f64, f64, f64, f64, Option<String>, Option<String>)> {
+    /// Parses one `players/position` message into position updates, read at
+    /// `received_ms` (unix ms).
+    fn parse_player_positions(value: &serde_json::Value, received_ms: u64) -> Vec<PlayerPosition> {
         let mut position_updates = Vec::new();
         let Some(players) = value["data"].as_array() else {
             error!("players/position without data array: {:?}", value);
@@ -1014,7 +1043,7 @@ impl Server {
                 error!("Missing player_id in player data: {:?}", player_data);
                 continue;
             };
-            let (Ok(player_id), Ok(gorc_id)) = (PlayerId::from_str(uuid_str), GorcObjectId::from_str(uuid_str)) else {
+            let (Ok(player_id), Ok(_)) = (PlayerId::from_str(uuid_str), GorcObjectId::from_str(uuid_str)) else {
                 error!("Invalid player_id format: {:?}", player_data["player_id"]);
                 continue;
             };
@@ -1031,7 +1060,16 @@ impl Server {
             };
             let out_of_zone = player_data.get("out_of_zone").and_then(|v| v.as_str()).map(|s| s.to_string());
             let parent_id = player_data.get("parent_id").and_then(|v| v.as_str()).map(|s| s.to_string());
-            position_updates.push((gorc_id, player_id, x, y, z, rx, ry, rz, out_of_zone, parent_id));
+            let servergodot_ms = player_data.get("servergodot_ms").and_then(|v| v.as_f64());
+            position_updates.push(PlayerPosition {
+                player_id,
+                position: (x, y, z),
+                rotation: (rx, ry, rz),
+                out_of_zone,
+                parent_id,
+                servergodot_ms,
+                horizon_received_ms: servergodot_ms.map(|_| received_ms),
+            });
         }
         position_updates
     }
@@ -1087,7 +1125,7 @@ impl Server {
         let event = value["event"].as_str().unwrap_or_default();
         match (namespace, event) {
             ("players", "position") => {
-                let position_updates = Self::parse_player_positions(&value);
+                let position_updates = Self::parse_player_positions(&value, unix_ms());
                 if !position_updates.is_empty() {
                     if !self.enqueue(tx, GameServerMessage::PlayerPositions(position_updates)) {
                         error!("Failed to send position updates to processor of {}", self.server_name);
@@ -1170,5 +1208,28 @@ impl Server {
             info!("🔧 DsGameServerPlugin: WebSocket receiver task started for {}", server.server_name);
             server.receive_ws_to_queue(tx, manager_tx);
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn player_positions_carry_the_clocks_of_the_trip() {
+        let id = PlayerId::new().to_string();
+        let message = json!({"namespace": "players", "event": "position", "data": [
+            {"player_id": id, "pos": {"x": 1.0, "y": 2.0, "z": 3.0}, "rot": {"x": 0.0, "y": 0.5, "z": 0.0},
+             "parent_id": "planet", "servergodot_ms": 1761090000123.5},
+            {"player_id": id, "pos": {"x": 1.0, "y": 2.0, "z": 3.0}, "rot": {"x": 0.0, "y": 0.0, "z": 0.0}},
+        ]});
+        let updates = Server::parse_player_positions(&message, 42);
+        assert_eq!(updates.len(), 2);
+        assert_eq!(updates[0].position, (1.0, 2.0, 3.0));
+        assert_eq!(updates[0].parent_id.as_deref(), Some("planet"));
+        assert_eq!(updates[0].servergodot_ms, Some(1761090000123.5));
+        assert_eq!(updates[0].horizon_received_ms, Some(42));
+        assert_eq!(updates[1].servergodot_ms, None, "a player who did not ask for the clocks");
+        assert_eq!(updates[1].horizon_received_ms, None, "nor gets ours");
     }
 }

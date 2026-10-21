@@ -364,6 +364,15 @@ pub fn handle_movement_request_sync(
                     if let Some(ref parent_id) = move_data.parent_id {
                         position_update["parent_id"] = serde_json::json!(parent_id);
                     }
+                    // The clocks of the trip (MovementProbe on the client): the game
+                    // server's simulation time, then ours on arrival — and on departure,
+                    // which lod.rs adds when it sends (SENT_STAMP_KEY).
+                    if let Some(servergodot_ms) = move_data.servergodot_ms {
+                        position_update["servergodot_ms"] = serde_json::json!(servergodot_ms);
+                    }
+                    if let Some(received_ms) = move_data.horizon_received_ms {
+                        position_update[crate::lod::RECEIVED_STAMP_KEY] = serde_json::json!(received_ms);
+                    }
                     debug!("🚀 STEP 10: Created position update payload: {}", position_update);
                 
                     // CRITICAL: We need to update player position synchronously for zone detection.
@@ -388,13 +397,16 @@ pub fn handle_movement_request_sync(
                     // then applies planet-local coordinates under the building it still
                     // believes it is in — and lands in space.
                     debug!("🚀 STEP 13: Queueing channel 0 movement payload");
-                    crate::lod::queue_sticky(
+                    // Owned: the player itself is served at the channel's base rate
+                    // (30 Hz), the ladder's 15 Hz is for those watching it.
+                    crate::lod::queue_sticky_owned(
                         gorc_id,
                         0, // Channel 0: Critical movement data
                         &object_instance.type_name,
                         "move",
                         &position_update,
                         &["parent_id"],
+                        move_data.player_id,
                     );
 
                     // manage player out of godot server zone

@@ -215,14 +215,15 @@ pub struct SplitPlan {
 /// Divides `zones` between a parent and a child. With several zones, whole zones
 /// move (greedy: heaviest first, each to the lighter side, the child getting the
 /// heaviest). With a single zone, its bounds are cut through the population (see
-/// `split_bounds`). `None` only when there is no zone at all.
-pub fn plan_split(zones: &[Zone], players: &[ObjectWorld]) -> Option<SplitPlan> {
+/// `split_bounds`), clear of the `villages` (the worlds of each village's habs) when
+/// it can. `None` only when there is no zone at all.
+pub fn plan_split(zones: &[Zone], players: &[ObjectWorld], villages: &[Vec<ObjectWorld>]) -> Option<SplitPlan> {
     match zones {
         [] => None,
         [zone] => {
             let locals: Vec<Point3> = players.iter().filter(|w| zone.contains(w)).map(|w| w.local_position).collect();
             let base = zone.bounds.clone().unwrap_or_else(Bounds::unbounded);
-            let (b1, b2) = split_bounds(&base, &locals);
+            let (b1, b2) = split_bounds(&base, &locals, &footprints_in(zone, villages));
             let keep = Zone { id: zone.id.clone(), world: zone.world.clone(), bounds: Some(b1) };
             let give = zone.with_new_bounds(b2);
             let keep_players = locals.iter().filter(|p| keep.bounds.as_ref().unwrap().contains(p)).count();
@@ -290,8 +291,8 @@ impl SplitPlanN {
 /// more, each piece goes to one of them and the parent keeps the other zones; with
 /// one child the parent also keeps the first piece. A parent holding a single zone
 /// with two children or more keeps one piece of it and gives one to each child.
-/// Anything else is `plan_split`.
-pub fn plan_split_n(zones: &[Zone], players: &[ObjectWorld], children: usize) -> Option<SplitPlanN> {
+/// Anything else is `plan_split`. The cuts stay clear of the `villages` when they can.
+pub fn plan_split_n(zones: &[Zone], players: &[ObjectWorld], children: usize, villages: &[Vec<ObjectWorld>]) -> Option<SplitPlanN> {
     if children == 0 {
         return None;
     }
@@ -308,7 +309,7 @@ pub fn plan_split_n(zones: &[Zone], players: &[ObjectWorld], children: usize) ->
             .filter(|&(_, count)| count >= 2 && count * 2 > total),
     };
     let Some((index, _)) = dominant else {
-        return plan_split(zones, players).map(SplitPlanN::from);
+        return plan_split(zones, players, villages).map(SplitPlanN::from);
     };
     let zone = &zones[index];
     let mut keep: Vec<Zone> = zones.iter().enumerate().filter(|&(i, _)| i != index).map(|(_, z)| z.clone()).collect();
@@ -317,7 +318,7 @@ pub fn plan_split_n(zones: &[Zone], players: &[ObjectWorld], children: usize) ->
     let base = zone.bounds.clone().unwrap_or_else(Bounds::unbounded);
     let parent_keeps_a_piece = keep.is_empty() || children == 1;
     let pieces = if parent_keeps_a_piece { children + 1 } else { children };
-    let mut cut = split_bounds_n(&base, &locals, pieces).into_iter();
+    let mut cut = split_bounds_n(&base, &locals, pieces, &footprints_in(zone, villages)).into_iter();
     if parent_keeps_a_piece {
         // The parent keeps the zone's identity on the first piece, like `plan_split`.
         keep.push(Zone { id: zone.id.clone(), world: zone.world.clone(), bounds: cut.next() });
@@ -342,11 +343,66 @@ fn round3(v: f64) -> f64 {
 /// anyway — an overloaded server must be split, ping-pong or not.
 pub const MIN_CUT_GAP: f64 = 20.0;
 
+/// Metres a cut keeps from a village's habs.
+pub const VILLAGE_MARGIN: f64 = 10.0;
+
+/// The box each village with a hab in `zone` stands in (its habs' planet-local
+/// positions), grown by VILLAGE_MARGIN.
+fn footprints_in(zone: &Zone, villages: &[Vec<ObjectWorld>]) -> Vec<Bounds> {
+    villages
+        .iter()
+        .filter(|habs| habs.iter().any(|w| zone.contains(w)))
+        .map(|habs| {
+            let fold = |pick: fn(&Point3) -> f64, init: f64, f: fn(f64, f64) -> f64| {
+                habs.iter().map(|w| pick(&w.local_position)).fold(init, f)
+            };
+            Bounds {
+                min_x: fold(|p| p.x, f64::INFINITY, f64::min) - VILLAGE_MARGIN,
+                max_x: fold(|p| p.x, f64::NEG_INFINITY, f64::max) + VILLAGE_MARGIN,
+                min_y: fold(|p| p.y, f64::INFINITY, f64::min) - VILLAGE_MARGIN,
+                max_y: fold(|p| p.y, f64::NEG_INFINITY, f64::max) + VILLAGE_MARGIN,
+                min_z: fold(|p| p.z, f64::INFINITY, f64::min) - VILLAGE_MARGIN,
+                max_z: fold(|p| p.z, f64::NEG_INFINITY, f64::max) + VILLAGE_MARGIN,
+            }
+        })
+        .collect()
+}
+
+/// `cut` on `axis` moved out of the villages it runs through, to the closest edge of
+/// one that is clear of every village and within `lo..=hi` (the balance the cut was
+/// chosen for); `cut` itself when it runs through none or no such edge exists. A cut
+/// through a village splits its habs and their occupants between two servers.
+fn clear_of_villages(cut: f64, axis: usize, villages: &[Bounds], lo: f64, hi: f64) -> f64 {
+    let range = |b: &Bounds| match axis {
+        0 => (b.min_x, b.max_x),
+        1 => (b.min_y, b.max_y),
+        _ => (b.min_z, b.max_z),
+    };
+    let inside = |c: f64| villages.iter().any(|b| {
+        let (min, max) = range(b);
+        c > min && c < max
+    });
+    if !inside(cut) {
+        return cut;
+    }
+    villages
+        .iter()
+        .flat_map(|b| {
+            let (min, max) = range(b);
+            [min, max]
+        })
+        .filter(|&c| c >= lo && c <= hi && !inside(c))
+        .min_by(|a, b| (a - cut).abs().total_cmp(&(b - cut).abs()))
+        .map(round3)
+        .unwrap_or(cut)
+}
+
 /// Cuts a box in two along the axis where the players are the most spread: in the
 /// widest gap of the middle half of the population when one is at least
 /// `MIN_CUT_GAP` wide, else at the median. With at most one player the box is
-/// simply halved.
-pub fn split_bounds(bounds: &Bounds, positions: &[Point3]) -> (Bounds, Bounds) {
+/// simply halved. A cut through one of the `villages` (boxes, see footprints_in)
+/// moves to the closest village edge still in the middle half, when there is one.
+pub fn split_bounds(bounds: &Bounds, positions: &[Point3], villages: &[Bounds]) -> (Bounds, Bounds) {
     let (axis, mut values, lo, hi) = widest_axis(bounds, positions);
 
     let mid = if values.len() <= 1 {
@@ -366,12 +422,13 @@ pub fn split_bounds(bounds: &Bounds, positions: &[Point3]) -> (Bounds, Bounds) {
                 best_mid = (values[i] + values[i + 1]) / 2.0;
             }
         }
-        if best_gap >= MIN_CUT_GAP {
+        let cut = if best_gap >= MIN_CUT_GAP {
             round3(best_mid)
         } else {
             let m = n / 2;
             round3((values[m - 1] + values[m]) / 2.0)
-        }
+        };
+        clear_of_villages(cut, axis, villages, values[first], values[last])
     };
 
     (with_axis_range(bounds, axis, lo, mid), with_axis_range(bounds, axis, mid + 0.001, hi))
@@ -417,13 +474,14 @@ fn with_axis_range(bounds: &Bounds, axis: usize, lo: f64, hi: f64) -> Bounds {
 /// the players are the most spread: a cut between the players at every 1/`pieces` of
 /// the population. Two pieces: `split_bounds` (it prefers a wide gap to the median).
 /// Players stacked on the same coordinate can leave fewer pieces than asked, two at
-/// least.
-pub fn split_bounds_n(bounds: &Bounds, positions: &[Point3], pieces: usize) -> Vec<Bounds> {
+/// least. A cut through one of the `villages` moves to the closest village edge within
+/// half a piece of the population around it, when there is one.
+pub fn split_bounds_n(bounds: &Bounds, positions: &[Point3], pieces: usize, villages: &[Bounds]) -> Vec<Bounds> {
     if pieces <= 1 {
         return vec![bounds.clone()];
     }
     if pieces == 2 || positions.len() < 3 {
-        let (first, second) = split_bounds(bounds, positions);
+        let (first, second) = split_bounds(bounds, positions, villages);
         return vec![first, second];
     }
     let (axis, mut values, lo, hi) = widest_axis(bounds, positions);
@@ -432,13 +490,15 @@ pub fn split_bounds_n(bounds: &Bounds, positions: &[Point3], pieces: usize) -> V
     let mut cuts: Vec<f64> = Vec::new();
     for i in 1..pieces {
         let k = (i * n / pieces).clamp(1, n - 1);
+        let half = n / (2 * pieces);
         let cut = round3((values[k - 1] + values[k]) / 2.0);
+        let cut = clear_of_villages(cut, axis, villages, values[k.saturating_sub(half + 1)], values[(k + half).min(n - 1)]);
         if cut > lo && cut < hi && cuts.last().map_or(true, |last| cut > last + 0.001) {
             cuts.push(cut);
         }
     }
     if cuts.is_empty() {
-        let (first, second) = split_bounds(bounds, positions);
+        let (first, second) = split_bounds(bounds, positions, villages);
         return vec![first, second];
     }
     let mut boxes = Vec::with_capacity(cuts.len() + 1);
@@ -509,11 +569,11 @@ mod tests {
         let b = Bounds::unbounded();
         // two groups 100 m apart on X: the cut lands between them, at 50
         let players = [Point3::new(-10.0, 0.0, 0.0), Point3::new(0.0, 1.0, 0.0), Point3::new(100.0, 2.0, 0.0), Point3::new(110.0, 0.0, 0.0)];
-        let (b1, b2) = split_bounds(&b, &players);
+        let (b1, b2) = split_bounds(&b, &players, &[]);
         assert_eq!(b1.max_x, 50.0);
         assert_eq!(b2.min_x, 50.001);
         assert_eq!(b1.min_y, b.min_y);
-        let (c1, c2) = split_bounds(&b, &[Point3::new(0.0, -40.0, 0.0), Point3::new(0.0, 60.0, 1.0)]);
+        let (c1, c2) = split_bounds(&b, &[Point3::new(0.0, -40.0, 0.0), Point3::new(0.0, 60.0, 1.0)], &[]);
         assert_eq!(c1.max_y, 10.0);
         assert_eq!(c2.min_y, 10.001);
     }
@@ -523,21 +583,78 @@ mod tests {
         let b = Bounds::unbounded();
         // 52 players within 26 m on X: no 20 m gap, so the median (between #25 and #26)
         let crowd: Vec<Point3> = (0..52).map(|i| Point3::new(i as f64 * 0.5, 0.0, -3675750.0 + (i % 7) as f64)).collect();
-        let (b1, b2) = split_bounds(&b, &crowd);
+        let (b1, b2) = split_bounds(&b, &crowd, &[]);
         assert_eq!(b1.max_x, 12.75);
         assert_eq!(b2.min_x, 12.751);
         let zones = vec![Zone::planet("p", "x")];
         let worlds: Vec<ObjectWorld> = crowd.iter().map(|p| on_planet("p", p.x, p.y, p.z)).collect();
-        let plan = plan_split(&zones, &worlds).unwrap();
+        let plan = plan_split(&zones, &worlds, &[]).unwrap();
         assert_eq!((plan.keep_players, plan.give_players), (26, 26));
+    }
+
+    /// Three villages of 20 players along X (habs at x .. x+30), 100 m apart.
+    fn three_villages() -> (Vec<ObjectWorld>, Vec<Vec<ObjectWorld>>) {
+        let mut players = Vec::new();
+        let mut villages = Vec::new();
+        for start in [0.0, 130.0, 260.0] {
+            players.extend((0..20).map(|i| on_planet("p", start + i as f64 * 1.5, 0.0, 0.0)));
+            villages.push(vec![on_planet("p", start, 0.0, 0.0), on_planet("p", start + 30.0, 0.0, 0.0)]);
+        }
+        (players, villages)
+    }
+
+    #[test]
+    fn a_cut_moves_out_of_the_village_it_runs_through() {
+        // Village A (habs 0..10, 10 players), 10 players walking from 40 to 90, village B
+        // (habs 100..130, 40 players): no 20 m gap in the middle half, the median falls in B.
+        let mut players: Vec<ObjectWorld> = (0..10).map(|i| on_planet("p", i as f64, 0.0, 0.0)).collect();
+        players.extend((0..10).map(|i| on_planet("p", 40.0 + i as f64 * 5.5, 0.0, 0.0)));
+        players.extend((0..40).map(|i| on_planet("p", 100.0 + i as f64 * 0.75, 0.0, 0.0)));
+        let villages = vec![
+            vec![on_planet("p", 0.0, 0.0, 0.0), on_planet("p", 10.0, 0.0, 0.0)],
+            vec![on_planet("p", 100.0, 0.0, 0.0), on_planet("p", 130.0, 0.0, 0.0)],
+        ];
+        let zones = vec![Zone::planet("p", "x")];
+        let plain = plan_split(&zones, &players, &[]).unwrap();
+        assert_eq!(plain.keep[0].bounds.as_ref().unwrap().max_x, 107.125);
+        assert_eq!((plain.keep_players, plain.give_players), (30, 30));
+        // With the villages: B's edge (100 - 10 m), still in the middle half.
+        let plan = plan_split(&zones, &players, &villages).unwrap();
+        assert_eq!(plan.keep[0].bounds.as_ref().unwrap().max_x, 90.0);
+        assert_eq!((plan.keep_players, plan.give_players), (20, 40), "B whole on one server");
+    }
+
+    #[test]
+    fn a_cut_stays_put_when_no_village_edge_keeps_the_balance() {
+        // One single crowded village: no edge within the middle half of its players.
+        let players: Vec<ObjectWorld> = (0..40).map(|i| on_planet("p", i as f64, 0.0, 0.0)).collect();
+        let village = vec![vec![on_planet("p", 0.0, 0.0, 0.0), on_planet("p", 39.0, 0.0, 0.0)]];
+        let zones = vec![Zone::planet("p", "x")];
+        let plan = plan_split(&zones, &players, &village).unwrap();
+        assert_eq!((plan.keep_players, plan.give_players), (20, 20), "cut through it rather than unbalanced");
+    }
+
+    #[test]
+    fn cuts_in_pieces_move_out_of_the_villages_too() {
+        let (players, villages) = three_villages();
+        let zones = vec![Zone::planet("p", "x")];
+        // Three pieces of 20: every village whole on one server.
+        let plan = plan_split_n(&zones, &players, 2, &villages).unwrap();
+        let mut counts = vec![plan.keep_players];
+        counts.extend(plan.gives.iter().map(|(_, n)| *n));
+        assert_eq!(counts, [20, 20, 20]);
+        let footprints = footprints_in(&zones[0], &villages);
+        for cut in std::iter::once(&plan.keep).chain(plan.gives.iter().map(|(z, _)| z)).map(|z| z[0].bounds.as_ref().unwrap().max_x) {
+            assert!(!footprints.iter().any(|b| cut > b.min_x && cut < b.max_x), "cut {cut} runs through a village");
+        }
     }
 
     #[test]
     fn split_bounds_falls_back_to_middle() {
         let b = Bounds { min_x: 0.0, max_x: 100.0, min_y: 0.0, max_y: 10.0, min_z: 0.0, max_z: 10.0 };
-        let (b1, _) = split_bounds(&b, &[]);
+        let (b1, _) = split_bounds(&b, &[], &[]);
         assert_eq!(b1.max_x, 50.0);
-        let (b1, _) = split_bounds(&b, &[Point3::new(90.0, 0.0, 0.0)]);
+        let (b1, _) = split_bounds(&b, &[Point3::new(90.0, 0.0, 0.0)], &[]);
         assert_eq!(b1.max_x, 50.0);
     }
 
@@ -546,7 +663,7 @@ mod tests {
         let zones = vec![Zone::planet("p", "tarsis_3")];
         let players = [on_planet("p", -100.0, 0.0, 0.0), on_planet("p", 100.0, 0.0, 0.0), in_space(5.0, 5.0, 5.0)];
         // the cut is halfway between the two players on the planet: x = 0
-        let plan = plan_split(&zones, &players).unwrap();
+        let plan = plan_split(&zones, &players, &[]).unwrap();
         assert_eq!(plan.keep.len(), 1);
         assert_eq!(plan.give.len(), 1);
         assert_eq!(plan.keep[0].id, zones[0].id);
@@ -563,7 +680,7 @@ mod tests {
         for _ in 0..5 { players.push(on_planet("a", 0.0, 0.0, 0.0)); }
         for _ in 0..3 { players.push(on_planet("b", 0.0, 0.0, 0.0)); }
         for _ in 0..2 { players.push(in_space(0.0, 0.0, 0.0)); }
-        let plan = plan_split(&zones, &players).unwrap();
+        let plan = plan_split(&zones, &players, &[]).unwrap();
         // heaviest (a:5) goes to the child, b:3 and space:2 to the parent, c:0 to the child
         assert_eq!(plan.give_players, 5);
         assert_eq!(plan.keep_players, 5);
@@ -583,7 +700,7 @@ mod tests {
         let mut players = crowd_on("a", 80);
         players.push(in_space(0.0, 0.0, 0.0));
         players.push(on_planet("b", 0.0, 0.0, 0.0));
-        let plan = plan_split_n(&zones, &players, 2).unwrap();
+        let plan = plan_split_n(&zones, &players, 2, &[]).unwrap();
         // the parent keeps space and b whole, each child gets half of a
         assert_eq!(plan.keep.len(), 2);
         assert!(plan.keep.iter().all(|z| z.planet_uuid() != Some("a")));
@@ -602,7 +719,7 @@ mod tests {
     #[test]
     fn dominant_zone_is_cut_in_place_with_one_child() {
         let zones = vec![Zone::space(), Zone::planet("a", "a")];
-        let plan = plan_split_n(&zones, &crowd_on("a", 80), 1).unwrap();
+        let plan = plan_split_n(&zones, &crowd_on("a", 80), 1, &[]).unwrap();
         assert_eq!(plan.gives.len(), 1);
         assert_eq!((plan.keep_players, plan.gives[0].1), (40, 40));
         // the parent keeps space and the first half, under the zone's own id
@@ -616,23 +733,23 @@ mod tests {
         let zones = vec![Zone::space(), Zone::planet("a", "a"), Zone::planet("b", "b")];
         let mut players = crowd_on("a", 5);
         players.extend(crowd_on("b", 5));
-        let plan = plan_split_n(&zones, &players, 2).unwrap();
+        let plan = plan_split_n(&zones, &players, 2, &[]).unwrap();
         assert_eq!(plan.gives.len(), 1);
         assert!(plan.gives[0].0.iter().all(|z| z.bounds.is_none()));
         assert_eq!((plan.keep_players, plan.give_players()), (5, 5));
         // a single zone with one child is still halved between the parent and it
         let single = vec![Zone::planet("a", "a")];
-        let plan = plan_split_n(&single, &crowd_on("a", 10), 1).unwrap();
+        let plan = plan_split_n(&single, &crowd_on("a", 10), 1, &[]).unwrap();
         assert_eq!(plan.gives.len(), 1);
         assert_eq!(plan.keep[0].id, single[0].id);
-        assert!(plan_split_n(&zones, &players, 0).is_none());
+        assert!(plan_split_n(&zones, &players, 0, &[]).is_none());
     }
 
     #[test]
     fn a_crowded_single_zone_is_cut_in_one_piece_per_server() {
         // preprod 2026-10-20: 238 players on a server holding one zone of a planet
         let single = vec![Zone::planet("a", "a")];
-        let plan = plan_split_n(&single, &crowd_on("a", 238), 2).unwrap();
+        let plan = plan_split_n(&single, &crowd_on("a", 238), 2, &[]).unwrap();
         assert_eq!(plan.gives.len(), 2);
         assert_eq!(plan.keep.len(), 1);
         assert_eq!(plan.keep[0].id, single[0].id, "the parent keeps the zone's id on its piece");
@@ -650,7 +767,7 @@ mod tests {
         let zones = vec![Zone::space(), Zone::planet("a", "a")];
         let mut players = crowd_on("a", 240);
         players.push(in_space(0.0, 0.0, 0.0));
-        let plan = plan_split_n(&zones, &players, 3).unwrap();
+        let plan = plan_split_n(&zones, &players, 3, &[]).unwrap();
         assert_eq!(plan.keep.len(), 1, "the parent keeps space");
         assert_eq!(plan.keep_players, 1);
         assert_eq!(plan.gives.iter().map(|(_, n)| *n).collect::<Vec<_>>(), [80, 80, 80]);
@@ -660,8 +777,8 @@ mod tests {
     fn split_bounds_n_keeps_two_pieces_at_least_with_stacked_players() {
         let base = Bounds::unbounded();
         let stacked = vec![Point3::new(5.0, 0.0, 0.0); 10];
-        assert_eq!(split_bounds_n(&base, &stacked, 4).len(), 2);
-        assert_eq!(split_bounds_n(&base, &stacked, 1), vec![base.clone()]);
+        assert_eq!(split_bounds_n(&base, &stacked, 4, &[]).len(), 2);
+        assert_eq!(split_bounds_n(&base, &stacked, 1, &[]), vec![base.clone()]);
     }
 
     #[test]
@@ -735,9 +852,9 @@ mod tests {
     #[test]
     fn parent_keeps_at_least_one_zone() {
         let zones = vec![Zone::space(), Zone::planet("a", "a")];
-        let plan = plan_split(&zones, &[]).unwrap();
+        let plan = plan_split(&zones, &[], &[]).unwrap();
         assert_eq!(plan.keep.len(), 1);
         assert_eq!(plan.give.len(), 1);
-        assert!(plan_split(&[], &[]).is_none());
+        assert!(plan_split(&[], &[], &[]).is_none());
     }
 }

@@ -1375,7 +1375,16 @@ impl MeshWorker {
             .filter(|i| i.object_type == "player")
             .filter_map(|i| ObjectWorld::from_object_data(&i.object_data))
             .collect();
-        let Some(plan) = plan_split_n(&parent_zones, &players, children.len()) else {
+        // The habs of each village (by poi_uuid): the cuts keep clear of them when they can.
+        let mut habs: HashMap<String, Vec<ObjectWorld>> = HashMap::new();
+        for item in items.values().filter(|i| i.object_type == "spawnbuilding") {
+            let village = item.object_data.get("poi_uuid").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
+            if let (Some(village), Some(world)) = (village, ObjectWorld::from_object_data(&item.object_data)) {
+                habs.entry(village.to_string()).or_default().push(world);
+            }
+        }
+        let villages: Vec<Vec<ObjectWorld>> = habs.into_values().collect();
+        let Some(plan) = plan_split_n(&parent_zones, &players, children.len(), &villages) else {
             error!("[mesh] {} has no zones to split", parent.server_name);
             return result;
         };

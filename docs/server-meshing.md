@@ -244,7 +244,11 @@ placement_min_tps = 45         # under this tps a server takes no new player
    - one zone → it is cut in one piece per server, the parent keeping the first
      under the zone's id. A cut is made on the widest axis of the population, at
      every 1/pieces of it (`mesh::split_bounds_n`; in two: the median or a wide gap,
-     `mesh::split_bounds`); each child's piece gets a new zone id.
+     `mesh::split_bounds`); each child's piece gets a new zone id. A cut running
+     through a village (the box of its habs, by `poi_uuid`, grown by 10 m) moves to
+     the closest village edge clear of every village that keeps the balance (the
+     middle half of the population; half a piece around each cut in pieces); with
+     none, it stays: a village cut in two stays correct, its habs follow their zone.
    The parent gets `update_zones(keep)`, the child `start(give)`, the child
    receives every object (`initial_object`, frozen when outside its zones), the
    parent freezes what it no longer owns. A `SplitRecord` remembers the pair.

@@ -146,8 +146,8 @@ player is placed before those villages all have their habs: arrivals wait in the
 `village_radius` disc lies in one zone is asked for before one across a zone border.
 A server refusing players may still be asked for habs when it has the tps for it
 (`HABS_MIN_TPS`, 55) and is in no split or merge (`busy` in `servers_load`), one village at a
-time: a spawn costs more on a loaded server, but its villages are then ready when its split
-for players hands them over. A village's world is resolved again whenever its own position changes: Godot stands it
+time and at most one every 30 s (`HABS_REFUSING_EVERY`): a spawn costs more on a loaded
+server, but its villages are then ready when its split for players hands them over. A village's world is resolved again whenever its own position changes: Godot stands it
 on its ground (radially, possibly by kilometres) before spawning its habs. A refusing server still gets players when no accepting one has room, and
 without a fresh load (none yet, or older than 30 s) the placement is the historical
 one: the fullest village under the cap, the next villages requested near the last.

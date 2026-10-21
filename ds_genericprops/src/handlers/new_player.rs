@@ -585,12 +585,14 @@ fn villages_to_request<'a>(
     chosen
 }
 
-/// At most one village every HABS_REFUSING_EVERY on a server that takes no new player
-/// (`load` as published): spawned in under a second, a village is hardly ever pending, so
-/// MAX_PENDING_VILLAGES_ON_REFUSING alone let 29 villages through in 30 s onto a server
-/// with 50 players, down to 7 tps (preprod, 2026-10-21). `last`: when each such server was
-/// last asked.
-fn pace_refusing<'a>(
+/// A spawn costs more on a server with players: at most one village every HABS_LOADED_EVERY
+/// on one taking players, every HABS_REFUSING_EVERY on one refusing them (`load` as
+/// published), none on a server without players (the startup prespawn, a fresh child).
+/// Spawned in under a second, a village is hardly ever pending, so the pending limits alone
+/// let 29 villages through in 30 s onto a refusing server down to 7 tps, and 4 in one second
+/// onto one with 49 players, down to 39 tps (preprod, 2026-10-21). `last`: when each server
+/// was last asked.
+fn pace_spawns<'a>(
     targets: Vec<&'a VillageState>,
     load: Option<&LoadView>,
     last: &mut HashMap<String, Instant>,
@@ -601,10 +603,11 @@ fn pace_refusing<'a>(
         .into_iter()
         .filter(|v| {
             let Some(server) = v.world.as_ref().and_then(|w| load.owner_of(w)) else { return true };
-            if load.accepts(server) || !load.any_accepting() {
+            if load.players(server) == 0 {
                 return true;
             }
-            if last.get(&server.uuid).is_some_and(|at| now.duration_since(*at) < HABS_REFUSING_EVERY) {
+            let every = if load.accepts(server) { HABS_LOADED_EVERY } else { HABS_REFUSING_EVERY };
+            if last.get(&server.uuid).is_some_and(|at| now.duration_since(*at) < every) {
                 return false;
             }
             last.insert(server.uuid.clone(), now);
@@ -613,7 +616,8 @@ fn pace_refusing<'a>(
         .collect()
 }
 
-/// See pace_refusing.
+/// See pace_spawns.
+const HABS_LOADED_EVERY: Duration = Duration::from_secs(10);
 const HABS_REFUSING_EVERY: Duration = Duration::from_secs(30);
 
 /// The servers whose unspawned villages cannot be asked for while the reserve stays under
@@ -831,7 +835,7 @@ async fn request_villages(
     let targets = {
         static LAST: std::sync::Mutex<Option<HashMap<String, Instant>>> = std::sync::Mutex::new(None);
         let mut last = LAST.lock().unwrap();
-        pace_refusing(targets, mesh_load::view().as_ref(), last.get_or_insert_with(HashMap::new), Instant::now())
+        pace_spawns(targets, mesh_load::view().as_ref(), last.get_or_insert_with(HashMap::new), Instant::now())
     };
     let wanted = villages_wanted(villages, &targets, config.max_players_per_village, target, mesh_load::view().as_ref());
     send_villages_wanted(events, wanted).await;
@@ -2325,7 +2329,7 @@ mod tests {
     }
 
     #[test]
-    fn a_refusing_server_is_asked_for_one_village_every_30_s() {
+    fn a_server_with_players_is_asked_for_villages_at_a_pace() {
         let villages = [
             on_sandbox(village("mining_village_01", 50, 0, 0.0)),    // west, accepting
             on_sandbox(village("mining_village_02", 0, 0, 10.0)),    // west, unspawned
@@ -2337,10 +2341,16 @@ mod tests {
         let t0 = Instant::now();
         let names = |picked: Vec<&VillageState>| picked.iter().map(|v| v.name.clone()).collect::<Vec<_>>();
         let all: Vec<&VillageState> = villages[1..].iter().collect();
-        assert_eq!(names(pace_refusing(all.clone(), Some(&load), &mut last, t0)), ["mining_village_02", "mining_village_10"]);
-        // 10 s later east is still paced; west, accepting, never is.
-        assert_eq!(names(pace_refusing(all.clone(), Some(&load), &mut last, t0 + Duration::from_secs(10))), ["mining_village_02"]);
-        assert_eq!(names(pace_refusing(all.clone(), Some(&load), &mut last, t0 + Duration::from_secs(31))), ["mining_village_02", "mining_village_10"]);
+        // One per server at a time: west (50 players, accepting) and east (refusing).
+        assert_eq!(names(pace_spawns(all.clone(), Some(&load), &mut last, t0)), ["mining_village_02", "mining_village_10"]);
+        assert!(pace_spawns(all.clone(), Some(&load), &mut last, t0 + Duration::from_secs(5)).is_empty());
+        // West every 10 s, east every 30 s.
+        assert_eq!(names(pace_spawns(all.clone(), Some(&load), &mut last, t0 + Duration::from_secs(11))), ["mining_village_02"]);
+        assert_eq!(names(pace_spawns(all.clone(), Some(&load), &mut last, t0 + Duration::from_secs(31))), ["mining_village_02", "mining_village_10"]);
+        // A server without players (startup, fresh child) is not paced.
+        let empty = mesh_load::view_of(sandbox_load(0, true, 230));
+        let west: Vec<&VillageState> = villages[1..2].iter().chain(villages[1..2].iter()).collect();
+        assert_eq!(pace_spawns(west, Some(&empty), &mut last, t0 + Duration::from_secs(32)).len(), 2);
     }
 
     #[test]

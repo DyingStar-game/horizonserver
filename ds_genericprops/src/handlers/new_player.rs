@@ -577,11 +577,14 @@ fn villages_to_request<'a>(
     chosen
 }
 
-/// The servers held back by MAX_PENDING_VILLAGES_PER_SERVER while the reserve stays under
-/// `target` once `chosen` are requested: each with the unspawned villages it could be asked
-/// for (2 at least), for the ServerManager to give part of them to an idle server
-/// (`gameserver:villages_wanted`). Villages arrived 2 by 2 per server owning some while
-/// 600 players waited 110 s and servers stood idle (preprod, 2026-10-21). Only with the load.
+/// The servers whose unspawned villages cannot be asked for while the reserve stays under
+/// `target` once `chosen` are requested: held back by MAX_PENDING_VILLAGES_PER_SERVER, or
+/// refusing players (full, too slow) — habs are never asked of a refusing server. Each
+/// with its unspawned villages (2 at least), for the ServerManager to give part of them to
+/// an idle server (`gameserver:villages_wanted`). With every accepting server at 50 players
+/// and no village left in its zones, the villages to spawn sat in the zones of full servers
+/// and 380 players waited (preprod, 2026-10-21). `load` as published: a server refused by the
+/// throttle only takes players again 2 s later. Only with the load.
 fn villages_wanted<'a>(
     villages: &'a [VillageState],
     chosen: &[&VillageState],
@@ -603,7 +606,9 @@ fn villages_wanted<'a>(
     let mut held: Vec<(String, Vec<&VillageState>)> = Vec::new();
     for v in villages.iter().filter(|v| !v.is_spawn_pending_or_done() && !chosen.iter().any(|c| c.uuid == v.uuid)) {
         let Some(uuid) = owner(v) else { continue };
-        if pending.get(&uuid).copied().unwrap_or(0) < MAX_PENDING_VILLAGES_PER_SERVER || !load.owner_takes_habs(v.world.as_ref()) {
+        let at_max = pending.get(&uuid).copied().unwrap_or(0) >= MAX_PENDING_VILLAGES_PER_SERVER
+            && load.owner_takes_habs(v.world.as_ref());
+        if !at_max && !load.owner_refusing(v.world.as_ref()) {
             continue;
         }
         match held.iter_mut().find(|(u, _)| *u == uuid) {
@@ -784,7 +789,7 @@ async fn request_villages(
     let config = village_config();
     let target = reserve_target(villages, &config, mesh_load::view().as_ref());
     let targets = villages_to_request(villages, reference, config.max_players_per_village, target, config.village_radius, load);
-    let wanted = villages_wanted(villages, &targets, config.max_players_per_village, target, load);
+    let wanted = villages_wanted(villages, &targets, config.max_players_per_village, target, mesh_load::view().as_ref());
     send_villages_wanted(events, wanted).await;
     if targets.is_empty() {
         let reserve = free_reserve(villages, config.max_players_per_village, load);
@@ -1960,6 +1965,28 @@ mod tests {
         // A single village left to spawn there: not worth a split.
         assert!(villages_wanted(&villages[..3], &[], 50, 750, Some(&load)).is_empty());
         assert!(villages_wanted(&villages, &[], 50, 750, None).is_empty());
+    }
+
+    #[test]
+    fn a_refusing_server_with_villages_to_spawn_asks_for_a_split() {
+        // East holds 50 players in its only village, none left to spawn; west is full (it
+        // refuses) and its zones hold 2 villages to spawn, never asked of a refusing server.
+        let villages = vec![
+            on_sandbox(village("mining_village_01", 50, 0, 0.0)),
+            on_sandbox(village("mining_village_03", 0, 0, 20.0)),
+            on_sandbox(village("mining_village_04", 0, 0, 30.0)),
+            on_sandbox(village("mining_village_09", 50, 0, 200.0)),
+        ];
+        let load = mesh_load::view_of(sandbox_load(95, false, 50));
+        let wanted = villages_wanted(&villages, &[], 50, 750, Some(&load));
+        assert_eq!(wanted.len(), 1);
+        assert_eq!((wanted[0].0.as_str(), wanted[0].1.len()), ("uuid-west", 2));
+        // Loading the zones it was just handed: not refusing for long, not split again.
+        let mut pool = sandbox_load(95, false, 50);
+        pool.servers[0].loading = true;
+        assert!(villages_wanted(&villages, &[], 50, 750, Some(&mesh_load::view_of(pool))).is_empty());
+        // West takes players again: its villages are asked of it, no split.
+        assert!(villages_wanted(&villages, &[], 50, 750, Some(&mesh_load::view_of(sandbox_load(10, true, 50)))).is_empty());
     }
 
     #[test]

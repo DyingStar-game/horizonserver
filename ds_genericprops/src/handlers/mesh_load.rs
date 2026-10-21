@@ -122,6 +122,12 @@ impl LoadView {
         })
     }
 
+    /// The server owning `world` answers but takes no new player (full, too slow, in a
+    /// split or merge), and is not loading zones it was just handed.
+    pub fn owner_refusing(&self, world: Option<&ObjectWorld>) -> bool {
+        world.and_then(|w| self.owner_of(w)).is_some_and(|s| s.responsive && !s.loading && !self.accepts(s))
+    }
+
     /// Some running server may take players.
     pub fn any_accepting(&self) -> bool {
         self.load.servers.iter().any(|s| self.accepts(s))

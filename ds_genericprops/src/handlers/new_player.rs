@@ -35,6 +35,11 @@ pub struct VillageConfig {
     /// zone border is asked for only when no other is left (its habs would be split
     /// between two servers). The mining village layout spans ~165 m.
     pub village_radius: f64,
+    /// Villages kept spawned ahead even with nobody arriving, from the start: a village
+    /// takes Godot 16-20 s to spawn and at most 2 wait per server, so spawning them only on
+    /// arrivals kept 600 players queued 110 s (preprod, 2026-10-21). Spawned villages are
+    /// persisted: the cost comes back only after a persistence reset. Needs the pool load.
+    pub prespawn_villages: usize,
 }
 
 impl Default for VillageConfig {
@@ -45,6 +50,7 @@ impl Default for VillageConfig {
             admit_per_server: 10,
             reserve_per_server: 1,
             village_radius: 200.0,
+            prespawn_villages: 15,
         }
     }
 }
@@ -474,16 +480,17 @@ fn free_reserve(villages: &[VillageState], max: usize, load: Option<&LoadView>) 
 
 /// The reserve to keep: `free_reserve`, plus `reserve_per_server` villages for each server
 /// that owns villages and takes players (`load` as published: one refused only by the
-/// throttle takes players again 2 s later).
+/// throttle takes players again 2 s later), and never under `prespawn_villages` villages.
 fn reserve_target(villages: &[VillageState], config: &VillageConfig, load: Option<&LoadView>) -> usize {
     let Some(load) = load else { return config.free_reserve };
+    let prespawn = config.prespawn_villages * config.max_players_per_village;
     let servers: HashSet<&str> = villages
         .iter()
         .filter_map(|v| v.world.as_ref().and_then(|w| load.owner_of(w)))
         .filter(|s| load.accepts(s))
         .map(|s| s.uuid.as_str())
         .collect();
-    config.free_reserve + config.reserve_per_server * config.max_players_per_village * servers.len()
+    (config.free_reserve + config.reserve_per_server * config.max_players_per_village * servers.len()).max(prespawn)
 }
 
 /// Whether the disc of `radius` metres around the village's centre lies in the zones of
@@ -1199,6 +1206,8 @@ fn run(events: Arc<EventSystem>, rx: Receiver<Placement>) {
         if pass && !waiting.is_empty() {
             block_on(place_waiting(&events, &mut waiting, &mut kicks, &mut throttle));
             retry_at = None;
+        } else if pass {
+            block_on(keep_reserve_ahead(&events, &throttle));
         }
         if waiting.is_empty() {
             retry_at = None;
@@ -1425,6 +1434,20 @@ async fn place_waiting(
             arrival.notified_place = Some(place);
         }
     }
+}
+
+/// With nobody waiting (a new load every 5 s, habs arriving): keep the reserve anyway, so
+/// the villages are spawned before the players come (see prespawn_villages). Only with the
+/// pool load: without it nothing bounds the villages spawning at once on one server.
+async fn keep_reserve_ahead(events: &Arc<EventSystem>, throttle: &Throttle) {
+    let load = throttle.view();
+    let (Some(load), Some(gorc_instances)) = (load, events.get_gorc_instances()) else { return };
+    let villages = by_hab_owner(collect_villages(&gorc_instances).await, Some(&load));
+    // Before the startup items are imported there is nothing to ask for.
+    if villages.is_empty() {
+        return;
+    }
+    keep_reserve(&gorc_instances, events, &villages, None, Some(&load)).await;
 }
 
 /// Request habs so the reserve of places stays ahead of the arrivals, around `last` (the
@@ -1813,7 +1836,7 @@ mod tests {
 
     #[test]
     fn the_reserve_grows_with_the_servers_taking_players() {
-        let config = VillageConfig::default(); // 100 + 1 village of 50 per server
+        let config = VillageConfig { prespawn_villages: 0, ..VillageConfig::default() }; // 100 + 1 village of 50 per server
         let villages = [on_sandbox(village("mining_village_01", 10, 40, 0.0)), on_sandbox(village("mining_village_09", 10, 40, 200.0))];
         assert_eq!(reserve_target(&villages, &config, None), 100);
         assert_eq!(reserve_target(&villages, &config, Some(&mesh_load::view_of(sandbox_load(10, true, 10)))), 200);
@@ -1822,6 +1845,10 @@ mod tests {
         // East owns no village: it does not count.
         let west_only = [on_sandbox(village("mining_village_01", 10, 40, 0.0))];
         assert_eq!(reserve_target(&west_only, &config, Some(&mesh_load::view_of(sandbox_load(10, true, 10)))), 150);
+        // prespawn_villages is a floor, with the load only.
+        let config = VillageConfig { prespawn_villages: 15, ..config };
+        assert_eq!(reserve_target(&villages, &config, Some(&mesh_load::view_of(sandbox_load(10, true, 10)))), 750);
+        assert_eq!(reserve_target(&villages, &config, None), 100);
     }
 
     #[test]

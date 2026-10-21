@@ -138,7 +138,9 @@ new villages are requested there first, never more than 2 waiting to be spawned 
 server (Godot freezes 16-20 s per village; 40+ requests in a row kept one frozen).
 The reserve is `village_free_reserve` plus `village_reserve_per_server` villages for
 each accepting server that owns villages, so habs are asked for before the open
-villages fill up on every server at once. Among the accepting servers, a village whose
+villages fill up on every server at once, and never less than `prespawn_villages` (15)
+villages: the reserve is also kept with nobody arriving (on every `servers_load` and every
+hab registered), so the villages are spawned before the players come. Among the accepting servers, a village whose
 `village_radius` disc lies in one zone is asked for before one across a zone border.
 A village's world is resolved again whenever its own position changes: Godot stands it
 on its ground (radially, possibly by kilometres) before spawning its habs. A refusing server still gets players when no accepting one has room, and

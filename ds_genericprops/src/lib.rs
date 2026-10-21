@@ -166,6 +166,9 @@ impl SimplePlugin for GenericPropsPlugin {
             village_radius: config.get_value("village_radius")
                 .and_then(|v| v.as_float().or_else(|| v.as_integer().map(|i| i as f64)))
                 .map_or(defaults.village_radius, |v| v.max(0.0)),
+            prespawn_villages: config.get_value("prespawn_villages")
+                .and_then(|v| v.as_integer())
+                .map_or(defaults.prespawn_villages, |v| v.max(0) as usize),
         });
         if config.get_value("queue_max_secs").is_some() {
             warn!("plugin genericprops: queue_max_secs is ignored: a queued player waits for its server however long it takes");

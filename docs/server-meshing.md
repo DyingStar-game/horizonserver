@@ -176,11 +176,15 @@ and its buildings are full, a waiting player is disconnected after 15 s of it wi
 error `All servers are full` (code 1339). Short of that it keeps waiting: a returning
 player whose server is full while others take players waits for that server.
 
-A village takes `max_players_per_village` (50) players; a village under it on any
-server taking players goes before every village above it. Only when none is left does
-the least loaded server let its villages go over, by steps of 10, as long as their
-buildings have room: the server itself bounds them, refusing players at its placement
-capacity until a split gives the village more servers.
+A village takes `max_players_per_village` (50) players. No village goes over it while a
+place can still come: a village under it on a server taking players (one refused only by
+the `queue_admit_per_server` throttle counts: it takes players again 2 s later), habs on
+their way, an unspawned village its server can be asked for, a split or merge running or
+due (a server refusing players while an idle server is left). The player waits in the
+queue meanwhile. Only when nothing can come, or after the player waited 30 s, does the
+least loaded server let its villages go over, by steps of 10, as long as their buildings
+have room: the server itself bounds them, refusing players at its placement capacity
+until a split gives the village more servers.
 
 A village's habs are spawned by the Godot server owning the village's centre, but each
 hab has its own coordinates: a zone border can run through a village. A prop a Godot

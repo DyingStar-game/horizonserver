@@ -172,11 +172,13 @@ fn slot_position(building: &GenericProps, (floor, row, col): (i64, i64, i64)) ->
 /// players goes before every village above it: ranked on the load first, the least loaded
 /// server raised its only village to 130 players while others had villages under 50
 /// (preprod, 2026-10-20 — after the splits in pieces a server often owns one village).
+/// Without `overflow` (room can still come, see room_can_come) no village goes over `max`.
 fn select_village<'a>(
     villages: &'a [VillageState],
     request: &AssignRequest,
     max: usize,
     load: Option<&LoadView>,
+    overflow: bool,
 ) -> Option<&'a VillageState> {
     if let Some(preferred) = &request.preferred_village {
         let preferred = villages.iter().find(|v| &v.uuid == preferred).filter(|v| {
@@ -186,7 +188,7 @@ fn select_village<'a>(
             return preferred;
         }
     }
-    let caps = caps_by_server(villages, max, load);
+    let caps = caps_by_server(villages, max, load, overflow);
     let cap_of = |v: &VillageState| caps.get(&owner_key(v, load)).copied().unwrap_or(max);
     // Never on a frozen server, even as the last resort: better wait for habs elsewhere.
     let with_room = villages
@@ -239,17 +241,44 @@ fn server_cap(villages: &[&VillageState], base: usize) -> usize {
 }
 
 /// `server_cap` of every server owning villages. A frozen server takes no players: left out.
-fn caps_by_server(villages: &[VillageState], base: usize, load: Option<&LoadView>) -> HashMap<Option<String>, usize> {
+/// Whether a place under `max` can still come for the waiting players, so no village goes
+/// over it: a village under it with room on a server that takes players (refused only by
+/// the throttle, `load` being the load as published), habs on their way, a village its
+/// server can be asked for, a split or merge running or due. The caps rose by steps of 10
+/// while 25 servers were idle: the throttle refused the servers with villages under 50 for
+/// 2 s, and a village over 50 on another one went first (preprod, 2026-10-20). Without the
+/// load: habs on their way or a village left to ask for.
+fn room_can_come(villages: &[VillageState], max: usize, load: Option<&LoadView>) -> bool {
+    let takes_players = |v: &VillageState| load.map_or(true, |l| {
+        v.world.as_ref().and_then(|w| l.owner_of(w)).is_some_and(|s| l.accepts(s))
+    });
+    let responsive = |v: &VillageState| !load.is_some_and(|l| l.owner_unresponsive(v.world.as_ref()));
+    villages.iter().any(|v| v.has_room_under_cap(max) && takes_players(v))
+        || villages.iter().any(|v| v.is_spawn_pending() && responsive(v))
+        || villages.iter().any(|v| !v.is_spawn_pending_or_done() && load.map_or(true, |l| l.owner_takes_habs(v.world.as_ref())))
+        || load.is_some_and(LoadView::split_coming)
+}
+
+/// A waiting player is let into a village over `max_players_per_village` after this long
+/// even when room can still come: habs late or a split slow, it would otherwise reach
+/// HABS_WAIT and be disconnected.
+const OVERFLOW_AFTER: Duration = Duration::from_secs(30);
+
+/// Without `overflow`, `base` for every server.
+fn caps_by_server(villages: &[VillageState], base: usize, load: Option<&LoadView>, overflow: bool) -> HashMap<Option<String>, usize> {
     let mut by_server: HashMap<Option<String>, Vec<&VillageState>> = HashMap::new();
     for village in villages.iter().filter(|v| !load.is_some_and(|l| l.owner_unresponsive(v.world.as_ref()))) {
         by_server.entry(owner_key(village, load)).or_default().push(village);
     }
-    by_server.into_iter().map(|(server, villages)| (server, server_cap(&villages, base))).collect()
+    by_server
+        .into_iter()
+        .map(|(server, villages)| (server, if overflow { server_cap(&villages, base) } else { base }))
+        .collect()
 }
 
 /// The cap `village` was just given an apartment under.
-fn village_cap(villages: &[VillageState], village: &VillageState, base: usize, load: Option<&LoadView>) -> usize {
-    caps_by_server(villages, base, load).get(&owner_key(village, load)).copied().unwrap_or(base)
+fn village_cap(villages: &[VillageState], village: &VillageState, base: usize, load: Option<&LoadView>, overflow: bool) -> usize {
+    caps_by_server(villages, base, load, overflow).get(&owner_key(village, load)).copied().unwrap_or(base)
 }
 
 /// Log a server's cap when it changes.
@@ -1183,6 +1212,8 @@ async fn place_waiting(
 
     let max = village_config().max_players_per_village;
     let mut villages = if homeless.is_empty() { Vec::new() } else { by_hab_owner(collect_villages(&gorc_instances).await, load.as_ref()) };
+    // On the load as published: a server refused by the throttle takes players again in 2 s.
+    let room_coming = room_can_come(&villages, max, mesh_load::view().as_ref());
     let mut last_village: Option<usize> = None;
     let mut placed: Vec<(Arrival, Vec3, String)> = Vec::new();
     let mut unplaced: VecDeque<Arrival> = VecDeque::new();
@@ -1191,8 +1222,9 @@ async fn place_waiting(
             info!("plugin genericprops (new_player): player {} left before getting an apartment", arrival.player_uuid);
             continue;
         }
+        let overflow = !room_coming || arrival.since.elapsed() >= OVERFLOW_AFTER;
         // By identity: a village across a zone border has one entry per server (by_hab_owner).
-        let selected = select_village(&villages, &AssignRequest::default(), max, load.as_ref())
+        let selected = select_village(&villages, &AssignRequest::default(), max, load.as_ref(), overflow)
             .and_then(|chosen| villages.iter().position(|v| std::ptr::eq(v, chosen)));
         let Some(index) = selected else {
             // No room under the caps anywhere: none for the next ones either.
@@ -1215,7 +1247,7 @@ async fn place_waiting(
             queued.push(arrival);
             continue;
         }
-        let cap = village_cap(&villages, &villages[index], max, load.as_ref());
+        let cap = village_cap(&villages, &villages[index], max, load.as_ref(), overflow);
         note_cap(&villages[index], cap, max, load.as_ref());
         let mut home = None;
         let buildings: Vec<GorcObjectId> = villages[index].buildings.iter().map(|b| b.gorc_id).collect();
@@ -1495,14 +1527,14 @@ mod tests {
     #[test]
     fn starts_with_first_village_by_name() {
         let villages = [village("mining_village_02", 0, 100, 10.0), village("mining_village_01", 0, 100, 0.0)];
-        let chosen = select_village(&villages, &AssignRequest::default(), 50, None).unwrap();
+        let chosen = select_village(&villages, &AssignRequest::default(), 50, None, true).unwrap();
         assert_eq!(chosen.name, "mining_village_01");
     }
 
     #[test]
     fn fills_fullest_village_under_cap_first() {
         let villages = [village("mining_village_01", 10, 100, 0.0), village("mining_village_02", 30, 100, 10.0)];
-        let chosen = select_village(&villages, &AssignRequest::default(), 50, None).unwrap();
+        let chosen = select_village(&villages, &AssignRequest::default(), 50, None, true).unwrap();
         assert_eq!(chosen.name, "mining_village_02");
     }
 
@@ -1510,19 +1542,19 @@ mod tests {
     fn a_village_at_the_cap_takes_more_only_with_room() {
         // Every village holds its 50 players: the cap rises while the buildings have room.
         let villages = [village("mining_village_01", 50, 400, 0.0)];
-        assert_eq!(select_village(&villages, &AssignRequest::default(), 50, None).unwrap().name, "mining_village_01");
+        assert_eq!(select_village(&villages, &AssignRequest::default(), 50, None, true).unwrap().name, "mining_village_01");
         let villages = [village("mining_village_01", 50, 0, 0.0)];
-        assert!(select_village(&villages, &AssignRequest::default(), 50, None).is_none());
+        assert!(select_village(&villages, &AssignRequest::default(), 50, None, true).is_none());
     }
 
     #[test]
     fn preferred_village_over_cap_within_physical_room() {
         let villages = [village("mining_village_01", 50, 1, 0.0), village("mining_village_02", 0, 100, 10.0)];
         let request = AssignRequest { preferred_village: Some("uuid-mining_village_01".into()), allow_over_cap: true };
-        assert_eq!(select_village(&villages, &request, 50, None).unwrap().name, "mining_village_01");
+        assert_eq!(select_village(&villages, &request, 50, None, true).unwrap().name, "mining_village_01");
 
         let full = [village("mining_village_01", 51, 0, 0.0), village("mining_village_02", 0, 100, 10.0)];
-        assert_eq!(select_village(&full, &request, 50, None).unwrap().name, "mining_village_02");
+        assert_eq!(select_village(&full, &request, 50, None, true).unwrap().name, "mining_village_02");
     }
 
     #[test]
@@ -1605,9 +1637,9 @@ mod tests {
             on_sandbox(village("mining_village_09", 5, 45, 200.0)),  // east
         ];
         let load = mesh_load::view_of(sandbox_load(60, true, 10));
-        assert_eq!(select_village(&villages, &AssignRequest::default(), 50, Some(&load)).unwrap().name, "mining_village_09");
+        assert_eq!(select_village(&villages, &AssignRequest::default(), 50, Some(&load), true).unwrap().name, "mining_village_09");
         // Without the load: the fullest village, as before.
-        assert_eq!(select_village(&villages, &AssignRequest::default(), 50, None).unwrap().name, "mining_village_01");
+        assert_eq!(select_village(&villages, &AssignRequest::default(), 50, None, true).unwrap().name, "mining_village_01");
     }
 
     #[test]
@@ -1617,14 +1649,14 @@ mod tests {
             on_sandbox(village("mining_village_09", 45, 5, 200.0)),  // east: busier but reporting
         ];
         let load = mesh_load::view_of(sandbox_load(10, false, 70));
-        assert_eq!(select_village(&villages, &AssignRequest::default(), 50, Some(&load)).unwrap().name, "mining_village_09");
+        assert_eq!(select_village(&villages, &AssignRequest::default(), 50, Some(&load), true).unwrap().name, "mining_village_09");
 
         // East at the cap with room left: its cap rises before a refusing server gets any.
         let villages = [on_sandbox(village("mining_village_01", 10, 40, 0.0)), on_sandbox(village("mining_village_09", 50, 5, 200.0))];
-        assert_eq!(select_village(&villages, &AssignRequest::default(), 50, Some(&load)).unwrap().name, "mining_village_09");
+        assert_eq!(select_village(&villages, &AssignRequest::default(), 50, Some(&load), true).unwrap().name, "mining_village_09");
         // East's buildings full: the refusing one is better than no apartment.
         let villages = [on_sandbox(village("mining_village_01", 10, 40, 0.0)), on_sandbox(village("mining_village_09", 50, 0, 200.0))];
-        assert_eq!(select_village(&villages, &AssignRequest::default(), 50, Some(&load)).unwrap().name, "mining_village_01");
+        assert_eq!(select_village(&villages, &AssignRequest::default(), 50, Some(&load), true).unwrap().name, "mining_village_01");
     }
 
     #[test]
@@ -1635,7 +1667,7 @@ mod tests {
         ];
         // East has fewer players but is at the split rule (75): west takes them.
         let load = mesh_load::view_of(sandbox_load(74, true, 75));
-        assert_eq!(select_village(&villages, &AssignRequest::default(), 50, Some(&load)).unwrap().name, "mining_village_01");
+        assert_eq!(select_village(&villages, &AssignRequest::default(), 50, Some(&load), true).unwrap().name, "mining_village_01");
     }
 
     fn hab_at(x: f64, free: usize) -> Building {
@@ -1655,10 +1687,60 @@ mod tests {
         let east = parts.iter().find(|p| load.owner_of(p.world.as_ref().unwrap()).unwrap().name == "east").unwrap();
         assert_eq!((east.free, east.occupancy, east.buildings.len()), (20, 30, 1), "its own room, the whole village's occupancy");
         // West refuses, but the free apartments are in east: the player is placed there.
-        let chosen = select_village(&parts, &AssignRequest::default(), 50, Some(&load)).unwrap();
+        let chosen = select_village(&parts, &AssignRequest::default(), 50, Some(&load), true).unwrap();
         assert!(std::ptr::eq(chosen, east));
         // Without the load nothing is cut.
         assert_eq!(by_hab_owner(vec![across], None).len(), 1);
+    }
+
+    #[test]
+    fn no_village_goes_over_the_cap_while_room_can_come() {
+        // West has room under 50 but had its share of arrivals (throttle); east's village
+        // holds 50 with apartments left.
+        let villages = [
+            on_sandbox(village("mining_village_01", 30, 20, 0.0)),
+            on_sandbox(village("mining_village_09", 50, 30, 200.0)),
+        ];
+        let published = mesh_load::view_of(sandbox_load(30, true, 50));
+        let mut throttled = published.clone();
+        throttled.refuse("uuid-west");
+        assert!(room_can_come(&villages, 50, Some(&published)), "west takes players again in 2 s");
+        // The player waits for west (its server refuses now, the caller queues it)...
+        assert_eq!(select_village(&villages, &AssignRequest::default(), 50, Some(&throttled), false).unwrap().name, "mining_village_01");
+        assert_eq!(village_cap(&villages, &villages[1], 50, Some(&throttled), false), 50);
+        // ...where the overflow sent it over 50 in east.
+        assert_eq!(select_village(&villages, &AssignRequest::default(), 50, Some(&throttled), true).unwrap().name, "mining_village_09");
+    }
+
+    #[test]
+    fn room_comes_from_habs_villages_to_ask_for_or_a_split() {
+        let full = |name: &str, x: f64| on_sandbox(village(name, 50, 30, x));
+        let mut pool = sandbox_load(50, true, 50);
+        pool.idle_servers = Some(0);
+        let load = mesh_load::view_of(pool.clone());
+        let villages = vec![full("mining_village_01", 0.0), full("mining_village_09", 200.0)];
+        assert!(!room_can_come(&villages, 50, Some(&load)), "every village at the cap, nothing coming");
+
+        let mut pending = on_sandbox(village("mining_village_02", 0, 0, 10.0));
+        pending.spawn_requested = true;
+        assert!(room_can_come(&[villages.clone(), vec![pending]].concat(), 50, Some(&load)), "habs on their way");
+
+        let unspawned = on_sandbox(village("mining_village_03", 0, 0, 20.0));
+        assert!(room_can_come(&[villages.clone(), vec![unspawned.clone()]].concat(), 50, Some(&load)), "a village to ask for");
+        let mut frozen = pool.clone();
+        frozen.servers[0].responsive = false;
+        assert!(!room_can_come(&[villages.clone(), vec![unspawned]].concat(), 50, Some(&mesh_load::view_of(frozen))),
+            "not on a frozen server");
+
+        // East over its split rule with an idle server left: a split comes.
+        let mut splitting = pool.clone();
+        splitting.idle_servers = Some(3);
+        splitting.servers[1].accepting = false;
+        assert!(room_can_come(&villages, 50, Some(&mesh_load::view_of(splitting.clone()))));
+        splitting.idle_servers = Some(0);
+        assert!(!room_can_come(&villages, 50, Some(&mesh_load::view_of(splitting.clone()))), "the pool is empty");
+        splitting.ops_running = 1;
+        assert!(room_can_come(&villages, 50, Some(&mesh_load::view_of(splitting))), "a split running");
     }
 
     #[test]
@@ -1707,10 +1789,10 @@ mod tests {
         // one on a server that will not simulate the player (preprod, 2026-10-16).
         let villages = [on_sandbox(village("mining_village_01", 10, 40, 0.0)), on_sandbox(village("mining_village_09", 50, 0, 200.0))];
         let frozen = sandbox_load_west(10, false, false, 70);
-        assert!(select_village(&villages, &AssignRequest::default(), 50, Some(&frozen)).is_none());
+        assert!(select_village(&villages, &AssignRequest::default(), 50, Some(&frozen), true).is_none());
         // Only loading: still the last resort, as before.
         let loading = sandbox_load_west(10, true, true, 70);
-        assert_eq!(select_village(&villages, &AssignRequest::default(), 50, Some(&loading)).unwrap().name, "mining_village_01");
+        assert_eq!(select_village(&villages, &AssignRequest::default(), 50, Some(&loading), true).unwrap().name, "mining_village_01");
     }
 
     #[test]
@@ -1754,13 +1836,13 @@ mod tests {
     #[test]
     fn without_load_every_village_rises_by_ten_together() {
         let villages = [village("mining_village_01", 50, 30, 0.0), village("mining_village_02", 50, 30, 10.0)];
-        assert_eq!(village_cap(&villages, &villages[0], 50, None), 60);
+        assert_eq!(village_cap(&villages, &villages[0], 50, None, true), 60);
         // Both fill to 60 before either goes to 70.
         let villages = [village("mining_village_01", 60, 20, 0.0), village("mining_village_02", 55, 25, 10.0)];
-        assert_eq!(village_cap(&villages, &villages[0], 50, None), 60);
-        assert_eq!(select_village(&villages, &AssignRequest::default(), 50, None).unwrap().name, "mining_village_02");
+        assert_eq!(village_cap(&villages, &villages[0], 50, None, true), 60);
+        assert_eq!(select_village(&villages, &AssignRequest::default(), 50, None, true).unwrap().name, "mining_village_02");
         let villages = [village("mining_village_01", 60, 20, 0.0), village("mining_village_02", 60, 20, 10.0)];
-        assert_eq!(village_cap(&villages, &villages[0], 50, None), 70);
+        assert_eq!(village_cap(&villages, &villages[0], 50, None, true), 70);
     }
 
     #[test]
@@ -1774,14 +1856,14 @@ mod tests {
             on_sandbox(village("mining_village_11", 50, 30, 220.0)),
         ];
         let load = uncapped(100, 150);
-        let chosen = select_village(&villages, &AssignRequest::default(), 50, Some(&load)).unwrap();
+        let chosen = select_village(&villages, &AssignRequest::default(), 50, Some(&load), true).unwrap();
         assert!(chosen.name == "mining_village_01" || chosen.name == "mining_village_02", "west: {}", chosen.name);
-        assert_eq!(village_cap(&villages, chosen, 50, Some(&load)), 60);
+        assert_eq!(village_cap(&villages, chosen, 50, Some(&load), true), 60);
         // West past east: east takes the arrivals, its villages at 60 now.
         let load = uncapped(160, 150);
-        let chosen = select_village(&villages, &AssignRequest::default(), 50, Some(&load)).unwrap();
+        let chosen = select_village(&villages, &AssignRequest::default(), 50, Some(&load), true).unwrap();
         assert!(chosen.name.as_str() >= "mining_village_09", "east: {}", chosen.name);
-        assert_eq!(village_cap(&villages, chosen, 50, Some(&load)), 60);
+        assert_eq!(village_cap(&villages, chosen, 50, Some(&load), true), 60);
     }
 
     #[test]
@@ -1797,7 +1879,7 @@ mod tests {
         let (mut west, mut east) = (100u32, 150u32);
         for _ in 0..200 {
             let load = uncapped(west, east);
-            let chosen = select_village(&villages, &AssignRequest::default(), 50, Some(&load)).unwrap().uuid.clone();
+            let chosen = select_village(&villages, &AssignRequest::default(), 50, Some(&load), true).unwrap().uuid.clone();
             let v = villages.iter_mut().find(|v| v.uuid == chosen).unwrap();
             v.occupancy += 1;
             v.free -= 1;
@@ -1818,15 +1900,15 @@ mod tests {
             on_sandbox(village("mining_village_13", 10, 40, 200.0)), // east, room under 50
         ];
         let load = uncapped(45, 70);
-        assert_eq!(select_village(&villages, &AssignRequest::default(), 50, Some(&load)).unwrap().name, "mining_village_13");
+        assert_eq!(select_village(&villages, &AssignRequest::default(), 50, Some(&load), true).unwrap().name, "mining_village_13");
         // No village under 50 on a server taking players: the least loaded rises.
         let villages = [
             on_sandbox(village("mining_village_03", 50, 150, 0.0)),
             on_sandbox(village("mining_village_13", 50, 40, 200.0)),
         ];
-        let chosen = select_village(&villages, &AssignRequest::default(), 50, Some(&load)).unwrap();
+        let chosen = select_village(&villages, &AssignRequest::default(), 50, Some(&load), true).unwrap();
         assert_eq!(chosen.name, "mining_village_03");
-        assert_eq!(village_cap(&villages, chosen, 50, Some(&load)), 60);
+        assert_eq!(village_cap(&villages, chosen, 50, Some(&load), true), 60);
     }
 
     #[test]
@@ -1836,7 +1918,7 @@ mod tests {
             on_sandbox(village("mining_village_09", 40, 30, 200.0)), // east, room under 50
         ];
         let load = uncapped(100, 100);
-        assert_eq!(select_village(&villages, &AssignRequest::default(), 50, Some(&load)).unwrap().name, "mining_village_09");
+        assert_eq!(select_village(&villages, &AssignRequest::default(), 50, Some(&load), true).unwrap().name, "mining_village_09");
     }
 
     #[test]
@@ -1849,11 +1931,11 @@ mod tests {
             on_sandbox(village("mining_village_09", 45, 30, 200.0)), // east
         ];
         let load = uncapped(50, 120);
-        assert_eq!(village_cap(&villages, &villages[0], 50, Some(&load)), 50, "habs coming: they take the next players");
-        assert_eq!(select_village(&villages, &AssignRequest::default(), 50, Some(&load)).unwrap().name, "mining_village_09");
+        assert_eq!(village_cap(&villages, &villages[0], 50, Some(&load), true), 50, "habs coming: they take the next players");
+        assert_eq!(select_village(&villages, &AssignRequest::default(), 50, Some(&load), true).unwrap().name, "mining_village_09");
         // No physical room anywhere: nothing to raise.
         let villages = [village("mining_village_01", 50, 0, 0.0)];
-        assert_eq!(village_cap(&villages, &villages[0], 50, None), 50);
+        assert_eq!(village_cap(&villages, &villages[0], 50, None, true), 50);
     }
 
     #[test]
@@ -1866,7 +1948,7 @@ mod tests {
             on_sandbox(village("mining_village_10", 0, 0, 210.0)),   // east, unspawned
         ];
         let load = mesh_load::view_of(sandbox_load(50, true, 230));
-        assert_eq!(select_village(&villages, &AssignRequest::default(), 50, Some(&load)).unwrap().name, "mining_village_01");
+        assert_eq!(select_village(&villages, &AssignRequest::default(), 50, Some(&load), true).unwrap().name, "mining_village_01");
         assert!(villages_to_request(&villages, &villages[0], 50, 100, Some(&load)).is_empty());
     }
 
@@ -1877,8 +1959,8 @@ mod tests {
             on_sandbox(village("mining_village_09", 50, 30, 200.0)),  // east, at the cap
         ];
         let frozen = sandbox_load_west(10, false, false, 50);
-        assert_eq!(select_village(&villages, &AssignRequest::default(), 50, Some(&frozen)).unwrap().name, "mining_village_09");
-        assert_eq!(village_cap(&villages, &villages[1], 50, Some(&frozen)), 60);
+        assert_eq!(select_village(&villages, &AssignRequest::default(), 50, Some(&frozen), true).unwrap().name, "mining_village_09");
+        assert_eq!(village_cap(&villages, &villages[1], 50, Some(&frozen), true), 60);
     }
 
     #[test]
@@ -2032,9 +2114,9 @@ mod tests {
             on_sandbox(village("mining_village_09", 10, 40, 200.0)), // east
         ];
         let mut load = mesh_load::view_of(sandbox_load(10, true, 30));
-        assert_eq!(select_village(&villages, &AssignRequest::default(), 50, Some(&load)).unwrap().name, "mining_village_01");
+        assert_eq!(select_village(&villages, &AssignRequest::default(), 50, Some(&load), true).unwrap().name, "mining_village_01");
         load.refuse("uuid-west");
-        assert_eq!(select_village(&villages, &AssignRequest::default(), 50, Some(&load)).unwrap().name, "mining_village_09");
+        assert_eq!(select_village(&villages, &AssignRequest::default(), 50, Some(&load), true).unwrap().name, "mining_village_09");
         assert!(refusing_owner(Some(&load), villages[0].world.as_ref()).is_some());
     }
 

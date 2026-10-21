@@ -82,6 +82,14 @@ impl LoadView {
             && !self.load.servers.iter().any(|s| s.loading || self.accepts(s))
     }
 
+    /// A split or merge is running or queued, or one will come: a server refuses players
+    /// while an idle server is left to take part of them.
+    pub fn split_coming(&self) -> bool {
+        self.load.ops_running > 0
+            || (self.load.idle_servers.is_some_and(|idle| idle > 0)
+                && self.load.servers.iter().any(|s| s.responsive && !self.accepts(s)))
+    }
+
     pub fn accepts(&self, server: &ServerLoad) -> bool {
         server.accepting && self.load.capacity.map_or(true, |cap| self.players(server) < cap)
     }

@@ -2318,6 +2318,10 @@ mod tests {
         let mut busy = sandbox_load(50, true, 230);
         busy.servers[1].busy = true;
         assert!(villages_to_request(&villages, &villages[0], 50, 1000, 0.0, Some(&mesh_load::view_of(busy))).is_empty());
+        // In a split nobody takes players: still none on the servers of the split.
+        let mut splitting = sandbox_load(50, false, 230);
+        splitting.servers[1].busy = true;
+        assert!(villages_to_request(&villages, &villages[0], 50, 1000, 0.0, Some(&mesh_load::view_of(splitting))).is_empty());
     }
 
     #[test]

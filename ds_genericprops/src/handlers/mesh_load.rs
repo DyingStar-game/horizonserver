@@ -123,11 +123,14 @@ impl LoadView {
     /// The habs went to the most loaded server of the pool (275 players, tps 0-16) once the
     /// accepting ones had no village left to spawn, and its fresh villages drew every arrival
     /// (preprod, 2026-10-16). A place no running server owns may.
-    /// A server refusing players with HABS_MIN_TPS or more, not in a split or merge, may too.
+    /// A server refusing players with HABS_MIN_TPS or more may too. Never one in a split or
+    /// merge, even when no server takes players: during a split nobody does, 6 villages went
+    /// to its fresh child and their 469 items to the parent at 95 players, down to 14 tps
+    /// (preprod, 2026-10-21).
     pub fn owner_takes_habs(&self, world: Option<&ObjectWorld>) -> bool {
         world.and_then(|w| self.owner_of(w)).map_or(true, |s| {
-            s.responsive && !s.loading
-                && (self.accepts(s) || !self.any_accepting() || (!s.busy && s.tps >= HABS_MIN_TPS))
+            s.responsive && !s.loading && !s.busy
+                && (self.accepts(s) || !self.any_accepting() || s.tps >= HABS_MIN_TPS)
         })
     }
 

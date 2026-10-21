@@ -972,12 +972,16 @@ enum Wait {
     /// Its village's server takes no new player now (full, under placement_min_tps, in a
     /// split or merge, loading, frozen).
     ServerFull,
+    /// Startup: the prespawned villages are not all ready yet (see prespawn_ready). Never
+    /// disconnected for it, unlike Habs.
+    Prespawn,
 }
 
 impl Wait {
     fn reason(self) -> &'static str {
         match self {
-            Wait::Habs => "habs",
+            // The client knows these two: the startup is a wait for habs to it.
+            Wait::Habs | Wait::Prespawn => "habs",
             Wait::ServerFull => "server_full",
         }
     }
@@ -1038,12 +1042,12 @@ impl Arrival {
 
     /// Queued for `wait`: logged once per reason.
     fn queue(&mut self, wait: Wait, why: impl FnOnce() -> String) {
-        if self.wait != Some(wait) && wait == Wait::ServerFull {
+        if self.wait != Some(wait) && wait != Wait::Habs {
             info!("plugin genericprops (new_player): player {} queued: {}", self.player_uuid, why());
         }
         match wait {
             Wait::Habs => { self.habs_since.get_or_insert_with(Instant::now); }
-            Wait::ServerFull => self.habs_since = None,
+            Wait::ServerFull | Wait::Prespawn => self.habs_since = None,
         }
         self.wait = Some(wait);
     }
@@ -1064,7 +1068,7 @@ impl Arrival {
 
     /// Leaves the queue to be spawned.
     fn log_admitted(&self) {
-        if self.wait == Some(Wait::ServerFull) {
+        if matches!(self.wait, Some(Wait::ServerFull | Wait::Prespawn)) {
             info!("plugin genericprops (new_player): player {} leaves the queue after {:?}", self.player_uuid, self.since.elapsed());
         }
     }
@@ -1370,6 +1374,19 @@ async fn place_waiting(
 
     let max = village_config().max_players_per_village;
     let mut villages = if homeless.is_empty() { Vec::new() } else { by_hab_owner(collect_villages(&gorc_instances).await, load.as_ref()) };
+    // Startup: nobody new is placed before the prespawned villages are all ready, the
+    // first ones would otherwise take every arrival (and their server) while the others
+    // spawn. They wait in the queue, never disconnected for it.
+    if !homeless.is_empty() && !prespawn_ready(&villages, &config, mesh_load::view().as_ref()) {
+        for mut arrival in homeless.drain(..) {
+            if !player_connected(events, &arrival.player_uuid).await {
+                info!("plugin genericprops (new_player): player {} left while the villages were spawning", arrival.player_uuid);
+                continue;
+            }
+            arrival.queue(Wait::Prespawn, || "the prespawned villages are not all ready yet".to_string());
+            queued.push(arrival);
+        }
+    }
     // On the load as published: a server refused by the throttle takes players again in 2 s.
     let room_coming = room_can_come(&villages, max, mesh_load::view().as_ref());
     let mut last_village: Option<usize> = None;
@@ -1515,6 +1532,39 @@ async fn place_waiting(
             arrival.notified_place = Some(place);
         }
     }
+}
+
+/// Whether the startup is over: `prespawn_villages` villages (or every one there is) have
+/// their habs. Latched: once over, it never holds anyone again. Without the load (no prespawn
+/// then) or with `prespawn_villages` 0 there is no startup to wait for.
+fn prespawn_ready(villages: &[VillageState], config: &VillageConfig, load: Option<&LoadView>) -> bool {
+    static READY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if READY.load(std::sync::atomic::Ordering::Relaxed) {
+        return true;
+    }
+    let ready = prespawn_done(villages, config.prespawn_villages, load.is_some());
+    if ready {
+        READY.store(true, std::sync::atomic::Ordering::Relaxed);
+        info!("plugin genericprops (new_player): the prespawned villages are ready, new players are placed");
+    } else if reserve_warning_due() {
+        let spawned: HashSet<&str> = villages.iter().filter(|v| !v.buildings.is_empty()).map(|v| v.uuid.as_str()).collect();
+        info!(
+            "plugin genericprops (new_player): new players wait for the prespawned villages ({}/{} ready)",
+            spawned.len(), config.prespawn_villages
+        );
+    }
+    ready
+}
+
+/// `prespawn_ready` without the latch: `prespawn` villages with habs (a village split
+/// between servers counts once), or all of them when there are fewer.
+fn prespawn_done(villages: &[VillageState], prespawn: usize, with_load: bool) -> bool {
+    if !with_load || prespawn == 0 {
+        return true;
+    }
+    let all: HashSet<&str> = villages.iter().map(|v| v.uuid.as_str()).collect();
+    let spawned: HashSet<&str> = villages.iter().filter(|v| !v.buildings.is_empty()).map(|v| v.uuid.as_str()).collect();
+    !all.is_empty() && spawned.len() >= prespawn.min(all.len())
 }
 
 /// With nobody waiting (a new load every 5 s, habs arriving): keep the reserve anyway, so
@@ -1997,6 +2047,22 @@ mod tests {
         assert!(villages_wanted(&villages, &[], 50, 750, Some(&mesh_load::view_of(pool))).is_empty());
         // West takes players again: its villages are asked of it, no split.
         assert!(villages_wanted(&villages, &[], 50, 750, Some(&mesh_load::view_of(sandbox_load(10, true, 50)))).is_empty());
+    }
+
+    #[test]
+    fn new_players_wait_for_the_prespawned_villages() {
+        let spawned = |name: &str| village(name, 0, 50, 0.0);
+        let unspawned = |name: &str| village(name, 0, 0, 0.0);
+        let villages = vec![spawned("M0001"), spawned("M0002"), unspawned("M0003"), unspawned("M0004")];
+        assert!(!prespawn_done(&villages, 3, true), "2 of 3 ready");
+        assert!(prespawn_done(&villages, 2, true));
+        assert!(prespawn_done(&villages[..2], 15, true), "fewer villages than the prespawn: all of them");
+        // A village across a border (one entry per server) counts once.
+        let split = vec![spawned("M0001"), spawned("M0001"), unspawned("M0002")];
+        assert!(!prespawn_done(&split, 2, true));
+        assert!(prespawn_done(&villages, 3, false), "no load, no prespawn: nothing to wait for");
+        assert!(prespawn_done(&villages, 0, true));
+        assert!(!prespawn_done(&[], 15, true), "startup items not imported yet");
     }
 
     #[test]

@@ -104,6 +104,7 @@ village_radius = 200
 # Villages kept spawned ahead even with nobody arriving, from the start (default
 # 15, 0 = only on arrivals): spawned on arrivals only, 600 players waited 110 s in
 # the queue. Spawned villages are persisted: only a persistence reset costs again.
+# At startup new players wait in the queue until those villages all have their habs.
 prespawn_villages = 15
 # A player (new, or back from an earlier session) whose village is on a server
 # taking no new player (over placement_capacity, under placement_min_tps, in a split

@@ -140,7 +140,9 @@ The reserve is `village_free_reserve` plus `village_reserve_per_server` villages
 each accepting server that owns villages, so habs are asked for before the open
 villages fill up on every server at once, and never less than `prespawn_villages` (15)
 villages: the reserve is also kept with nobody arriving (on every `servers_load` and every
-hab registered), so the villages are spawned before the players come. Among the accepting servers, a village whose
+hab registered), so the villages are spawned before the players come. At startup no new
+player is placed before those villages all have their habs: arrivals wait in the queue
+(`queued`, reason `habs`), never disconnected for it; returning players spawn at home. Among the accepting servers, a village whose
 `village_radius` disc lies in one zone is asked for before one across a zone border.
 A server refusing players may still be asked for habs when it has the tps for it
 (`HABS_MIN_TPS`, 55) and is in no split or merge (`busy` in `servers_load`), one village at a

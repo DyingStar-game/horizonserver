@@ -195,7 +195,7 @@ pub fn handle_object_create(
 						// (space / planet + local position) so ds_game_server can pick
 						// the Godot server owning that zone.
 						let mut event_with_position = event.clone();
-						let object_world = world::resolve_world(&gorc_instances, position, parent_id.clone()).await;
+						let object_world = world::resolve_player_world(&gorc_instances, position, parent_id.clone()).await;
 						world::inject_global_position(&mut event_with_position["object_data"], global_position);
 						world::inject_world(&mut event_with_position["object_data"], &object_world);
 

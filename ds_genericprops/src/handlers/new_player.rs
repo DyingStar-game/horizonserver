@@ -9,7 +9,7 @@ use tracing::{debug, error, warn, info};
 
 use crate::genericprops::{distance_squared, GenericProps};
 use crate::handlers::mesh_load::{self, LoadView};
-use crate::handlers::world::{read_own_local_and_parent, resolve_world};
+use crate::handlers::world::{read_own_local_and_parent, resolve_player_world, resolve_world};
 use ds_common::mesh_load::ServerLoad;
 use ds_common::world::ObjectWorld;
 
@@ -1245,7 +1245,7 @@ async fn place_waiting(
                     "plugin genericprops (new_player): player {} already has apartment {:?} in building {} → position {:?}",
                     arrival.player_uuid, slot, uuid, position
                 );
-                let world = resolve_world(&gorc_instances, *position, Some(uuid.clone())).await;
+                let world = resolve_player_world(&gorc_instances, *position, Some(uuid.clone())).await;
                 arrival.home = Some(Home { position: *position, building_uuid: uuid.clone(), world });
             }
         }

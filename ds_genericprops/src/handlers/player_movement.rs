@@ -430,7 +430,7 @@ pub fn handle_movement_request_sync(
                                 .await
                                 .flatten();
                             let (own_local, parent_id) = stored.unwrap_or((move_data.position, None));
-                            let object_world = world::resolve_world(&gorc_instances, own_local, parent_id).await;
+                            let object_world = world::resolve_player_world(&gorc_instances, own_local, parent_id).await;
 
                             let mut prop_properties = HashMap::new();
                             if let Some(generic_props) = object_instance.get_object_mut::<GenericProps>() {

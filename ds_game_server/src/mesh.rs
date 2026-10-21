@@ -343,8 +343,10 @@ fn round3(v: f64) -> f64 {
 /// anyway — an overloaded server must be split, ping-pong or not.
 pub const MIN_CUT_GAP: f64 = 20.0;
 
-/// Metres a cut keeps from a village's habs.
-pub const VILLAGE_MARGIN: f64 = 10.0;
+/// Metres a cut keeps from a village's habs: a hab spans ~20 m past its origin and a cut
+/// 3.9 m past one left its occupants on another server (preprod, 2026-10-21); 300 m keeps
+/// the whole village and its surroundings on one side.
+pub const VILLAGE_MARGIN: f64 = 300.0;
 
 /// The box each village with a hab in `zone` stands in (its habs' planet-local
 /// positions), grown by VILLAGE_MARGIN.
@@ -592,35 +594,35 @@ mod tests {
         assert_eq!((plan.keep_players, plan.give_players), (26, 26));
     }
 
-    /// Three villages of 20 players along X (habs at x .. x+30), 100 m apart.
+    /// Three villages of 20 players along X (habs at x .. x+600), 2 km apart.
     fn three_villages() -> (Vec<ObjectWorld>, Vec<Vec<ObjectWorld>>) {
         let mut players = Vec::new();
         let mut villages = Vec::new();
-        for start in [0.0, 130.0, 260.0] {
-            players.extend((0..20).map(|i| on_planet("p", start + i as f64 * 1.5, 0.0, 0.0)));
-            villages.push(vec![on_planet("p", start, 0.0, 0.0), on_planet("p", start + 30.0, 0.0, 0.0)]);
+        for start in [0.0, 2600.0, 5200.0] {
+            players.extend((0..20).map(|i| on_planet("p", start + i as f64 * 30.0, 0.0, 0.0)));
+            villages.push(vec![on_planet("p", start, 0.0, 0.0), on_planet("p", start + 600.0, 0.0, 0.0)]);
         }
         (players, villages)
     }
 
     #[test]
     fn a_cut_moves_out_of_the_village_it_runs_through() {
-        // Village A (habs 0..10, 10 players), 10 players walking from 40 to 90, village B
-        // (habs 100..130, 40 players): no 20 m gap in the middle half, the median falls in B.
-        let mut players: Vec<ObjectWorld> = (0..10).map(|i| on_planet("p", i as f64, 0.0, 0.0)).collect();
-        players.extend((0..10).map(|i| on_planet("p", 40.0 + i as f64 * 5.5, 0.0, 0.0)));
-        players.extend((0..40).map(|i| on_planet("p", 100.0 + i as f64 * 0.75, 0.0, 0.0)));
+        // Village A (habs 0..200, 10 players), 10 players walking from 800 to 1610, village B
+        // (habs 2000..2600, 40 players).
+        let mut players: Vec<ObjectWorld> = (0..10).map(|i| on_planet("p", i as f64 * 20.0, 0.0, 0.0)).collect();
+        players.extend((0..10).map(|i| on_planet("p", 800.0 + i as f64 * 90.0, 0.0, 0.0)));
+        players.extend((0..40).map(|i| on_planet("p", 2000.0 + i as f64 * 15.0, 0.0, 0.0)));
         let villages = vec![
-            vec![on_planet("p", 0.0, 0.0, 0.0), on_planet("p", 10.0, 0.0, 0.0)],
-            vec![on_planet("p", 100.0, 0.0, 0.0), on_planet("p", 130.0, 0.0, 0.0)],
+            vec![on_planet("p", 0.0, 0.0, 0.0), on_planet("p", 200.0, 0.0, 0.0)],
+            vec![on_planet("p", 2000.0, 0.0, 0.0), on_planet("p", 2600.0, 0.0, 0.0)],
         ];
         let zones = vec![Zone::planet("p", "x")];
+        // The widest gap of the middle half, 1805: 195 m from B's first hab.
         let plain = plan_split(&zones, &players, &[]).unwrap();
-        assert_eq!(plain.keep[0].bounds.as_ref().unwrap().max_x, 107.125);
-        assert_eq!((plain.keep_players, plain.give_players), (30, 30));
-        // With the villages: B's edge (100 - 10 m), still in the middle half.
+        assert_eq!(plain.keep[0].bounds.as_ref().unwrap().max_x, 1805.0);
+        // With the villages: B's edge, VILLAGE_MARGIN before its first hab.
         let plan = plan_split(&zones, &players, &villages).unwrap();
-        assert_eq!(plan.keep[0].bounds.as_ref().unwrap().max_x, 90.0);
+        assert_eq!(plan.keep[0].bounds.as_ref().unwrap().max_x, 2000.0 - VILLAGE_MARGIN);
         assert_eq!((plan.keep_players, plan.give_players), (20, 40), "B whole on one server");
     }
 

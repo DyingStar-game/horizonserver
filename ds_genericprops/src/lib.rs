@@ -443,7 +443,7 @@ impl GenericPropsPlugin {
                         debug!("plugin genericprops (get_objects_snapshot): {} not in GORC, skipped", prop_uuid);
                         continue;
                     };
-                    let object_world = world::resolve_world(&gorc_instances, own_local, parent_id).await;
+                    let object_world = world::resolve_world_of(&gorc_instances, &object_type, own_local, parent_id).await;
                     let mut object_data = Value::Object(prop_properties);
                     world::inject_global_position(&mut object_data, global_position);
                     world::inject_world(&mut object_data, &object_world);

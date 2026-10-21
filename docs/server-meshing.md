@@ -202,6 +202,12 @@ of that server and the whole village's occupancy. Admitted on the centre's serve
 players were sent to a server that never had their hab ("parent_id not found",
 preprod 2026-10-20).
 
+A player in its apartment (parented to a `spawnbuilding`) belongs with its hab: its `_world`
+is the hab's (`world::resolve_player_world`), for the arrival, the split snapshot and
+hand-over, the freeze and `player_out_of_zone`. Godot already moves a player on a prop with
+the prop; ruled by its own position, a player whose apartment was 3.9 m across a border
+from its hab's origin went to a server without the hab (preprod 2026-10-21).
+
 ## Configuration (`plugins.toml`, `[ds_game_server]`)
 
 ```toml
@@ -245,7 +251,7 @@ placement_min_tps = 45         # under this tps a server takes no new player
      under the zone's id. A cut is made on the widest axis of the population, at
      every 1/pieces of it (`mesh::split_bounds_n`; in two: the median or a wide gap,
      `mesh::split_bounds`); each child's piece gets a new zone id. A cut running
-     through a village (the box of its habs, by `poi_uuid`, grown by 10 m) moves to
+     through a village (the box of its habs, by `poi_uuid`, grown by 300 m) moves to
      the closest village edge clear of every village that keeps the balance (the
      middle half of the population; half a piece around each cut in pieces); with
      none, it stays: a village cut in two stays correct, its habs follow their zone.

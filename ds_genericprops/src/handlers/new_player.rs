@@ -143,13 +143,29 @@ fn slot_position(building: &GenericProps, (floor, row, col): (i64, i64, i64)) ->
     let spawn_point_axis = |axis: &str| spawn_point.and_then(|s| s.get(axis)).and_then(|v| v.as_f64()).unwrap_or(0.0);
     let (spawn_point_x, spawn_point_y, spawn_point_z) = (spawn_point_axis("x"), spawn_point_axis("y"), spawn_point_axis("z"));
 
-    let x = if col == 0 { spawn_point_x } else { x_spacing - spawn_point_x };
-    let z = if col == 0 { spawn_point_z } else { z_spacing - spawn_point_z };
-    Vec3::new(
-        x + (row as f64 * x_spacing),
-        spawn_point_y + (floor as f64 * y_spacing),
-        z + (col as f64 * z_spacing),
-    )
+    let (x, y, z) = slot_offset(
+        (x_spacing, y_spacing, z_spacing),
+        (spawn_point_x, spawn_point_y, spawn_point_z),
+        (floor, row, col),
+    );
+    Vec3::new(x, y, z)
+}
+
+/// Where the spawn point of apartment 0-0-0 lands in apartment (floor, row, col), local to the
+/// building. The second row is the first one turned half round (SpawnBuilding._create_apartments:
+/// rotated 180 degrees about up at x = 2 x_spacing, z = (col + 1) z_spacing), so its point is the
+/// first row's mirrored through the apartment's middle -- the ROW decides it, not the column. With
+/// the column, every apartment past the first of a row put its player in the mirrored spot: unseen
+/// while the point was the container's middle (its own mirror), inside the shower once it was not.
+fn slot_offset(
+    (x_spacing, y_spacing, z_spacing): (f64, f64, f64),
+    (spawn_x, spawn_y, spawn_z): (f64, f64, f64),
+    (floor, row, col): (i64, i64, i64),
+) -> (f64, f64, f64) {
+    let turned = row != 0;
+    let x = if turned { x_spacing - spawn_x } else { spawn_x };
+    let z = if turned { z_spacing - spawn_z } else { spawn_z };
+    (x + row as f64 * x_spacing, spawn_y + floor as f64 * y_spacing, z + col as f64 * z_spacing)
 }
 
 /// The village a player gets an apartment in, or None when no village has room under its
@@ -1394,6 +1410,30 @@ fn player_object_data(arrival: &Arrival, spawn_position: Vec3, building_uuid: &s
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const CONTAINER: (f64, f64, f64) = (-6.1, 2.6, 2.6);
+    const BESIDE_THE_BED: (f64, f64, f64) = (-4.75, 0.15, 0.85);
+
+    fn close(a: (f64, f64, f64), b: (f64, f64, f64)) -> bool {
+        (a.0 - b.0).abs() < 1e-9 && (a.1 - b.1).abs() < 1e-9 && (a.2 - b.2).abs() < 1e-9
+    }
+
+    #[test]
+    fn the_first_row_keeps_the_spawn_point_in_every_column() {
+        assert!(close(slot_offset(CONTAINER, BESIDE_THE_BED, (0, 0, 0)), (-4.75, 0.15, 0.85)));
+        assert!(close(slot_offset(CONTAINER, BESIDE_THE_BED, (0, 0, 3)), (-4.75, 0.15, 0.85 + 3.0 * 2.6)),
+            "the same spot beside the bed, three containers along");
+        assert!(close(slot_offset(CONTAINER, BESIDE_THE_BED, (2, 0, 1)), (-4.75, 0.15 + 5.2, 0.85 + 2.6)),
+            "two storeys up");
+    }
+
+    #[test]
+    fn the_second_row_mirrors_it_as_its_containers_are_turned() {
+        // Row 1, column 0: the container turned half round at x = 2 x_spacing, z = z_spacing; the point
+        // (px, pz) of 0-0-0 lands at (2 x_spacing - px, z_spacing - pz).
+        assert!(close(slot_offset(CONTAINER, BESIDE_THE_BED, (0, 1, 0)), (2.0 * -6.1 + 4.75, 0.15, 2.6 - 0.85)));
+        assert!(close(slot_offset(CONTAINER, BESIDE_THE_BED, (0, 1, 2)), (2.0 * -6.1 + 4.75, 0.15, 3.0 * 2.6 - 0.85)));
+    }
 
     fn village(name: &str, occupancy: usize, free: usize, x: f64) -> VillageState {
         VillageState {

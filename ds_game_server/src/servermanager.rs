@@ -563,6 +563,18 @@ impl ServerManager {
             error!("[mesh] failed to register props:planet handler: {}", e);
         }
 
+        // A player's init asked for (or not) the clocks of its moves: kept until it leaves.
+        let result = events.on_plugin("gameserver", "move_clocks", move |event: serde_json::Value| {
+            let player_uuid = event["player_uuid"].as_str().unwrap_or_default();
+            if !player_uuid.is_empty() {
+                crate::handlers::move_clocks::set(player_uuid, event["enabled"].as_bool().unwrap_or(false));
+            }
+            Ok(())
+        }).await;
+        if let Err(e) = result {
+            error!("[mesh] failed to register gameserver:move_clocks handler: {}", e);
+        }
+
         let tx = self.tx.clone();
         let result = events.on_plugin("gameserver", "villages_wanted", move |event: serde_json::Value| {
             let server_uuid = event["server_uuid"].as_str().unwrap_or_default().to_string();

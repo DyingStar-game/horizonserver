@@ -21,6 +21,11 @@ pub struct PlayerInitData {
     pub token: String,
     #[serde(default)]
     pub is_npc: bool,
+    /// The client asks for the clocks of its own moves (client.ini debug_move_clocks):
+    /// kept by ds_game_server until the disconnect and given to every Godot server
+    /// that manages the player.
+    #[serde(default)]
+    pub move_clocks: bool,
 }
 
 /// JWT claims decoded from the token (without signature verification).
@@ -206,6 +211,15 @@ pub async fn handle_player_init(
         // handshake instead of spawning a player the connection will never see.
         error!("Failed to emit update_player_id event, aborting player init: {}", e);
         return Err(format!("update_player_id failed for player {}: {}", player_db_id, e).into());
+    }
+
+    // Before the spawn, so the first Godot server already gets it.
+    if let Err(e) = events.emit_plugin("gameserver", "move_clocks", &serde_json::json!({
+        "player_uuid": player_db_id,
+        "enabled": event.data.move_clocks,
+    })).await
+    {
+        error!("Failed to emit gameserver:move_clocks: {}", e);
     }
 
     info!(

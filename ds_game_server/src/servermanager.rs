@@ -575,6 +575,22 @@ impl ServerManager {
             error!("[mesh] failed to register gameserver:move_clocks handler: {}", e);
         }
 
+        // A player's init brought the realm roles of its verified token: kept until it leaves.
+        let result = events.on_plugin("gameserver", "player_roles", move |event: serde_json::Value| {
+            let player_uuid = event["player_uuid"].as_str().unwrap_or_default();
+            if !player_uuid.is_empty() {
+                let roles: Vec<String> = event["roles"]
+                    .as_array()
+                    .map(|roles| roles.iter().filter_map(|r| r.as_str().map(str::to_string)).collect())
+                    .unwrap_or_default();
+                crate::handlers::player_roles::set(player_uuid, roles);
+            }
+            Ok(())
+        }).await;
+        if let Err(e) = result {
+            error!("[mesh] failed to register gameserver:player_roles handler: {}", e);
+        }
+
         let tx = self.tx.clone();
         let result = events.on_plugin("gameserver", "villages_wanted", move |event: serde_json::Value| {
             let server_uuid = event["server_uuid"].as_str().unwrap_or_default().to_string();

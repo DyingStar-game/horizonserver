@@ -5,6 +5,7 @@ pub mod player_action;
 pub mod initial_objects;
 pub mod update_prop;
 pub mod move_clocks;
+pub mod player_roles;
 
 use horizon_event_system::EventError;
 use serde_json::Value;

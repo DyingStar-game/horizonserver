@@ -5,6 +5,10 @@ services:
         context: ./.docker
       restart: always
       user: "1000:1000"
+      environment:
+        # Local dev: player tokens are decoded, not verified (no Keycloak issuer here).
+        # Set it to true with OIDC_ISSUER to test the verification (see README).
+        VERIFY_JWT_SIGNATURE: "false"
       volumes:
         - .:/app/
       ports:

@@ -3,7 +3,7 @@ use horizon_event_system::EventError;
 use serde_json::json;
 use tracing::{debug, info};
 
-use super::{move_clocks, send_ws, WsWriter};
+use super::{move_clocks, player_roles, send_ws, WsWriter};
 
 /// Sends `server/add_prop` for a player. Horizon-internal keys (`_world`,
 /// `_global_position`) are stripped from the copy that goes on the wire.
@@ -19,6 +19,7 @@ pub async fn handle_spawn_player(event: serde_json::Value, websocket: WsWriter) 
     ObjectWorld::strip_internal_keys(&mut data["object_data"]);
     // Every spawn, the first one and each zone transfer: the new server has to know it too.
     move_clocks::mark(&mut data["object_data"], &player_uuid);
+    player_roles::mark(&mut data["object_data"], &player_uuid);
     let message = json!({
         "namespace": "server",
         "event": "add_prop",

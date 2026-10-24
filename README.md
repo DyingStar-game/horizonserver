@@ -26,6 +26,25 @@ server reads them. Edit them here; anything you change directly inside
 To pull in upstream Horizon changes or to add a patch of our own, see
 [docs/horizon-fork.md](docs/horizon-fork.md).
 
+## Player authentication
+
+`ds_player_authentication` verifies the Keycloak access token of each `player/init`
+(signature against the realm's JWKS, `exp`, `iss`) and forwards its realm roles
+(`realm_access.roles`) to the Godot servers, as `roles` in the player's `object_data`.
+Environment variables:
+
+- `OIDC_ISSUER` — the realm issuer, exactly the `iss` of the tokens:
+  `https://auth-preprod.dyingstar-game.com/realms/dyingstar` (preprod),
+  `https://auth.dyingstar-game.com/realms/dyingstar` (prod),
+  `http://auth.dyingstar.local/realms/dyingstar` (dev cluster). Required: with
+  verification on and no issuer, every login is rejected.
+- `OIDC_JWKS_URL` — optional, where to fetch the keys (default
+  `<OIDC_ISSUER>/protocol/openid-connect/certs`), e.g. the in-cluster Keycloak service.
+- `VERIFY_JWT_SIGNATURE` — `false` decodes the token without verifying it (local
+  dev only: anyone can then forge an identity and roles). Default: verified.
+  `docker-compose.yml` and `scripts/run.sh` set it to `false`.
+- `BYPASS_AUTH` — `true` ignores the token altogether (random player, no roles).
+
 ## Send a message to all players
 
 To broadcast a message to all players connected in a plugin event part, use:

@@ -667,6 +667,7 @@ impl Server {
         {
             on_each_core(&events, "player_disconnected", move |server: &Server, event: &PlayerDisconnectedEvent| {
                 crate::handlers::move_clocks::forget(&event.player_id.to_string());
+                crate::handlers::player_roles::forget(&event.player_id.to_string());
                 server.quit_player(json!({
                     "object_type": "player",
                     "object_uuid": event.player_id.to_string(),

@@ -21,7 +21,8 @@ serde_json = "1.0.143"
 tokio = { version = "1.48", features = ["full"] }
 async-trait = "0.1"
 tracing = { version = "0.1", features = ["log"] }
-reqwest = "0.12.23"
+# rustls + bundled Mozilla roots: the runtime image has no ca-certificates (JWKS fetch).
+reqwest = { version = "0.12.23", default-features = false, features = ["rustls-tls-webpki-roots"] }
 futures = { version = "0.3" }
 tracing-subscriber = "0.3"
 ds_common = { path = "../ds_common" }

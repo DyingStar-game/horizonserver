@@ -29,6 +29,20 @@ pub fn item_on_wire(item: &GenericPropsRequest) -> Value {
     value
 }
 
+/// The item as Godot must see it to create it: `item_on_wire`, plus for a player
+/// what Horizon keeps of its init (move_clocks, roles), as spawn_player gives the
+/// first spawn and each zone transfer. A player handed over by a split or a merge
+/// is created from this: without it the new server lost the player's clocks and
+/// roles.
+fn spawn_on_wire(item: &GenericPropsRequest) -> Value {
+    let mut value = item_on_wire(item);
+    if item.object_type == "player" {
+        super::move_clocks::mark(&mut value["object_data"], &item.object_uuid);
+        super::player_roles::mark(&mut value["object_data"], &item.object_uuid);
+    }
+    value
+}
+
 fn is_member(item: &GenericPropsRequest, zones: &[Zone]) -> bool {
     match ObjectWorld::from_object_data(&item.object_data) {
         Some(world) => zones_contain(zones, &world),
@@ -133,7 +147,7 @@ fn send_initial(item: &GenericPropsRequest, server: &Server, zones: &[Zone]) -> 
     send_ws(&server.websocket_sender, "initial_object", &json!({
         "namespace": "server",
         "event": "initial_object",
-        "data": item_on_wire(item),
+        "data": spawn_on_wire(item),
     }))?;
     if !world_object {
         track(item, server);
@@ -171,7 +185,7 @@ pub fn handle_dormant_objects(
         if is_world_object(&item.object_type) || !is_member(item, zones) {
             continue;
         }
-        let mut wire = item_on_wire(item);
+        let mut wire = spawn_on_wire(item);
         wire["dormant"] = Value::Bool(true);
         send_ws(&server.websocket_sender, "initial_object", &json!({
             "namespace": "server",
@@ -201,7 +215,7 @@ pub fn handle_activate_objects(
         send_ws(&server.websocket_sender, "activate_object", &json!({
             "namespace": "server",
             "event": "activate_object",
-            "data": item_on_wire(item),
+            "data": spawn_on_wire(item),
         }))?;
         track(item, server);
         sent += 1;

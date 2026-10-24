@@ -9,6 +9,30 @@ use horizon_event_system::{
 use tracing::{debug, error, info, warn};
 use serde::{Deserialize, Serialize};
 
+use super::jwt::{realm_roles, TokenCheck, TokenRejection};
+
+/// Error code sent to the client when its token has expired: the game was launched more
+/// than a token lifetime ago (24 h in preprod) and the launcher only refreshes it at launch.
+/// The client tells the player to relaunch the game from the launcher.
+pub const TOKEN_EXPIRED_CODE: i64 = 1340;
+/// Error code sent to the client when its token is refused for any other reason (bad
+/// signature, wrong issuer, malformed) or cannot be checked (Horizon misconfigured).
+pub const TOKEN_REFUSED_CODE: i64 = 1341;
+
+/// Tells the client why its init is refused, so it does not wait for a spawn that will
+/// never come (it would end in error 7002 after its spawn watchdog).
+async fn send_init_error(connection: &ClientConnectionRef, code: i64, message: &str) {
+    let payload = serde_json::to_vec(&serde_json::json!({
+        "type": "error",
+        "code": code,
+        "message": message,
+    }))
+    .expect("failed to serialize error payload");
+    if let Err(e) = connection.respond(&payload).await {
+        error!("Failed to send init error {} to client: {}", code, e);
+    }
+}
+
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlayerInit {
@@ -28,7 +52,8 @@ pub struct PlayerInitData {
     pub move_clocks: bool,
 }
 
-/// JWT claims decoded from the token (without signature verification).
+/// JWT claims of the token (verified by `jwt::JwtVerifier`, or only decoded when
+/// `VERIFY_JWT_SIGNATURE=false`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JwtClaims {
     /// Subject — typically the user's unique ID in the auth provider
@@ -40,8 +65,8 @@ pub struct JwtClaims {
     pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
-/// Decode a JWT payload without verifying the signature.
-/// Returns `None` and logs a warning if the token is malformed.
+/// Decode a JWT payload without verifying the signature (`VERIFY_JWT_SIGNATURE=false`).
+/// Returns `None` if the token is malformed.
 fn decode_jwt_payload(token: &str) -> Option<JwtClaims> {
     // A JWT is three base64url segments separated by '.'.
     let payload_b64 = token.split('.').nth(1)?;
@@ -111,6 +136,7 @@ pub async fn handle_player_init(
     connection: ClientConnectionRef,
     events: Arc<EventSystem>,
     server_state_ok: Arc<AtomicBool>,
+    token_check: Arc<TokenCheck>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     info!("auth (player_init): START handle_player_init player data: {:?}", event.data);
     if !server_state_ok.load(Ordering::Relaxed) {
@@ -136,17 +162,38 @@ pub async fn handle_player_init(
         warn!("BYPASS_AUTH is enabled — skipping JWT validation for player {:?}", player_id);
     }
 
-    // Resolve player_db_id and player_name either via JWT or bypass path.
-    let (player_db_id, player_name) = if bypass_auth {
+    // Resolve player_db_id, player_name and the realm roles either via JWT or bypass path.
+    let (player_db_id, player_name, roles) = if bypass_auth {
         let id = Uuid::new_v4().to_string();
         let name = format!("Player_{}", &id[..8]);
         // id = "35941259-8205-4d46-b8a1-8837306d1587".to_string();
         // name = "ddurieux".to_string();
-        (id, name)
+        (id, name, Vec::new())
     } else {
-        // Decode the JWT payload (no signature verification — we trust the token
-        // was already validated upstream, or verification will be added later).
-        let claims = decode_jwt_payload(&event.data.token);
+        let claims = match token_check.as_ref() {
+            TokenCheck::Verify(verifier) => match verifier.verify(&event.data.token).await {
+                Ok(claims) => Some(claims),
+                Err(rejection) => {
+                    error!("auth (player_init): invalid JWT for player_id {:?}, init rejected: {}", player_id, rejection);
+                    let (code, message) = match rejection {
+                        TokenRejection::Expired => (TOKEN_EXPIRED_CODE, "Session expired"),
+                        TokenRejection::Invalid(_) => (TOKEN_REFUSED_CODE, "Authentication refused"),
+                    };
+                    send_init_error(&connection, code, message).await;
+                    return Err(format!("invalid JWT: {}", rejection).into());
+                }
+            },
+            TokenCheck::Misconfigured(reason) => {
+                error!("auth (player_init): JWT verification is not configured, init of player_id {:?} rejected: {}", player_id, reason);
+                send_init_error(&connection, TOKEN_REFUSED_CODE, "Authentication unavailable").await;
+                return Err(format!("JWT verification not configured: {}", reason).into());
+            }
+            TokenCheck::DecodeOnly => {
+                // VERIFY_JWT_SIGNATURE=false (development): payload read, signature not checked.
+                warn!("VERIFY_JWT_SIGNATURE=false — JWT of player_id {:?} decoded WITHOUT signature verification", player_id);
+                decode_jwt_payload(&event.data.token)
+            }
+        };
         if let Some(ref c) = claims {
             debug!("JWT claims decoded: sub={:?} extra={:?}", c.sub, c.extra);
         } else {
@@ -176,7 +223,8 @@ pub async fn handle_player_init(
             }
         };
 
-        (player_db_id, player_name)
+        let roles = claims.as_ref().map(realm_roles).unwrap_or_default();
+        (player_db_id, player_name, roles)
     };
 
 
@@ -220,6 +268,20 @@ pub async fn handle_player_init(
     })).await
     {
         error!("Failed to emit gameserver:move_clocks: {}", e);
+    }
+
+    // The realm roles (admin, supervisor, ...) of the verified token, kept by
+    // ds_game_server and given to every Godot server that manages the player.
+    // Before the spawn, like move_clocks.
+    if !roles.is_empty() {
+        info!("auth (player_init): player {} has realm roles {:?}", player_db_id, roles);
+    }
+    if let Err(e) = events.emit_plugin("gameserver", "player_roles", &serde_json::json!({
+        "player_uuid": player_db_id,
+        "roles": roles,
+    })).await
+    {
+        error!("Failed to emit gameserver:player_roles: {}", e);
     }
 
     info!(

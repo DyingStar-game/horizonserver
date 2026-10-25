@@ -43,6 +43,9 @@ pub struct PlayerInit {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlayerInitData {
     pub token: String,
+    /// What the client claims to be. Only honoured with `BYPASS_AUTH=true`: otherwise
+    /// the realm role `npc` of the token decides (see `resolve_is_npc`). Still accepted
+    /// so older clients and bots keep deserializing.
     #[serde(default)]
     pub is_npc: bool,
     /// The client asks for the clocks of its own moves (client.ini debug_move_clocks):
@@ -79,6 +82,23 @@ fn decode_jwt_payload(token: &str) -> Option<JwtClaims> {
     .ok()?;
 
     serde_json::from_slice(&decoded).ok()
+}
+
+/// Realm role carried by the Keycloak accounts of the NPC bots.
+pub const NPC_ROLE: &str = "npc";
+
+/// Whether the player is an NPC bot (no LiveKit, NPC behaviour on the Godot servers).
+///
+/// The realm roles of the token decide: a client cannot make itself an NPC by sending
+/// `is_npc: true`. With `VERIFY_JWT_SIGNATURE=false` the roles are decoded but not
+/// verified; they still decide, so dev behaves like preprod/prod (a dev bot needs the
+/// role too). Only with `BYPASS_AUTH=true`, where there is no token and so no roles,
+/// is the client's flag taken as is (local development).
+pub fn resolve_is_npc(client_flag: bool, roles: &[String], auth_bypassed: bool) -> bool {
+    if auth_bypassed {
+        return client_flag;
+    }
+    roles.iter().any(|r| r == NPC_ROLE)
 }
 
 /// Ends the previous session of `player_db_id`, if one is still open, before this
@@ -284,6 +304,14 @@ pub async fn handle_player_init(
         error!("Failed to emit gameserver:player_roles: {}", e);
     }
 
+    let is_npc = resolve_is_npc(event.data.is_npc, &roles, bypass_auth);
+    if event.data.is_npc && !is_npc {
+        warn!(
+            "auth (player_init): player {} ({}) claims to be an NPC without the '{}' realm role, treated as a human",
+            player_db_id, player_name, NPC_ROLE
+        );
+    }
+
     info!(
         "auth (player_init): emitting bridge_persistence:player_spawn for player_uuid={} player_name={}",
         player_db_id, player_name
@@ -293,7 +321,7 @@ pub async fn handle_player_init(
         "object_uuid": player_db_id,
         "object_data": {
             "name": player_name,
-            "is_npc": event.data.is_npc,
+            "is_npc": is_npc,
         }
     })).await
     {
@@ -303,4 +331,32 @@ pub async fn handle_player_init(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn roles(names: &[&str]) -> Vec<String> {
+        names.iter().map(|r| r.to_string()).collect()
+    }
+
+    #[test]
+    fn the_npc_role_makes_an_npc_whatever_the_client_says() {
+        assert!(resolve_is_npc(true, &roles(&["default-roles-dyingstar", "npc"]), false));
+        assert!(resolve_is_npc(false, &roles(&["npc"]), false));
+    }
+
+    #[test]
+    fn the_client_flag_alone_does_not_make_an_npc() {
+        assert!(!resolve_is_npc(true, &roles(&["default-roles-dyingstar", "admin"]), false));
+        assert!(!resolve_is_npc(true, &[], false));
+        assert!(!resolve_is_npc(false, &[], false));
+    }
+
+    #[test]
+    fn with_auth_bypassed_the_client_flag_decides() {
+        assert!(resolve_is_npc(true, &[], true));
+        assert!(!resolve_is_npc(false, &[], true));
+    }
 }

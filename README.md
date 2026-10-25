@@ -31,6 +31,9 @@ To pull in upstream Horizon changes or to add a patch of our own, see
 `ds_player_authentication` verifies the Keycloak access token of each `player/init`
 (signature against the realm's JWKS, `exp`, `iss`) and forwards its realm roles
 (`realm_access.roles`) to the Godot servers, as `roles` in the player's `object_data`.
+A player is an NPC bot (`is_npc` in `object_data`) only if its token has the realm role
+`npc`: the `is_npc` the client sends in `player/init` is ignored (a warning is logged when
+it claims `true` without the role), except with `BYPASS_AUTH=true`, where there are no roles.
 Environment variables:
 
 - `OIDC_ISSUER` — the realm issuer, exactly the `iss` of the tokens:

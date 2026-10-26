@@ -91,7 +91,7 @@ log_level = "info"
 # max_players_per_village players; village_free_reserve places are kept ahead of
 # the arrivals by asking Godot for the closest unspawned villages (see the root
 # plugins.toml).
-max_players_per_village = 50
+max_players_per_village = 25
 village_free_reserve = 100
 # On top of village_free_reserve: villages kept ahead for each server that owns
 # villages and takes players (default 1). A village takes Godot 16-20 s to spawn,

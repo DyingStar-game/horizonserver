@@ -233,6 +233,18 @@ split_warmup_max_secs = 30     # give up waiting for readiness after this
 split_ready_tps = 58           # ready = serverinfo tps >= this and chunks_loading == 0
 placement_capacity = 75        # players a server takes from the placement (default: N of players:N)
 placement_min_tps = 45         # under this tps a server takes no new player
+# Pool autoscaling, servers_mode = "production" or GAME_SERVER_AUTOSCALE=1 / dry-run
+autoscale_deployment = "godotserver"
+autoscale_pod_selector = "app.kubernetes.io/name=godotserver"
+autoscale_min_idle = 4         # idle servers kept ready for the next splits
+autoscale_max_idle = 6         # idle servers given back only above this
+autoscale_min_replicas = 5
+autoscale_max_replicas = 40
+autoscale_scale_down_after_secs = 600   # idle this long before being given back
+autoscale_startup_grace_secs = 300      # no scale-down while the pool connects
+autoscale_unschedulable_after_secs = 120
+autoscale_drain_first_nodes = []        # node names whose idle servers go first
+autoscale_dry_run = false
 ```
 
 ## Lifecycle
@@ -306,6 +318,25 @@ placement_min_tps = 45         # under this tps a server takes no new player
    snapshot), its split records are dropped, and it is reconnected in the
    background; when nobody is running any more the returning server takes the
    world back.
+8. **Autoscaling** (`autoscale.rs`, `k8s.rs`; on in `production` mode or with
+   `GAME_SERVER_AUTOSCALE`): every 15 s the manager reads the godotserver
+   Deployment and its pods with the pod's service account and sizes the pool:
+   - *up*: idle servers + pods on their way (not connected yet) under
+     `autoscale_min_idle` + the children a split lacked in the last minute → the
+     replicas go up by the difference (at most `autoscale_max_replicas`; never while
+     a pod has been unschedulable for `autoscale_unschedulable_after_secs`). DNS is
+     resolved every 5 s while pods are on their way.
+   - *down*: over `autoscale_max_idle` idle servers, with no op running or queued, no
+     rollout, no pod on its way and past `autoscale_startup_grace_secs`: up to 2 idle
+     servers idle for `autoscale_scale_down_after_secs` (nodes of
+     `autoscale_drain_first_nodes` first, then the longest idle) are reserved, their
+     pods get `controller.kubernetes.io/pod-deletion-cost: -1000`, the replicas go down
+     by as many, and the servers are retired; their addresses are not connected again
+     while DNS still lists them. A server holding zones is never a candidate. A pod
+     left marked while its server is in the pool (drain that failed half way) is
+     unmarked at the next cycle.
+   The `[mesh] state` line carries an `autoscale` object (replicas, idle, en_route,
+   unschedulable, action); decisions are logged as `[autoscale] …`.
 
 ### Transitions run off the manager loop
 

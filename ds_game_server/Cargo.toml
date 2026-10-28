@@ -30,6 +30,8 @@ fake = { version = "4", features = ["derive"] }
 # Optional: Additional commonly used dependencies
 uuid = { version = "1.0", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
+# Kubernetes API calls of the autoscaler (k8s.rs), in-cluster CA added at runtime.
+reqwest = { version = "0.12.23", default-features = false, features = ["rustls-tls-webpki-roots"] }
 tokio-tungstenite = "0.27.0"
 url = "2.5.7"
 futures-util = { version = "0.3.28", default-features = false, features = ["sink", "std"] }

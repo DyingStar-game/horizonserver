@@ -12,10 +12,12 @@
 //! Everything here runs on the plugin-owned runtime (`crate::plugin_rt()`); never
 //! `context.tokio_handle()` nor `block_on` (see the notes in lib.rs).
 
+use crate::autoscale::{decide, Action, AutoscaleConfig, AutoscaleState, IdleServer, PoolView, DRAIN_FORGET};
 use crate::handlers::initial_objects::{
     handle_activate_objects, handle_dormant_objects, handle_drop_dormant, handle_freeze_object, handle_initial_object, handle_initial_object_paced, handle_world_objects, Pace,
 };
 use crate::mesh::{plan_split_n, plan_village_split, MeshRules, VILLAGE_SPLIT_MAX_PLAYERS_SHARE};
+use crate::k8s::{address_ip, DeploymentInfo, K8sClient, PodInfo};
 use crate::server::{Server, ServerState};
 
 use ds_common::events::GenericPropsRequest;
@@ -67,6 +69,18 @@ pub enum ManagerMessage {
     /// genericprops cannot get villages spawned fast enough: `server_uuid` owns these
     /// unspawned villages (their worlds) but already waits for as many as it may spawn.
     VillagesWanted { server_uuid: String, villages: Vec<ObjectWorld> },
+    /// The godotserver Deployment and its pods, read for the autoscaler.
+    AutoscaleSnapshot(Result<(DeploymentInfo, Vec<PodInfo>), String>),
+    /// The autoscaler's change went through (or not).
+    AutoscaleDone(AutoscaleOutcome),
+}
+
+#[derive(Debug)]
+pub enum AutoscaleOutcome {
+    Scaled { from: u32, to: u32, result: Result<(), String> },
+    /// `marked`: the (uuid, pod) of `requested` whose pod got the deletion cost; the
+    /// replicas went down by as many when `result` is Ok (the new count).
+    Drained { requested: Vec<String>, marked: Vec<(String, String)>, result: Result<u32, String> },
 }
 
 #[derive(Debug, Default, Clone)]
@@ -229,6 +243,8 @@ const WATCHDOG_TICK: Duration = Duration::from_secs(5);
 const PLANET_BURST_WINDOW: Duration = Duration::from_millis(500);
 /// How often the pool name is resolved again (see `Discovery`).
 const DISCOVERY_INTERVAL: Duration = Duration::from_secs(60);
+/// Same while the autoscaler waits for new pods: they join the pool sooner.
+const DISCOVERY_INTERVAL_SCALING: Duration = Duration::from_secs(5);
 /// How often the whole pool is logged as one `[mesh] state` JSON line (players
 /// per server as Godot and Horizon count them, zones with their bounds), for the
 /// load tests to plot the meshing over time.
@@ -325,6 +341,8 @@ pub struct ServerManager {
     /// which came back as a NEW idle server (another pod) and never took them: its
     /// players stayed connected and unsimulated (minikube, 2026-10-04).
     orphan_zones: Vec<Zone>,
+    /// Sizing of the pool on kubernetes (see autoscale.rs); `None` when off.
+    autoscale: Option<AutoscaleState>,
 }
 
 impl ServerManager {
@@ -348,6 +366,7 @@ impl ServerManager {
             last_discovery: None,
             last_state_log: None,
             orphan_zones: Vec::new(),
+            autoscale: None,
         }
     }
 
@@ -375,12 +394,14 @@ impl ServerManager {
             .collect()
     }
 
-    /// Servers of the ops in flight and in the queue.
+    /// Servers of the ops in flight and in the queue, and those the autoscaler is
+    /// giving back.
     fn busy_servers(&self) -> HashSet<String> {
         self.in_flight
             .iter()
             .flat_map(|op| op.servers.iter().cloned())
             .chain(self.queue.iter().flat_map(|op| op.servers()))
+            .chain(self.autoscale.iter().flat_map(|a| a.reserved.iter().cloned()))
             .collect()
     }
 
@@ -388,15 +409,19 @@ impl ServerManager {
         self.in_flight.iter().flat_map(|op| op.servers.iter().cloned()).collect()
     }
 
-    /// The idle servers a split of `parent` may use: two when it holds several
-    /// zones (one of them may carry the crowd and be cut between two children,
-    /// see `plan_split_n`), else one.
     /// The idle servers a split of `parent`, holding `players`, hands zones to: as many as
-    /// `MeshRules::split_children_wanted` asks for, or what the pool still has.
-    fn split_children(&self, parent: &Server, players: u32) -> Vec<Server> {
+    /// `MeshRules::split_children_wanted` asks for, or what the pool still has. What it
+    /// lacks is told to the autoscaler.
+    fn split_children(&mut self, parent: &Server, players: u32) -> Vec<Server> {
         let zones = parent.zones().len();
         let wanted = self.rules.as_ref().map_or(1, |r| r.split_children_wanted(zones, players));
-        self.idle_servers(&parent.uuid, wanted)
+        let children = self.idle_servers(&parent.uuid, wanted);
+        if let Some(autoscale) = self.autoscale.as_mut() {
+            if children.len() < wanted {
+                autoscale.starved = Some(((wanted - children.len()) as u32, Instant::now()));
+            }
+        }
+        children
     }
 
     /// The zones the first server gets: space plus every planet known so far.
@@ -420,11 +445,8 @@ impl ServerManager {
         let mode = config.get_value("servers_mode").and_then(|v| v.as_str()).unwrap_or("single").to_string();
         self.rules = match mode.as_str() {
             "single" => None,
-            "development" => Some(MeshRules::from_config(&config)),
-            "production" => {
-                warn!("[mesh] servers_mode=production (kubernetes on demand) is not implemented, using the game_servers pool with split/merge rules");
-                Some(MeshRules::from_config(&config))
-            }
+            // production = development + the pool sized on kubernetes (autoscale.rs).
+            "development" | "production" => Some(MeshRules::from_config(&config)),
             other => {
                 warn!("[mesh] unknown servers_mode `{}`, defaulting to single", other);
                 None
@@ -432,6 +454,18 @@ impl ServerManager {
         };
         self.discovery = Discovery::from_config(&config);
         self.static_pool = addresses.clone();
+        let autoscale_env = std::env::var("GAME_SERVER_AUTOSCALE").ok();
+        match AutoscaleConfig::from_config(&config, &mode, autoscale_env.as_deref()) {
+            Some(_) if self.rules.is_none() => warn!("[autoscale] needs servers_mode development or production (no split in `{}`): off", mode),
+            Some(cfg) => match K8sClient::in_cluster() {
+                Ok(client) => {
+                    info!("[autoscale] on, namespace {}: {:?}", client.namespace, cfg);
+                    self.autoscale = Some(AutoscaleState::new(cfg, client));
+                }
+                Err(e) => error!("[autoscale] no kubernetes API from this pod ({}): off", e),
+            },
+            None => {}
+        }
         info!("[mesh] mode={} rules={:?} pool={:?} dns={:?}", mode, self.rules, addresses, self.discovery);
         self.worker = Some(MeshWorker {
             pending_snapshots: Arc::clone(&self.pending_snapshots),
@@ -493,9 +527,14 @@ impl ServerManager {
 
         let mut backlog: Vec<ManagerMessage> = Vec::new();
         loop {
-            if self.last_discovery.map_or(true, |at| at.elapsed() >= DISCOVERY_INTERVAL) {
+            let discovery_interval = match &self.autoscale {
+                Some(a) if a.en_route > 0 => DISCOVERY_INTERVAL_SCALING,
+                _ => DISCOVERY_INTERVAL,
+            };
+            if self.last_discovery.map_or(true, |at| at.elapsed() >= discovery_interval) {
                 self.refresh_pool(&context).await;
             }
+            self.autoscale_tick();
             self.check_silent_servers(&context).await;
             if self.last_state_log.map_or(true, |at| at.elapsed() >= STATE_LOG_INTERVAL) {
                 self.log_state();
@@ -533,6 +572,8 @@ impl ServerManager {
                 ManagerMessage::ServerOffline(uuid) => self.on_server_offline(uuid, &context),
                 ManagerMessage::ServerReconnected { uuid, zones } => self.on_server_reconnected(uuid, zones, &context),
                 ManagerMessage::VillagesWanted { server_uuid, villages } => self.on_villages_wanted(server_uuid, villages),
+                ManagerMessage::AutoscaleSnapshot(snapshot) => self.on_autoscale_snapshot(snapshot),
+                ManagerMessage::AutoscaleDone(outcome) => self.on_autoscale_done(outcome),
                 ManagerMessage::OpDone(result) => {
                     self.on_op_done(result);
                     // Its servers are no longer busy: the queued arrivals may go now, not
@@ -659,8 +700,15 @@ impl ServerManager {
             }
         };
 
+        if let Some(autoscale) = self.autoscale.as_mut() {
+            autoscale.draining.retain(|address, since| addresses.contains(address) && since.elapsed() < DRAIN_FORGET);
+        }
         for address in &addresses {
             if self.servers.iter().any(|s| &s.address == address) {
+                continue;
+            }
+            // A pod the autoscaler gave back, still listed while it terminates.
+            if self.autoscale.as_ref().is_some_and(|a| a.draining.contains_key(address)) {
                 continue;
             }
             let server = Server::new(address.clone());
@@ -920,6 +968,7 @@ impl ServerManager {
             "in_flight": self.in_flight.iter().map(|op| op.label.clone()).collect::<Vec<_>>(),
             "queued": self.queue.len(),
             "splits": self.split_history.len(),
+            "autoscale": self.autoscale.as_ref().map(|a| a.summary.clone()),
             "servers": servers,
         });
         info!("[mesh] state {}", state);
@@ -1213,6 +1262,257 @@ impl ServerManager {
                 }
             }
         });
+    }
+
+    // --------------------------------------------------------- autoscale
+
+    /// Every AUTOSCALE_INTERVAL: reads the Deployment and its pods off the loop; the
+    /// answer comes back as `AutoscaleSnapshot`.
+    fn autoscale_tick(&mut self) {
+        let Some(autoscale) = self.autoscale.as_mut() else { return };
+        if !autoscale.due() {
+            return;
+        }
+        autoscale.busy = true;
+        autoscale.last_run = Some(Instant::now());
+        let client = autoscale.client.clone();
+        let deployment = autoscale.cfg.deployment.clone();
+        let selector = autoscale.cfg.pod_selector.clone();
+        let tx = self.tx.clone();
+        crate::plugin_rt().spawn(async move {
+            let snapshot = match client.deployment(&deployment).await {
+                Ok(d) => client.pods(&selector).await.map(|pods| (d, pods)),
+                Err(e) => Err(e),
+            };
+            let _ = tx.send(ManagerMessage::AutoscaleSnapshot(snapshot)).await;
+        });
+    }
+
+    /// Builds the `PoolView` from the pool and the pods, decides, and applies.
+    fn on_autoscale_snapshot(&mut self, snapshot: Result<(DeploymentInfo, Vec<PodInfo>), String>) {
+        let Some(mut autoscale) = self.autoscale.take() else { return };
+        match snapshot {
+            Ok((deployment, pods)) => {
+                autoscale.last_error.clear();
+                self.autoscale_apply(&mut autoscale, &deployment, &pods);
+            }
+            Err(e) => {
+                if e != autoscale.last_error {
+                    warn!("[autoscale] cannot read the {} Deployment: {}", autoscale.cfg.deployment, e);
+                    autoscale.last_error = e;
+                }
+                autoscale.busy = false;
+            }
+        }
+        self.autoscale = Some(autoscale);
+    }
+
+    fn autoscale_apply(&mut self, autoscale: &mut AutoscaleState, deployment: &DeploymentInfo, pods: &[PodInfo]) {
+        let now = Instant::now();
+        let connected: HashMap<&str, &Server> = self
+            .servers
+            .iter()
+            .filter(|s| matches!(s.state(), ServerState::Online | ServerState::Starting | ServerState::Running))
+            .map(|s| (address_ip(&s.address), s))
+            .collect();
+        let draining: HashSet<&str> = autoscale.draining.keys().map(|a| address_ip(a)).collect();
+        let pod_of: HashMap<&str, &PodInfo> = pods.iter().filter(|p| !p.terminating && !p.ip.is_empty()).map(|p| (p.ip.as_str(), p)).collect();
+
+        let (mut en_route, mut unschedulable) = (0u32, 0u32);
+        for pod in pods.iter().filter(|p| !p.terminating) {
+            if !pod.ip.is_empty() && (draining.contains(pod.ip.as_str()) || connected.contains_key(pod.ip.as_str())) {
+                continue;
+            }
+            match pod.unschedulable_for {
+                Some(since) if since >= autoscale.cfg.unschedulable_after => unschedulable += 1,
+                _ => en_route += 1,
+            }
+        }
+
+        // A pod marked by a drain that did not go through (the ReplicaSet deleted another
+        // one, Horizon restarted mid-drain...) must not stay first in line once its server
+        // is in use again.
+        let client = autoscale.client.clone();
+        for pod in pods.iter().filter(|p| !p.terminating && p.deletion_cost.is_some_and(|c| c < 0)) {
+            let in_use = connected.get(pod.ip.as_str()).is_some_and(|s| !autoscale.reserved.contains(&s.uuid));
+            if in_use && !autoscale.cfg.dry_run {
+                warn!("[autoscale] pod {} still marked for deletion while its server is in the pool: unmarking it", pod.name);
+                let client = client.clone();
+                let name = pod.name.clone();
+                crate::plugin_rt().spawn(async move {
+                    if let Err(e) = client.set_deletion_cost(&name, 0).await {
+                        warn!("[autoscale] cannot unmark pod {}: {}", name, e);
+                    }
+                });
+            }
+        }
+
+        let idle_servers = self.idle_servers("", usize::MAX);
+        autoscale.idle_since.retain(|uuid, _| idle_servers.iter().any(|s| &s.uuid == uuid));
+        let idle: Vec<IdleServer> = idle_servers
+            .iter()
+            .map(|s| {
+                let since = *autoscale.idle_since.entry(s.uuid.clone()).or_insert(now);
+                let pod = pod_of.get(address_ip(&s.address));
+                IdleServer {
+                    uuid: s.uuid.clone(),
+                    pod: pod.map(|p| p.name.clone()).unwrap_or_default(),
+                    node: pod.map(|p| p.node.clone()).unwrap_or_default(),
+                    idle_for: now.duration_since(since),
+                }
+            })
+            .collect();
+        let view = PoolView {
+            replicas: deployment.replicas,
+            rolling: deployment.rolling,
+            idle,
+            en_route,
+            unschedulable,
+            ops: self.in_flight.len() + self.queue.len(),
+            starved_children: autoscale.starved_children(),
+            uptime: autoscale.started.elapsed(),
+        };
+        autoscale.en_route = en_route;
+        let action = decide(&view, &autoscale.cfg);
+        autoscale.summary = json!({
+            "replicas": view.replicas,
+            "idle": view.idle.len(),
+            "en_route": en_route,
+            "unschedulable": unschedulable,
+            "starved": view.starved_children,
+            "draining": autoscale.reserved.len() + autoscale.draining.len(),
+            "rolling": view.rolling,
+            "action": format!("{:?}", action),
+            "dry_run": autoscale.cfg.dry_run,
+        });
+        let dry = if autoscale.cfg.dry_run { " (dry run)" } else { "" };
+
+        match action {
+            Action::Hold(reason) => {
+                if reason != autoscale.last_hold && !reason.is_empty() {
+                    info!("[autoscale] hold at {} replicas: {}", view.replicas, reason);
+                }
+                autoscale.last_hold = reason;
+                autoscale.busy = false;
+            }
+            Action::ScaleTo(to) => {
+                autoscale.last_hold.clear();
+                let from = view.replicas;
+                info!(
+                    "[autoscale] scale {} -> {}{}: {} idle, {} on their way, {} wanted by splits, min_idle {}",
+                    from, to, dry, view.idle.len(), en_route, view.starved_children, autoscale.cfg.min_idle
+                );
+                if autoscale.cfg.dry_run {
+                    autoscale.busy = false;
+                    return;
+                }
+                let deployment = autoscale.cfg.deployment.clone();
+                let tx = self.tx.clone();
+                crate::plugin_rt().spawn(async move {
+                    let result = client.scale(&deployment, to).await;
+                    let _ = tx.send(ManagerMessage::AutoscaleDone(AutoscaleOutcome::Scaled { from, to, result })).await;
+                });
+            }
+            Action::Drain(uuids) => {
+                autoscale.last_hold.clear();
+                let targets: Vec<(String, String)> = view
+                    .idle
+                    .iter()
+                    .filter(|s| uuids.contains(&s.uuid))
+                    .map(|s| (s.uuid.clone(), s.pod.clone()))
+                    .collect();
+                for (uuid, pod) in &targets {
+                    let name = self.server(uuid).map(|s| s.server_name).unwrap_or_default();
+                    info!(
+                        "[autoscale] drain {} (pod {}){}: idle for {:?}, {} idle > max_idle {}",
+                        name, pod, dry, autoscale.idle_since.get(uuid).map(|t| t.elapsed()).unwrap_or_default(), view.idle.len(), autoscale.cfg.max_idle
+                    );
+                }
+                if autoscale.cfg.dry_run {
+                    autoscale.busy = false;
+                    return;
+                }
+                // Reserved from now on: no split picks them while their pods are marked.
+                autoscale.reserved.extend(targets.iter().map(|(uuid, _)| uuid.clone()));
+                let deployment = autoscale.cfg.deployment.clone();
+                let tx = self.tx.clone();
+                crate::plugin_rt().spawn(async move {
+                    let requested: Vec<String> = targets.iter().map(|(uuid, _)| uuid.clone()).collect();
+                    let mut marked = Vec::new();
+                    let mut errors = Vec::new();
+                    for (uuid, pod) in targets {
+                        match client.set_deletion_cost(&pod, -1000).await {
+                            Ok(()) => marked.push((uuid, pod)),
+                            Err(e) => errors.push(e),
+                        }
+                    }
+                    let result = if marked.is_empty() {
+                        Err(errors.join("; "))
+                    } else {
+                        // Read again: the replicas may have changed since the snapshot.
+                        match client.deployment(&deployment).await {
+                            Ok(d) => {
+                                let to = d.replicas.saturating_sub(marked.len() as u32).max(1);
+                                client.scale(&deployment, to).await.map(|()| to)
+                            }
+                            Err(e) => Err(e),
+                        }
+                    };
+                    if result.is_err() {
+                        // Unmarked: these pods stay and may run zones later.
+                        for (_, pod) in &marked {
+                            let _ = client.set_deletion_cost(pod, 0).await;
+                        }
+                    } else if !errors.is_empty() {
+                        warn!("[autoscale] some pods could not be marked: {}", errors.join("; "));
+                    }
+                    let _ = tx.send(ManagerMessage::AutoscaleDone(AutoscaleOutcome::Drained { requested, marked, result })).await;
+                });
+            }
+        }
+    }
+
+    fn on_autoscale_done(&mut self, outcome: AutoscaleOutcome) {
+        let Some(mut autoscale) = self.autoscale.take() else { return };
+        autoscale.busy = false;
+        match outcome {
+            AutoscaleOutcome::Scaled { from, to, result } => match result {
+                Ok(()) => {
+                    info!("[autoscale] replicas {} -> {}", from, to);
+                    // The new pods count as on their way at once: DNS is polled faster.
+                    autoscale.en_route += to.saturating_sub(from);
+                }
+                Err(e) => warn!("[autoscale] cannot scale {} -> {}: {}", from, to, e),
+            },
+            AutoscaleOutcome::Drained { requested, marked, result } => {
+                for uuid in &requested {
+                    autoscale.reserved.remove(uuid);
+                }
+                match result {
+                    Ok(to) => {
+                        for (uuid, pod) in &marked {
+                            let Some(server) = self.server(uuid) else { continue };
+                            if matches!(server.state(), ServerState::Starting | ServerState::Running) {
+                                // Reserved, so no op should have started it: if one did, its pod
+                                // goes anyway and the zones are re-homed when the socket closes.
+                                error!("[autoscale] {} was given zones while its pod {} was being deleted", server.server_name, pod);
+                                continue;
+                            }
+                            info!("[autoscale] {} given back (pod {}), replicas now {}", server.server_name, pod, to);
+                            // Out of the pool for good: its socket closing later is ignored
+                            // (unknown uuid) and its address is not connected again.
+                            server.retire();
+                            self.servers.retain(|s| s.uuid != *uuid);
+                            self.samples.remove(uuid);
+                            autoscale.idle_since.remove(uuid);
+                            autoscale.draining.insert(server.address.clone(), Instant::now());
+                        }
+                    }
+                    Err(e) => warn!("[autoscale] drain of {} server(s) failed, they stay in the pool: {}", requested.len(), e),
+                }
+            }
+        }
+        self.autoscale = Some(autoscale);
     }
 
     // ------------------------------------------------------------- merge

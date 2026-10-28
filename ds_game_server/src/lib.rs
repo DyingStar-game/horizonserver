@@ -1,3 +1,5 @@
+mod autoscale;
+mod k8s;
 mod mesh;
 mod ownership;
 mod server;

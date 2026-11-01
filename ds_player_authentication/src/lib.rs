@@ -87,7 +87,8 @@ impl SimplePlugin for DsPlayerAuthenticationPlugin {
         let server_state_ok_ready = Arc::clone(&self.server_state_ok);
         let token_check = Arc::clone(&self.token_check);
 
-        events.on_client("player", "init", move |event: authentication::PlayerInit, player_id: PlayerId, connection: ClientConnectionRef| {
+        // Typed: decoded from JSON or bitcode, whichever the client's listener speaks.
+        events.on_client_packed("player", "init", move |event: authentication::PlayerInit, player_id: PlayerId, connection: ClientConnectionRef| {
             debug!("plugin auth: Receive player init message {:?}", event);
 
             let events = events_system.clone();

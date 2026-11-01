@@ -154,14 +154,19 @@ where
         .map_err(|e| PluginError::ExecutionError(e.to_string()))
 }
 
-/// Same for a client event.
-async fn on_each_client<F>(events: &Arc<EventSystem>, namespace: &str, name: &str, body: F) -> Result<(), PluginError>
+/// Same for a client event, whose payload is a `T` in the client's format (JSON or
+/// bitcode). The body gets it as JSON, the form the Godot servers read.
+async fn on_each_client<T, F>(events: &Arc<EventSystem>, namespace: &str, name: &str, body: F) -> Result<(), PluginError>
 where
+    T: serde::de::DeserializeOwned + serde::Serialize + horizon_event_system::protocol::bitcode::DecodeOwned + Send + 'static,
     F: Fn(&Server, &ClientEventWrapper<serde_json::Value>) -> Result<(), EventError> + Send + Sync + Clone + 'static,
 {
     let label = format!("{}:{}", namespace, name);
     events
-        .on_client(namespace, name, move |event: ClientEventWrapper<serde_json::Value>, _player_id: PlayerId, _connection: ClientConnectionRef| {
+        .on_client_packed(namespace, name, move |payload: T, player_id: PlayerId, _connection: ClientConnectionRef| {
+            let data = serde_json::to_value(&payload)
+                .map_err(|e| EventError::HandlerExecution(format!("{}: {}", label, e)))?;
+            let event = ClientEventWrapper::new(player_id, data);
             for server in live_servers().read().unwrap().iter() {
                 if let Err(e) = body(server, &event) {
                     error!("🔧 DsGameServerPlugin: {} on {}: {}", label, server.server_name, e);
@@ -617,7 +622,7 @@ impl Server {
         // kept the player walking with nobody on the keys. send_ws only queues on the connection's
         // writer, so this does not block the handler.
         {
-            on_each_client(&events, "movement", "update_velocity", move |server: &Server, event: &ClientEventWrapper<serde_json::Value>| {
+            on_each_client::<ds_protocol::UpdateVelocity, _>(&events, "movement", "update_velocity", move |server: &Server, event: &ClientEventWrapper<serde_json::Value>| {
                 // Kept whoever manages the player: the client only sends a velocity when
                 // it changes, and the server they are transferred to needs the last one.
                 player_movement::remember_velocity(&event.player_id.to_string(), &event.data);
@@ -634,7 +639,7 @@ impl Server {
         // --- client action (jump, press...): forwarded to the server managing that player, in order
         // (same reason as the movement above: a held key's press and release must not swap).
         {
-            on_each_client(&events, "player", "client_action", move |server: &Server, event: &ClientEventWrapper<serde_json::Value>| {
+            on_each_client::<ds_protocol::ClientAction, _>(&events, "player", "client_action", move |server: &Server, event: &ClientEventWrapper<serde_json::Value>| {
                 // Kept whoever manages the player: the next server replays it (see LAST_HELD).
                 player_action::remember_input(&event.player_id.to_string(), &event.data);
                 if !server.is_running() || !server.is_managed_player(&event.player_id.to_string()) {

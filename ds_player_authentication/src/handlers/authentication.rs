@@ -2,7 +2,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use base64;
 use uuid::Uuid;
+use ds_common::client::respond_message;
 use ds_common::events::DSErrorMessage;
+use ds_protocol::messages::server_events;
+pub use ds_protocol::PlayerInit;
 use horizon_event_system::{
     current_timestamp, ClientConnectionRef, DisconnectReason, EventSystem, PlayerDisconnectedEvent, PlayerId, Vec3
 };
@@ -21,39 +24,17 @@ pub const TOKEN_REFUSED_CODE: i64 = 1341;
 
 /// Tells the client why its init is refused, so it does not wait for a spawn that will
 /// never come (it would end in error 7002 after its spawn watchdog).
-async fn send_init_error(connection: &ClientConnectionRef, code: i64, message: &str) {
-    let payload = serde_json::to_vec(&serde_json::json!({
+async fn send_init_error(events: &EventSystem, connection: &ClientConnectionRef, code: i64, message: &str) {
+    let payload = serde_json::json!({
         "type": "error",
         "code": code,
         "message": message,
-    }))
-    .expect("failed to serialize error payload");
-    if let Err(e) = connection.respond(&payload).await {
+    });
+    if let Err(e) = respond_message(events, connection, server_events::ERROR, &payload).await {
         error!("Failed to send init error {} to client: {}", code, e);
     }
 }
 
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PlayerInit {
-    pub data: PlayerInitData,
-    pub player_id: PlayerId,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PlayerInitData {
-    pub token: String,
-    /// What the client claims to be. Only honoured with `BYPASS_AUTH=true`: otherwise
-    /// the realm role `npc` of the token decides (see `resolve_is_npc`). Still accepted
-    /// so older clients and bots keep deserializing.
-    #[serde(default)]
-    pub is_npc: bool,
-    /// The client asks for the clocks of its own moves (client.ini debug_move_clocks):
-    /// kept by ds_game_server until the disconnect and given to every Godot server
-    /// that manages the player.
-    #[serde(default)]
-    pub move_clocks: bool,
-}
 
 /// JWT claims of the token (verified by `jwt::JwtVerifier`, or only decoded when
 /// `VERIFY_JWT_SIGNATURE=false`).
@@ -175,16 +156,15 @@ pub async fn handle_player_init(
     server_state_ok: Arc<AtomicBool>,
     token_check: Arc<TokenCheck>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    info!("auth (player_init): START handle_player_init player data: {:?}", event.data);
+    info!("auth (player_init): START handle_player_init (is_npc: {}, move_clocks: {})", event.is_npc, event.move_clocks);
     if !server_state_ok.load(Ordering::Relaxed) {
         warn!("Player {:?} tried to init but server is not ready yet", player_id);
-        let payload = serde_json::to_vec(&serde_json::json!({
+        let payload = serde_json::json!({
             "type": "error",
             "code": 1338,
             "message": "Server not yet ready"
-        }))
-        .expect("failed to serialize error payload");
-        if let Err(e) = connection.respond(&payload).await {
+        });
+        if let Err(e) = respond_message(&events, &connection, server_events::ERROR, &payload).await {
             error!("Failed to send server-not-ready error to client: {}", e);
         }
         return Ok(());
@@ -208,7 +188,7 @@ pub async fn handle_player_init(
         (id, name, Vec::new())
     } else {
         let claims = match token_check.as_ref() {
-            TokenCheck::Verify(verifier) => match verifier.verify(&event.data.token).await {
+            TokenCheck::Verify(verifier) => match verifier.verify(&event.token).await {
                 Ok(claims) => Some(claims),
                 Err(rejection) => {
                     error!("auth (player_init): invalid JWT for player_id {:?}, init rejected: {}", player_id, rejection);
@@ -216,19 +196,19 @@ pub async fn handle_player_init(
                         TokenRejection::Expired => (TOKEN_EXPIRED_CODE, "Session expired"),
                         TokenRejection::Invalid(_) => (TOKEN_REFUSED_CODE, "Authentication refused"),
                     };
-                    send_init_error(&connection, code, message).await;
+                    send_init_error(&events, &connection, code, message).await;
                     return Err(format!("invalid JWT: {}", rejection).into());
                 }
             },
             TokenCheck::Misconfigured(reason) => {
                 error!("auth (player_init): JWT verification is not configured, init of player_id {:?} rejected: {}", player_id, reason);
-                send_init_error(&connection, TOKEN_REFUSED_CODE, "Authentication unavailable").await;
+                send_init_error(&events, &connection, TOKEN_REFUSED_CODE, "Authentication unavailable").await;
                 return Err(format!("JWT verification not configured: {}", reason).into());
             }
             TokenCheck::DecodeOnly => {
                 // VERIFY_JWT_SIGNATURE=false (development): payload read, signature not checked.
                 warn!("VERIFY_JWT_SIGNATURE=false — JWT of player_id {:?} decoded WITHOUT signature verification", player_id);
-                decode_jwt_payload(&event.data.token)
+                decode_jwt_payload(&event.token)
             }
         };
         if let Some(ref c) = claims {
@@ -265,12 +245,12 @@ pub async fn handle_player_init(
     };
 
 
-    let payload = serde_json::to_vec(&serde_json::json!({
+    let payload = serde_json::json!({
         "player_id": player_db_id,
         "type": "init_ack"
-    })).expect("failed to serialize payload");
+    });
 
-    if let Err(e) = connection.respond(&payload).await
+    if let Err(e) = respond_message(&events, &connection, server_events::INIT_ACK, &payload).await
     {
         error!("Failed to send init_ack to client: {}", e);
     }
@@ -301,7 +281,7 @@ pub async fn handle_player_init(
     // Before the spawn, so the first Godot server already gets it.
     if let Err(e) = events.emit_plugin("gameserver", "move_clocks", &serde_json::json!({
         "player_uuid": player_db_id,
-        "enabled": event.data.move_clocks,
+        "enabled": event.move_clocks,
     })).await
     {
         error!("Failed to emit gameserver:move_clocks: {}", e);
@@ -321,8 +301,8 @@ pub async fn handle_player_init(
         error!("Failed to emit gameserver:player_roles: {}", e);
     }
 
-    let is_npc = resolve_is_npc(event.data.is_npc, &roles, bypass_auth);
-    if event.data.is_npc && !is_npc {
+    let is_npc = resolve_is_npc(event.is_npc, &roles, bypass_auth);
+    if event.is_npc && !is_npc {
         warn!(
             "auth (player_init): player {} ({}) claims to be an NPC without the '{}' realm role, treated as a human",
             player_db_id, player_name, NPC_ROLE

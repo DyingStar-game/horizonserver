@@ -66,12 +66,14 @@ pub fn handle_object_delete(
 				props_clone.remove(&req_data.object_uuid);
 				crate::children::forget(&req_data.object_uuid);
 				// Remove the object instance from GORC
-				if let Err(e) = events.emit_gorc_instance(
+				if let Err(e) = events.emit_gorc_instance_packed(
 					gorc_id,
 					6,
 					"gorc_zone_exit",
-					&serde_json::json!({}),
-					horizon_event_system::Dest::Client
+					// DynValue: the JSON object for JSON clients, carried as is by bitcode.
+					&ds_protocol::DynValue::from(&serde_json::json!({})),
+					horizon_event_system::Dest::Client,
+					None,
 				).await {
 					error!("🎮 GORC: ❌ Failed to send GORC info to client: {}", e);
 				} else {

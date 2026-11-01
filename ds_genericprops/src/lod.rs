@@ -52,6 +52,18 @@
 //! but on one copy of that map per flush, bucketed in a [`PlayerGrid`]: one full
 //! scan of every player per stream and per tier was the whole cost of the loop at
 //! 1248 players (preprod 2026-10-04, the single delivery thread at 100 %).
+//!
+//! **Bitcode recipients** (`ds_protocol::props`) get each payload as two GORC
+//! frames instead of the JSON envelope: the position and rotation, unreliable
+//! (datagrams on WebTransport), and the other keys, reliable, only when there are
+//! any. The clocks of the trip ride with the transform, and `player_id` is left out
+//! when it is the object's own id (the client has it from the zone entry). The
+//! frames are encoded once per version, on the first bitcode recipient. Since a
+//! datagram can be lost, a bitcode recipient served the last version gets its
+//! transform [`TRANSFORM_REPEATS`] more times at the channel's rate: the "last
+//! version always goes out eventually" guarantee, without a reliable send. Every
+//! frame carries the object's [`epoch`], bumped when a sticky key (`parent_id`) is
+//! declared, so the client never applies a transform under the wrong parent.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -59,7 +71,8 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
-use horizon_event_system::{current_timestamp, EventSystem, GorcObjectId, PlayerId, Vec3};
+use horizon_event_system::protocol::{bitcode, encode_server, EventKey, ServerFrame};
+use horizon_event_system::{current_timestamp, ClientResponseSender, EventSystem, Format, GorcObjectId, Outbound, PlayerId, Vec3};
 use serde_json::json;
 use tracing::{debug, error, info};
 
@@ -270,6 +283,16 @@ struct Stream {
     /// The payloads to stamp with [`SENT_STAMP_KEY`] on delivery, or `None`
     /// when the payload asks for no stamp and `bytes` go out as they are.
     stamped: Option<Stamped>,
+    /// The payload, for the bitcode frames.
+    data: Arc<serde_json::Value>,
+    /// The payload with the sticky keys merged, when it differs from `data`.
+    data_sticky: Option<Arc<serde_json::Value>>,
+    /// The object's epoch when this version was queued.
+    epoch: u32,
+    /// Bitcode frames of `version`, encoded on the first bitcode recipient.
+    bitcode: Option<(u64, BitcodeFrames)>,
+    /// Transforms still to resend to bitcode recipients served the last version.
+    repeats: HashMap<PlayerId, u8>,
 }
 
 /// What a stamped stream needs to serialize its envelope again at send time.
@@ -295,6 +318,114 @@ fn with_sent_stamp(data: &serde_json::Value, sent_ms: u64) -> serde_json::Value 
         map.insert(SENT_STAMP_KEY.to_string(), json!(sent_ms));
     }
     stamped
+}
+
+/// Transforms resent, unreliably, to a bitcode recipient already served the last
+/// version (see the module docs).
+pub const TRANSFORM_REPEATS: u8 = 3;
+
+/// Keys that travel with the transform of a bitcode frame instead of the reliable
+/// keys: they change with every payload and only describe it.
+const TRANSFORM_EXTRA_KEYS: [&str; 3] = ["servergodot_ms", RECEIVED_STAMP_KEY, SENT_STAMP_KEY];
+
+fn epochs() -> &'static DashMap<GorcObjectId, u32> {
+    static EPOCHS: OnceLock<DashMap<GorcObjectId, u32>> = OnceLock::new();
+    EPOCHS.get_or_init(DashMap::new)
+}
+
+/// The object's epoch: how many times a sticky key (`parent_id`) was declared on
+/// one of its streams. Carried by its bitcode frames and zone entries.
+pub fn epoch(gorc_id: GorcObjectId) -> u32 {
+    epochs().get(&gorc_id).map_or(0, |epoch| *epoch)
+}
+
+/// The frames of one version of a stream, for bitcode recipients.
+#[derive(Clone, Default)]
+struct BitcodeFrames {
+    /// Position and rotation, unreliable.
+    transform: Option<bytes::Bytes>,
+    /// The other keys, reliable.
+    update: Option<bytes::Bytes>,
+    /// The other keys with the sticky ones merged, for the recipients owed them.
+    update_sticky: Option<bytes::Bytes>,
+}
+
+/// What a stream needs to build its bitcode frames.
+struct FrameInput<'a> {
+    handle: u32,
+    channel: u8,
+    seq: u16,
+    event: EventKey,
+    transform_event: EventKey,
+    epoch: u32,
+    object_id: &'a str,
+    data: &'a serde_json::Value,
+    /// The payload with the sticky keys merged, when the stream has sticky keys.
+    data_sticky: Option<&'a serde_json::Value>,
+}
+
+/// Splits a payload into its transform and its other keys (`None` when there are
+/// none left). A payload that is not a JSON object goes whole into the other keys.
+fn split_payload(data: &serde_json::Value, object_id: &str, epoch: u32) -> (ds_protocol::TransformUpdate, Option<serde_json::Value>) {
+    let Some(map) = data.as_object() else {
+        return (ds_protocol::TransformUpdate { epoch, ..Default::default() }, Some(data.clone()));
+    };
+    let (mut transform, mut rest) = ds_protocol::props::split(map);
+    transform.epoch = epoch;
+    if !transform.is_empty() {
+        let extra: serde_json::Map<String, serde_json::Value> =
+            TRANSFORM_EXTRA_KEYS.iter().filter_map(|key| rest.remove_entry(*key)).collect();
+        if !extra.is_empty() {
+            transform.extra = ds_protocol::DynValue::from(&serde_json::Value::Object(extra));
+        }
+        if rest.get("player_id").and_then(|v| v.as_str()) == Some(object_id) {
+            rest.remove("player_id");
+        }
+    }
+    (transform, (!rest.is_empty()).then(|| serde_json::Value::Object(rest)))
+}
+
+fn bitcode_frames(input: &FrameInput) -> BitcodeFrames {
+    let frame = |event: &EventKey, payload: Vec<u8>| {
+        encode_server(&ServerFrame::GorcEvent {
+            handle: input.handle,
+            channel: input.channel,
+            seq: input.seq,
+            event: event.clone(),
+            payload,
+        })
+    };
+    let update = |rest: Option<serde_json::Value>| {
+        rest.map(|rest| {
+            frame(&input.event, bitcode::encode(&ds_protocol::PropUpdate {
+                epoch: input.epoch,
+                data: ds_protocol::DynValue::from(&rest),
+            }))
+        })
+    };
+    let (transform, rest) = split_payload(input.data, input.object_id, input.epoch);
+    let transform = (!transform.is_empty()).then(|| frame(&input.transform_event, bitcode::encode(&transform)));
+    let update_plain = update(rest);
+    let update_sticky = match input.data_sticky {
+        None => None,
+        Some(sticky) if std::ptr::eq(sticky, input.data) => update_plain.clone(),
+        Some(sticky) => update(split_payload(sticky, input.object_id, input.epoch).1),
+    };
+    BitcodeFrames { transform, update: update_plain, update_sticky }
+}
+
+/// The listener format of `player_id`, looked up once per flush.
+async fn format_of(
+    sender: &(dyn ClientResponseSender + Send + Sync),
+    formats: &mut HashMap<PlayerId, Format>,
+    player_id: PlayerId,
+) -> Format {
+    if let Some(format) = formats.get(&player_id) {
+        return *format;
+    }
+    let format = sender.connection_profile(player_id).await.map(|profile| profile.format).unwrap_or_default();
+    formats.insert(player_id, format);
+    format
 }
 
 fn streams() -> &'static DashMap<StreamKey, Stream> {
@@ -325,6 +456,7 @@ pub fn queue(
 /// (the old `parent_id`) and its per-recipient versions into the new one.
 pub fn forget_object(gorc_id: GorcObjectId) {
     streams().retain(|(id, _, _), _| *id != gorc_id);
+    epochs().remove(&gorc_id);
 }
 
 /// [`queue`], with `sticky_keys` naming the keys of `data` that are sent on
@@ -389,6 +521,11 @@ fn enqueue(
         last_queued: now,
         owner,
         stamped: None,
+        data: Arc::new(serde_json::Value::Null),
+        data_sticky: None,
+        epoch: 0,
+        bitcode: None,
+        repeats: HashMap::new(),
     });
 
     stream.version = stream.version.wrapping_add(1);
@@ -398,6 +535,15 @@ fn enqueue(
     stream.owner = owner;
     let stamp = data.get(RECEIVED_STAMP_KEY).is_some();
     let mut data_sticky: Option<serde_json::Value> = None;
+    stream.data = Arc::new(data.clone());
+    stream.data_sticky = None;
+    stream.bitcode = None;
+    if data.as_object().is_some_and(|payload| sticky_keys.iter().any(|key| payload.contains_key(*key))) {
+        // A new parent: transforms of the previous epoch must not be applied under it.
+        let mut epoch = epochs().entry(gorc_id).or_insert(0);
+        *epoch = epoch.wrapping_add(1);
+    }
+    stream.epoch = epoch(gorc_id);
 
     if let Some(payload) = data.as_object() {
         for sticky_key in sticky_keys {
@@ -426,6 +572,7 @@ fn enqueue(
             }
             let merged = serde_json::Value::Object(merged);
             stream.bytes_sticky = serialize_envelope(gorc_id, channel, object_type, event_name, &merged, timestamp);
+            stream.data_sticky = Some(Arc::new(merged.clone()));
             if stamp {
                 data_sticky = Some(merged);
             }
@@ -533,6 +680,8 @@ async fn flush(events: &Arc<EventSystem>, definitions: &Arc<DashMap<String, Obje
     // One copy of every player position for the whole flush, built on the first
     // stream that is due (most ticks have none).
     let mut grid: Option<PlayerGrid> = None;
+    // The listener format of each recipient, looked up once per flush.
+    let mut formats: HashMap<PlayerId, Format> = HashMap::new();
 
     let now = Instant::now();
     // Half a tick of tolerance. Without it a rate is rounded up to the next
@@ -545,7 +694,7 @@ async fn flush(events: &Arc<EventSystem>, definitions: &Arc<DashMap<String, Obje
         let (gorc_id, channel) = (*gorc_id, *channel);
 
         // Snapshot what we need; the map is never held across an await.
-        let (version, bytes, bytes_sticky, sticky_version, object_type, owner, stamped) = {
+        let (version, bytes, bytes_sticky, sticky_version, object_type, owner, stamped, data, data_sticky, epoch, cached_frames) = {
             let Some(stream) = streams().get(&key) else {
                 continue;
             };
@@ -563,6 +712,10 @@ async fn flush(events: &Arc<EventSystem>, definitions: &Arc<DashMap<String, Obje
                 stream.object_type.clone(),
                 stream.owner,
                 stream.stamped.clone(),
+                Arc::clone(&stream.data),
+                stream.data_sticky.clone(),
+                stream.epoch,
+                stream.bitcode.as_ref().filter(|(v, _)| *v == stream.version).map(|(_, frames)| frames.clone()),
             )
         };
 
@@ -604,6 +757,8 @@ async fn flush(events: &Arc<EventSystem>, definitions: &Arc<DashMap<String, Obje
         // Recipients to serve now, and whether each is still owed the sticky
         // keys: never served, or served nothing since their last change.
         let mut due: Vec<(PlayerId, bool)> = Vec::new();
+        // Bitcode recipients already served this version, owed a repeat of its transform.
+        let mut repeat_due: Vec<PlayerId> = Vec::new();
         {
             let Some(mut stream) = streams().get_mut(&key) else {
                 continue;
@@ -612,6 +767,7 @@ async fn flush(events: &Arc<EventSystem>, definitions: &Arc<DashMap<String, Obje
             // event is commented out upstream, so there is no exit hook to hang
             // this on — pruning against the live audience is the cleanup.
             stream.sent.retain(|player_id, _| rates.contains_key(player_id));
+            stream.repeats.retain(|player_id, left| *left > 0 && rates.contains_key(player_id));
 
             for (player_id, frequency) in &rates {
                 let (send, owed_sticky) = match stream.sent.get(player_id) {
@@ -627,6 +783,12 @@ async fn flush(events: &Arc<EventSystem>, definitions: &Arc<DashMap<String, Obje
                 };
                 if send {
                     due.push((*player_id, owed_sticky));
+                } else if stream.repeats.contains_key(player_id)
+                    && stream.sent.get(player_id).is_some_and(|(_, sent_at)| {
+                        now.saturating_duration_since(*sent_at) + slack >= interval(*frequency)
+                    })
+                {
+                    repeat_due.push(*player_id);
                 }
             }
 
@@ -635,7 +797,18 @@ async fn flush(events: &Arc<EventSystem>, definitions: &Arc<DashMap<String, Obje
             // carry the state anyway.
             for (player_id, _) in &due {
                 stream.sent.insert(*player_id, (version, now));
+                // Served a new version: its repeats start over once it is sent.
+                stream.repeats.remove(player_id);
             }
+            for player_id in &repeat_due {
+                if let Some((_, sent_at)) = stream.sent.get_mut(player_id) {
+                    *sent_at = now;
+                }
+                if let Some(left) = stream.repeats.get_mut(player_id) {
+                    *left -= 1;
+                }
+            }
+            stream.repeats.retain(|_, left| *left > 0);
 
             stream.next_due = rates
                 .iter()
@@ -649,6 +822,7 @@ async fn flush(events: &Arc<EventSystem>, definitions: &Arc<DashMap<String, Obje
             // includes the "nobody is in range" case. A concurrent queue() that
             // bumped the version keeps the stream awake.
             if stream.version == version
+                && stream.repeats.is_empty()
                 && rates
                     .keys()
                     .all(|player_id| stream.sent.get(player_id).map_or(false, |(v, _)| *v >= version))
@@ -658,10 +832,21 @@ async fn flush(events: &Arc<EventSystem>, definitions: &Arc<DashMap<String, Obje
         }
 
         *counters.sent.entry(event_name.clone()).or_default() += due.len() as u64;
+        if due.is_empty() && repeat_due.is_empty() {
+            continue;
+        }
+        let mut json_due: Vec<(PlayerId, bool)> = Vec::with_capacity(due.len());
+        let mut bitcode_due: Vec<(PlayerId, bool)> = Vec::new();
+        for (player_id, owed_sticky) in due {
+            match format_of(&*sender, &mut formats, player_id).await {
+                Format::Json => json_due.push((player_id, owed_sticky)),
+                Format::Bitcode => bitcode_due.push((player_id, owed_sticky)),
+            }
+        }
+        let sent_ms = unix_ms();
         // A stamped stream is serialized again now, with the time it leaves.
         let (bytes, bytes_sticky) = match &stamped {
-            Some(stamped) if !due.is_empty() => {
-                let sent_ms = unix_ms();
+            Some(stamped) if !json_due.is_empty() => {
                 let envelope = |data: &serde_json::Value| {
                     serialize_envelope(gorc_id, channel, &object_type, event_name, &with_sent_stamp(data, sent_ms),
                         stamped.timestamp)
@@ -676,7 +861,7 @@ async fn flush(events: &Arc<EventSystem>, definitions: &Arc<DashMap<String, Obje
             }
             _ => (bytes, bytes_sticky),
         };
-        for (player_id, owed_sticky) in due {
+        for (player_id, owed_sticky) in json_due {
             let payload = match (&bytes_sticky, owed_sticky) {
                 (Some(sticky), true) => sticky,
                 _ => &bytes,
@@ -684,6 +869,76 @@ async fn flush(events: &Arc<EventSystem>, definitions: &Arc<DashMap<String, Obje
             counters.bytes += payload.len() as u64;
             if let Err(e) = sender.send_to_client(player_id, (**payload).clone()).await {
                 debug!("🚀 LOD: send to player {} for object {} ch{} failed: {}", player_id, gorc_id, channel, e);
+            }
+        }
+
+        if bitcode_due.is_empty() && repeat_due.is_empty() {
+            continue;
+        }
+        let frames = match cached_frames {
+            Some(frames) if stamped.is_none() => frames,
+            _ => {
+                let Some(handle) = gorc_instances.object_handle(gorc_id) else {
+                    debug!("🚀 LOD: object {} has no wire handle, bitcode recipients skipped", gorc_id);
+                    continue;
+                };
+                // A stamped payload leaves with the time it leaves, as for JSON.
+                let (data, data_sticky) = if stamped.is_some() {
+                    (Arc::new(with_sent_stamp(&data, sent_ms)), data_sticky.map(|d| Arc::new(with_sent_stamp(&d, sent_ms))))
+                } else {
+                    (data, data_sticky)
+                };
+                let object_id = gorc_id.to_string();
+                let frames = bitcode_frames(&FrameInput {
+                    handle,
+                    channel,
+                    seq: gorc_instances.next_sequence(gorc_id, channel),
+                    event: events.event_table().key(event_name),
+                    transform_event: events.event_table().key(ds_protocol::TRANSFORM_EVENT),
+                    epoch,
+                    object_id: &object_id,
+                    data: &data,
+                    data_sticky: match (&bytes_sticky, &data_sticky) {
+                        (None, _) => None,
+                        (Some(_), Some(merged)) => Some(merged),
+                        (Some(_), None) => Some(&data),
+                    },
+                });
+                if stamped.is_none() {
+                    if let Some(mut stream) = streams().get_mut(&key) {
+                        if stream.version == version {
+                            stream.bitcode = Some((version, frames.clone()));
+                        }
+                    }
+                }
+                frames
+            }
+        };
+        for (player_id, owed_sticky) in &bitcode_due {
+            let update = if *owed_sticky { frames.update_sticky.as_ref().or(frames.update.as_ref()) } else { frames.update.as_ref() };
+            if let Some(update) = update {
+                counters.bytes += update.len() as u64;
+                if let Err(e) = sender.send_frame(*player_id, Outbound::reliable(update.clone())).await {
+                    debug!("🚀 LOD: send to player {} for object {} ch{} failed: {}", player_id, gorc_id, channel, e);
+                }
+            }
+            if let Some(transform) = &frames.transform {
+                counters.bytes += transform.len() as u64;
+                let _ = sender.send_frame(*player_id, Outbound::unreliable(transform.clone())).await;
+            }
+        }
+        if let Some(transform) = &frames.transform {
+            for player_id in &repeat_due {
+                counters.bytes += transform.len() as u64;
+                let _ = sender.send_frame(*player_id, Outbound::unreliable(transform.clone())).await;
+            }
+            if !bitcode_due.is_empty() {
+                if let Some(mut stream) = streams().get_mut(&key) {
+                    for (player_id, _) in &bitcode_due {
+                        stream.repeats.insert(*player_id, TRANSFORM_REPEATS);
+                    }
+                    stream.pending = true;
+                }
             }
         }
     }
@@ -848,6 +1103,206 @@ mod tests {
         queue(id, 0, "player", "move", &json!({"position": 3}));
         assert!(streams().get(&(id, 0, "move".to_string())).unwrap().stamped.is_none());
         streams().remove(&(id, 0, "move".to_string()));
+    }
+
+    fn decode_gorc(bytes: &bytes::Bytes) -> (u32, u16, EventKey, Vec<u8>) {
+        match horizon_event_system::protocol::decode_server(bytes, usize::MAX).unwrap() {
+            ServerFrame::GorcEvent { handle, seq, event, payload, .. } => (handle, seq, event, payload),
+            other => panic!("not a GORC event: {:?}", other),
+        }
+    }
+
+    fn input<'a>(data: &'a serde_json::Value, data_sticky: Option<&'a serde_json::Value>, object_id: &'a str) -> FrameInput<'a> {
+        FrameInput {
+            handle: 7,
+            channel: 0,
+            seq: 42,
+            event: EventKey::name("move"),
+            transform_event: EventKey::name(ds_protocol::TRANSFORM_EVENT),
+            epoch: 3,
+            object_id,
+            data,
+            data_sticky,
+        }
+    }
+
+    #[test]
+    fn a_move_is_one_transform_frame_with_its_clocks() {
+        let object_id = GorcObjectId::new().to_string();
+        let data = json!({
+            "player_id": object_id,
+            "position": {"x": 1.0, "y": 2.0, "z": 3.0},
+            "rotation": {"x": 0.0, "y": 0.5, "z": 0.0},
+            "servergodot_ms": 12.5,
+            RECEIVED_STAMP_KEY: 100,
+            SENT_STAMP_KEY: 101,
+        });
+        let frames = bitcode_frames(&input(&data, None, &object_id));
+        assert!(frames.update.is_none(), "nothing reliable to send: the clocks ride with the transform");
+        let (handle, seq, event, payload) = decode_gorc(frames.transform.as_ref().unwrap());
+        assert_eq!((handle, seq, event), (7, 42, EventKey::name(ds_protocol::TRANSFORM_EVENT)));
+        let transform: ds_protocol::TransformUpdate = bitcode::decode(&payload).unwrap();
+        assert_eq!(transform.epoch, 3);
+        assert_eq!(transform.position, Some([1.0, 2.0, 3.0]));
+        assert_eq!(transform.extra.to_value().unwrap(),
+            json!({"servergodot_ms": 12.5, RECEIVED_STAMP_KEY: 100, SENT_STAMP_KEY: 101}));
+    }
+
+    #[test]
+    fn other_keys_are_a_reliable_update_and_sticky_ones_a_variant() {
+        let object_id = GorcObjectId::new().to_string();
+        let data = json!({"position": {"x": 1.0, "y": 2.0, "z": 3.0}, "action": "jump"});
+        let sticky = json!({"position": {"x": 1.0, "y": 2.0, "z": 3.0}, "action": "jump", "parent_id": "city"});
+        let frames = bitcode_frames(&input(&data, Some(&sticky), &object_id));
+        assert!(frames.transform.is_some());
+        let update = |bytes: &bytes::Bytes| {
+            let (_, _, event, payload) = decode_gorc(bytes);
+            assert_eq!(event, EventKey::name("move"));
+            let update: ds_protocol::PropUpdate = bitcode::decode(&payload).unwrap();
+            assert_eq!(update.epoch, 3);
+            update.data.to_value().unwrap()
+        };
+        assert_eq!(update(frames.update.as_ref().unwrap()), json!({"action": "jump"}));
+        assert_eq!(update(frames.update_sticky.as_ref().unwrap()), json!({"action": "jump", "parent_id": "city"}));
+    }
+
+    #[test]
+    fn a_player_id_other_than_the_object_stays() {
+        let object_id = GorcObjectId::new().to_string();
+        let data = json!({"position": {"x": 1.0, "y": 2.0, "z": 3.0}, "player_id": "someone-else"});
+        let (_, rest) = split_payload(&data, &object_id, 0);
+        assert_eq!(rest, Some(json!({"player_id": "someone-else"})));
+    }
+
+    #[test]
+    fn a_payload_without_transform_is_all_reliable() {
+        let object_id = GorcObjectId::new().to_string();
+        let data = json!({"led_state": 2, "servergodot_ms": 1});
+        let frames = bitcode_frames(&input(&data, None, &object_id));
+        assert!(frames.transform.is_none());
+        let (_, _, _, payload) = decode_gorc(frames.update.as_ref().unwrap());
+        let update: ds_protocol::PropUpdate = bitcode::decode(&payload).unwrap();
+        assert_eq!(update.data.to_value().unwrap(), data, "without a transform, nothing moves to extra");
+    }
+
+    #[test]
+    fn declaring_a_sticky_key_bumps_the_epoch() {
+        let id = GorcObjectId::new();
+        assert_eq!(epoch(id), 0);
+        queue_sticky(id, 0, "player", "move", &json!({"position": 1, "parent_id": "planet"}), &["parent_id"]);
+        queue_sticky(id, 0, "player", "move", &json!({"position": 2}), &["parent_id"]);
+        assert_eq!(epoch(id), 1);
+        queue_sticky(id, 0, "player", "move", &json!({"position": 3, "parent_id": "city"}), &["parent_id"]);
+        assert_eq!(epoch(id), 2);
+        assert_eq!(streams().get(&(id, 0, "move".to_string())).unwrap().epoch, 2);
+        forget_object(id);
+        assert_eq!(epoch(id), 0);
+    }
+
+    use horizon_event_system::{AuthenticationStatus, Delivery, GorcInstanceManager, ListenerProfile, Transport};
+    use std::sync::Mutex;
+
+    /// Records what the delivery loop sends, and answers each player's format.
+    #[derive(Debug, Default)]
+    struct Recorder {
+        formats: HashMap<PlayerId, Format>,
+        frames: Mutex<Vec<(PlayerId, Delivery, Vec<u8>)>>,
+    }
+
+    impl Recorder {
+        fn sent_to(&self, player_id: PlayerId) -> Vec<(Delivery, Vec<u8>)> {
+            let frames = self.frames.lock().unwrap();
+            frames.iter().filter(|(p, _, _)| *p == player_id).map(|(_, d, b)| (*d, b.clone())).collect()
+        }
+    }
+
+    type Fut<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
+
+    impl ClientResponseSender for Recorder {
+        fn send_to_client(&self, player_id: PlayerId, data: Vec<u8>) -> Fut<'_, Result<(), String>> {
+            self.frames.lock().unwrap().push((player_id, Delivery::Reliable, data));
+            Box::pin(async { Ok(()) })
+        }
+        fn is_connection_active(&self, _: PlayerId) -> Fut<'_, bool> {
+            Box::pin(async { true })
+        }
+        fn get_auth_status(&self, _: PlayerId) -> Fut<'_, Option<AuthenticationStatus>> {
+            Box::pin(async { None })
+        }
+        fn kick(&self, _: PlayerId, _: Option<String>) -> Fut<'_, Result<(), String>> {
+            Box::pin(async { Ok(()) })
+        }
+        fn send_frame(&self, player_id: PlayerId, frame: Outbound) -> Fut<'_, Result<(), String>> {
+            self.frames.lock().unwrap().push((player_id, frame.delivery, frame.bytes.to_vec()));
+            Box::pin(async { Ok(()) })
+        }
+        fn connection_profile(&self, player_id: PlayerId) -> Fut<'_, Option<ListenerProfile>> {
+            let format = self.formats.get(&player_id).copied().unwrap_or_default();
+            Box::pin(async move { Some(ListenerProfile::new(Transport::WebTransport).with_format(format)) })
+        }
+    }
+
+    #[tokio::test]
+    async fn bitcode_recipients_get_unreliable_transforms_then_repeats() {
+        let (json_player, bitcode_player) = (PlayerId::new(), PlayerId::new());
+        let recorder = Arc::new(Recorder {
+            formats: HashMap::from([(json_player, Format::Json), (bitcode_player, Format::Bitcode)]),
+            ..Default::default()
+        });
+        let gorc = Arc::new(GorcInstanceManager::new());
+        let mut events = EventSystem::new();
+        events.set_gorc_instances(gorc.clone());
+        events.set_client_response_sender(recorder.clone());
+        let events = Arc::new(events);
+
+        let definition = ObjectDefinition::new("lod_test_box".to_string(), json!({"channels": [
+            {"zone": 0, "distance": 50.0, "frequency": 100.0, "properties": ["position", "rotation", "led"]}
+        ]}));
+        let definitions = Arc::new(DashMap::new());
+        definitions.insert("lod_test_box".to_string(), definition.clone());
+        let gorc_id = GorcObjectId::new();
+        let object = crate::genericprops::GenericProps::new(
+            definition,
+            json!({"position": {"x": 0.0, "y": 0.0, "z": 0.0}, "rotation": {"x": 0.0, "y": 0.0, "z": 0.0}, "led": 1}),
+            gorc_id.to_string(),
+        );
+        gorc.register_object_with_uuid(object, Vec3::new(0.0, 0.0, 0.0), Some(gorc_id)).await;
+        gorc.add_player(json_player, Vec3::new(1.0, 0.0, 0.0)).await;
+        gorc.add_player(bitcode_player, Vec3::new(2.0, 0.0, 0.0)).await;
+
+        let position = json!({"position": {"x": 1.0, "y": 0.0, "z": 0.0}, "rotation": {"x": 0.0, "y": 1.0, "z": 0.0}});
+        queue(gorc_id, 0, "lod_test_box", "move", &position);
+        let mut counters = Counters::default();
+        flush(&events, &definitions, &mut counters).await;
+
+        let json_frames = recorder.sent_to(json_player);
+        assert_eq!(json_frames.len(), 1);
+        assert_eq!(data_of(&json_frames[0].1), position, "JSON recipients get the envelope as before");
+
+        let bitcode_frames = recorder.sent_to(bitcode_player);
+        assert_eq!(bitcode_frames.len(), 1, "a move without other keys is a transform frame only");
+        assert_eq!(bitcode_frames[0].0, Delivery::Unreliable);
+        let (_, first_seq, _, _) = decode_gorc(&bytes::Bytes::from(bitcode_frames[0].1.clone()));
+
+        // No new version: the transform is repeated at the channel's rate, then the stream settles.
+        for _ in 0..TRANSFORM_REPEATS + 2 {
+            tokio::time::sleep(Duration::from_millis(15)).await;
+            flush(&events, &definitions, &mut counters).await;
+        }
+        let bitcode_frames = recorder.sent_to(bitcode_player);
+        assert_eq!(bitcode_frames.len(), 1 + TRANSFORM_REPEATS as usize);
+        assert!(bitcode_frames.iter().all(|(delivery, bytes)| {
+            *delivery == Delivery::Unreliable && decode_gorc(&bytes::Bytes::from(bytes.clone())).1 == first_seq
+        }));
+        assert_eq!(recorder.sent_to(json_player).len(), 1, "JSON recipients get no repeat");
+        assert!(!streams().get(&(gorc_id, 0, "move".to_string())).unwrap().pending);
+
+        // A change of another key is a reliable update, with the new transform.
+        queue(gorc_id, 0, "lod_test_box", "move", &json!({"position": {"x": 2.0, "y": 0.0, "z": 0.0}, "led": 0}));
+        flush(&events, &definitions, &mut counters).await;
+        let new_frames: Vec<_> = recorder.sent_to(bitcode_player).into_iter().skip(1 + TRANSFORM_REPEATS as usize).collect();
+        assert_eq!(new_frames.iter().map(|(d, _)| *d).collect::<Vec<_>>(), vec![Delivery::Reliable, Delivery::Unreliable]);
+        forget_object(gorc_id);
     }
 
     #[test]

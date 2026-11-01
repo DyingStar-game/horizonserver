@@ -168,12 +168,14 @@ pub fn handle_object_create(
 
 					if &req_data.object_type == "player" {
 						// Send GORC object info to client on channel 0 (player's own object)
-						if let Err(e) = events.emit_gorc_instance(
+						if let Err(e) = events.emit_gorc_instance_packed(
 							gorc_id,
 							0, // Channel 0 for critical info
 							"gorc_zone_enter",
-							&req_data.object_data,
-							horizon_event_system::Dest::Client
+							// DynValue: the JSON object for JSON clients, carried as is by bitcode.
+							&ds_protocol::DynValue::from(&req_data.object_data),
+							horizon_event_system::Dest::Client,
+							None,
 						).await {
 							error!("🎮 GORC: ❌ Failed to send GORC info to client: {}", e);
 						} else {

@@ -17,7 +17,7 @@ pub mod props;
 
 pub use dyn_value::{DynValue, MalformedDynValue, Token};
 pub use messages::{ClientAction, PlayerInit, PropUpdateRequest, SpawnRequest, UpdateVelocity, Xy, Xyz};
-pub use props::{PropState, PropUpdate, TransformUpdate, TRANSFORM_EVENT};
+pub use props::{transform_event, transform_of, PropState, PropUpdate, TransformUpdate, TRANSFORM_SUFFIX};
 
 /// Bumped on every change of a bitcode form in this crate.
 pub const DS_PROTOCOL_VERSION: u16 = 1;

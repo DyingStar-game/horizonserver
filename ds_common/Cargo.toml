@@ -10,3 +10,6 @@ serde_json = "1.0.143"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1.0", features = ["v4"] }
+horizon_event_system = { workspace = true }
+ds_protocol = { workspace = true }
+bytes = { workspace = true }

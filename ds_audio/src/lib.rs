@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use ds_protocol::messages::server_events;
 use horizon_event_system::{
     create_simple_plugin, EventSystem, LogLevel, PlayerId, PluginError, ServerContext,
     SimplePlugin,
@@ -252,16 +253,16 @@ impl SimplePlugin for DyingstarAudioPlugin {
                         };
 
                         // Send the token directly to this player's WebSocket connection only.
-                        let data = serde_json::to_vec(&json!({
+                        let data = json!({
                             "event_type": "livekit_token",
                             "livekit_url": livekit_public_url,
                             "livekit_identity": livekit_uuid,
                             "token": token,
                             "room": "universe",
-                        })).unwrap_or_default();
+                        });
                         match events_send.get_client_response_sender() {
-                            Some(sender) => {
-                                if let Err(e) = sender.send_to_client(player_id, data).await {
+                            Some(_) => {
+                                if let Err(e) = ds_common::client::send_message(&events_send, player_id, server_events::LIVEKIT_TOKEN, &data).await {
                                     error!(
                                         "🔊 DyingstarAudioPlugin: Failed to send livekit_token to player {}: {}",
                                         player_uuid, e
@@ -332,16 +333,16 @@ impl SimplePlugin for DyingstarAudioPlugin {
                     let object_id_enter = object_id.clone();
                     tokio_handle_enter.spawn(async move {
                         match events_send_enter.get_client_response_sender() {
-                            Some(sender) => {
+                            Some(_) => {
                                 // Notify player_id about object_id's LiveKit identity.
-                                let data = serde_json::to_vec(&json!({
+                                let data = json!({
                                     "event_type": "livekit_subscribe",
                                     "participant_uuid": lk_object_sub,
                                     "player_id": &player_id,
-                                })).unwrap_or_default();
+                                });
                                 match PlayerId::from_str(&player_id) {
                                     Ok(pid) => {
-                                        if let Err(e) = sender.send_to_client(pid, data).await {
+                                        if let Err(e) = ds_common::client::send_message(&events_send_enter, pid, server_events::LIVEKIT_SUBSCRIBE, &data).await {
                                             error!(
                                                 "🔊 DyingstarAudioPlugin: Failed to send livekit_subscribe to player {}: {}",
                                                 player_id, e
@@ -358,14 +359,14 @@ impl SimplePlugin for DyingstarAudioPlugin {
                                     }
                                 }
                                 // Also notify object_id about player_id's LiveKit identity.
-                                let data2 = serde_json::to_vec(&json!({
+                                let data2 = json!({
                                     "event_type": "livekit_subscribe",
                                     "participant_uuid": lk_player_sub,
                                     "player_id": &object_id_enter,
-                                })).unwrap_or_default();
+                                });
                                 match PlayerId::from_str(&object_id_enter) {
                                     Ok(oid) => {
-                                        if let Err(e) = sender.send_to_client(oid, data2).await {
+                                        if let Err(e) = ds_common::client::send_message(&events_send_enter, oid, server_events::LIVEKIT_SUBSCRIBE, &data2).await {
                                             error!(
                                                 "🔊 DyingstarAudioPlugin: Failed to send livekit_subscribe to player {}: {}",
                                                 object_id_enter, e
@@ -436,16 +437,16 @@ impl SimplePlugin for DyingstarAudioPlugin {
                     let object_id_exit = object_id.clone();
                     tokio_handle_exit.spawn(async move {
                         match events_send_exit.get_client_response_sender() {
-                            Some(sender) => {
+                            Some(_) => {
                                 // Notify player_id to unsubscribe from object_id.
-                                let data = serde_json::to_vec(&json!({
+                                let data = json!({
                                     "event_type": "livekit_unsubscribe",
                                     "participant_uuid": lk_object_sub,
                                     "player_id": &player_id,
-                                })).unwrap_or_default();
+                                });
                                 match PlayerId::from_str(&player_id) {
                                     Ok(pid) => {
-                                        if let Err(e) = sender.send_to_client(pid, data).await {
+                                        if let Err(e) = ds_common::client::send_message(&events_send_exit, pid, server_events::LIVEKIT_UNSUBSCRIBE, &data).await {
                                             error!(
                                                 "🔊 DyingstarAudioPlugin: Failed to send livekit_unsubscribe to player {}: {}",
                                                 player_id, e
@@ -460,14 +461,14 @@ impl SimplePlugin for DyingstarAudioPlugin {
                                     }
                                 }
                                 // Also notify object_id to unsubscribe from player_id.
-                                let data2 = serde_json::to_vec(&json!({
+                                let data2 = json!({
                                     "event_type": "livekit_unsubscribe",
                                     "participant_uuid": lk_player_sub,
                                     "player_id": &object_id_exit,
-                                })).unwrap_or_default();
+                                });
                                 match PlayerId::from_str(&object_id_exit) {
                                     Ok(oid) => {
-                                        if let Err(e) = sender.send_to_client(oid, data2).await {
+                                        if let Err(e) = ds_common::client::send_message(&events_send_exit, oid, server_events::LIVEKIT_UNSUBSCRIBE, &data2).await {
                                             error!(
                                                 "🔊 DyingstarAudioPlugin: Failed to send livekit_unsubscribe to player {}: {}",
                                                 object_id_exit, e

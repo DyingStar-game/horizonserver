@@ -5,9 +5,10 @@
 //! unreliably (datagrams on WebTransport) while the other keys — `parent_id`,
 //! `action`, `seat`… — stay reliable:
 //!
-//! - [`TRANSFORM_EVENT`] frames carry a [`TransformUpdate`], always unreliable;
-//! - the channel's own event (`move`, `update_property`…) carries a [`PropUpdate`]
-//!   with the other keys, reliable, and only when there are any;
+//! - `<event>/transform` frames ([`transform_event`]) carry a [`TransformUpdate`],
+//!   always unreliable;
+//! - the event itself (`move`, `update_property`…) carries a [`PropUpdate`] with the
+//!   other keys, reliable, and only when there are any;
 //! - a zone entry carries a [`PropState`]: both parts, reliable.
 //!
 //! The client keeps, per object and channel, the transform with the highest GORC
@@ -26,8 +27,19 @@ use serde_json::{Map, Value};
 
 use crate::DynValue;
 
-/// Event name of the unreliable transform frames.
-pub const TRANSFORM_EVENT: &str = "transform";
+/// Suffix of the event name of the unreliable transform frames: `move/transform`
+/// carries the transform of a `move`.
+pub const TRANSFORM_SUFFIX: &str = "/transform";
+
+/// Name of the transform frames of `event`.
+pub fn transform_event(event: &str) -> String {
+    format!("{event}{TRANSFORM_SUFFIX}")
+}
+
+/// The event a transform frame belongs to, or `None` when `name` is not one.
+pub fn transform_of(name: &str) -> Option<&str> {
+    name.strip_suffix(TRANSFORM_SUFFIX)
+}
 
 /// Keys carried by [`TransformUpdate`] instead of the other keys.
 pub const POSITION_KEY: &str = "position";
@@ -159,6 +171,13 @@ mod tests {
         let (transform, rest) = split(&payload);
         assert!(transform.is_empty());
         assert_eq!(rest, payload);
+    }
+
+    #[test]
+    fn transform_event_names_round_trip() {
+        assert_eq!(transform_event("move"), "move/transform");
+        assert_eq!(transform_of("move/transform"), Some("move"));
+        assert_eq!(transform_of("move"), None);
     }
 
     #[test]

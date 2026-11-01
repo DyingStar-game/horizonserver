@@ -115,6 +115,13 @@ impl SimplePlugin for GenericPropsPlugin {
         context: Arc<dyn ServerContext>
     ) -> Result<(), PluginError> {
         debug!("🎮 GenericPropsPlugin: Registering comprehensive GORC event handlers...");
+        // Short ids for bitcode clients, frozen at the first connection: the GORC
+        // events of props, and the messages every plugin sends (ds_common::client).
+        for event in ["move", "update_property", "gorc_info"] {
+            ds_common::client::declare_events(&events, &[event, &ds_protocol::transform_event(event)]);
+        }
+        ds_common::client::declare_events(&events, &["gorc_zone_enter", "gorc_zone_exit"]);
+        ds_common::client::declare_events(&events, ds_protocol::messages::server_events::ALL);
         context.log(
             LogLevel::Info,
             "🎮 GenericPropsPlugin: Initializing multi-channel player management system..."
@@ -561,12 +568,14 @@ impl GenericPropsPlugin {
                         return Ok(());
                     }
                 };
-                if let Err(e) = events_core.emit_gorc_instance(
+                if let Err(e) = events_core.emit_gorc_instance_packed(
                     gorc_id,
                     0, // Channel 0 for critical info
                     "gorc_zone_exit",
-                    &serde_json::json!({}),
-                    horizon_event_system::Dest::Client
+                    // DynValue: the JSON object for JSON clients, carried as is by bitcode.
+                    &ds_protocol::DynValue::from(&serde_json::json!({})),
+                    horizon_event_system::Dest::Client,
+                    None,
                 ).await {
                     error!("🎮 GORC: ❌ Failed to send GORC info to client: {}", e);
                 } else {

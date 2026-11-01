@@ -1,3 +1,4 @@
+use ds_protocol::messages::server_events;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, OnceLock};
@@ -421,12 +422,12 @@ async fn player_connected(events: &EventSystem, player_uuid: &str) -> bool {
 /// Send an error to the player (`server not ready`, `all servers are full`); `kick` closes the
 /// connection KICK_DELAY later. False when the player cannot be reached.
 async fn send_error(events: &EventSystem, player_uuid: &str, code: i64, message: &str) -> bool {
-    let (Some(sender), Some(player_id)) = (events.get_client_response_sender(), player_id(player_uuid)) else {
+    let (Some(_), Some(player_id)) = (events.get_client_response_sender(), player_id(player_uuid)) else {
         error!("plugin genericprops (new_player): cannot reach player {} to tell it `{}`", player_uuid, message);
         return false;
     };
     let payload = serde_json::json!({ "type": "error", "code": code, "message": message });
-    if let Err(e) = sender.send_to_client(player_id, payload.to_string().into_bytes()).await {
+    if let Err(e) = ds_common::client::send_message(events, player_id, server_events::ERROR, &payload).await {
         warn!("plugin genericprops (new_player): failed to send `{}` to player {}: {}", message, player_uuid, e);
     }
     true
@@ -445,11 +446,11 @@ async fn disconnect_full(events: &EventSystem, kicks: &mut Vec<(Instant, String,
 
 /// Tell the waiting player it is queued, `position` (from 1) among the waiting players.
 async fn send_queued(events: &EventSystem, player_uuid: &str, wait: Wait, position: usize) {
-    let (Some(sender), Some(player_id)) = (events.get_client_response_sender(), player_id(player_uuid)) else {
+    let Some(player_id) = player_id(player_uuid) else {
         return;
     };
     let payload = serde_json::json!({ "type": "queued", "reason": wait.reason(), "position": position });
-    if let Err(e) = sender.send_to_client(player_id, payload.to_string().into_bytes()).await {
+    if let Err(e) = ds_common::client::send_message(events, player_id, server_events::QUEUED, &payload).await {
         debug!("plugin genericprops (new_player): failed to send queued to player {}: {}", player_uuid, e);
     }
 }

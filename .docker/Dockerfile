@@ -20,7 +20,8 @@ COPY Horizon/ Horizon/
 COPY scripts/ scripts/
 
 # Build the horizon binary from the Horizon workspace
-RUN cd Horizon && cargo build --release
+# Same crate versions as the plugins (see Dockerfile.server).
+RUN cp Cargo.lock Horizon/Cargo.lock && cd Horizon && cargo build --release
 
 # Build the plugins from the ds_* crates
 RUN scripts/build.sh

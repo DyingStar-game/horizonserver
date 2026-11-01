@@ -133,11 +133,8 @@ impl GorcObject for GenericProps {
 					channel.distance,
 					channel.frequency.into(),
 					vec![],// Field no longer use since 0.40
-					match channel.zone {
-						0 => CompressionType::Delta,
-						1 | 2 => CompressionType::Lz4,
-						3 | _ => CompressionType::High
-					}
+					// Ignored by Horizon: compression is set per listener ([server.compression]).
+					CompressionType::None
 				)
 			)
 		}

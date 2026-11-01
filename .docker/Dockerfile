@@ -13,6 +13,7 @@ COPY ds_game_server/ ds_game_server/
 COPY ds_player_authentication/ ds_player_authentication/
 COPY ds_genericprops/ ds_genericprops/
 COPY ds_props/ ds_props/
+COPY ds_protocol/ ds_protocol/
 COPY ds_services/ ds_services/
 COPY ds_audio/ ds_audio/
 COPY ds_bridge/ ds_bridge/

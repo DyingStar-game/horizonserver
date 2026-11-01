@@ -13,12 +13,13 @@ members = ["ds_common",
 [workspace.dependencies]
 # Event system (CLI will update this to horizon_event_system)
 horizon_event_system = { path = "./Horizon/crates/horizon_event_system" }
+horizon_protocol = { path = "./Horizon/crates/horizon_protocol" }
 
 # === Horizon deps copied from root Cargo.toml of Horizon ===
 # === Async Runtime & Networking ===
 async-trait = "0.1"
 futures = "0.3"
-horizon_sockets = { git = "https://github.com/Far-Beyond-Dev/Horizon-Sockets", rev = "aa0badb262e1344a8aceaaf5caf55012dc7fa89a" }
+horizon_sockets = { git = "https://github.com/Far-Beyond-Dev/Horizon-Sockets", rev = "50606e28a7a18f0b3dce783267266fb8c00a1232" }
 luminal_rt = "0.4.1"
 tokio = { version = "1.48", features = ["full"] }
 tokio-tungstenite = "0.27.0"
@@ -37,7 +38,12 @@ rayon = "1.7.0"
 # === Data Processing & Encoding ===
 uuid = { version = "1.18.1", features = ["v4", "serde"] }
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0.143"
+serde_json = { version = "1.0.143", features = ["raw_value"] }
+bytes = "1"
+# Exact pin, as in Horizon: bitcode only guarantees its format within a version.
+bitcode = { version = "=0.6.9", features = ["serde"] }
+lz4_flex = "0.11"
+zstd = "0.13"
 base64 = "0.22"
 flate2 = "1.0"
 

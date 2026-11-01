@@ -112,11 +112,11 @@ pub fn resolve_is_npc(client_flag: bool, roles: &[String], auth_bypassed: bool) 
 /// `plugingameserver:new_player`, and the client gives up with error 7002 after 60 s
 /// (preprod, 2026-10-14, player 488cf437).
 ///
-/// The old session is closed the way a normal disconnect would close it
-/// (`player_disconnected`, which every plugin cleans up on), then kicked: the kick
-/// drops the connection from the manager, so when its socket finally dies it finds
-/// no player id and does not emit a second `player_disconnected` — which would now
-/// tear down the new session.
+/// The old session is kicked, then awaited until Horizon has dropped it. Horizon emits
+/// `player_disconnected` (with `player_db_id`, which every plugin cleans up on) before
+/// it drops a kicked connection, so once the old connection is gone that event has
+/// been handled, and it can no longer arrive after this connection takes the id over
+/// — where it would tear down the new session.
 async fn evict_stale_session(events: &Arc<EventSystem>, player_id: PlayerId, player_db_id: &str) {
     let Ok(db_id) = PlayerId::from_str(player_db_id) else {
         return;
@@ -136,19 +136,36 @@ async fn evict_stale_session(events: &Arc<EventSystem>, player_id: PlayerId, pla
         "auth (player_init): player {} already has an open connection, closing that stale session before connection {} takes over",
         db_id, player_id
     );
-    if let Err(e) = events.emit_core("player_disconnected", &PlayerDisconnectedEvent {
-        player_id: db_id,
-        connection_id: String::new(),
-        reason: DisconnectReason::Error("superseded by a new connection".to_string()),
-        timestamp: current_timestamp(),
-    }).await
-    {
-        error!("auth (player_init): failed to emit player_disconnected for stale session of {}: {}", db_id, e);
-    }
     if let Err(e) = sender.kick(db_id, Some("Superseded by a new connection".to_string())).await {
         warn!("auth (player_init): could not kick stale session of {}: {}", db_id, e);
     }
+    let deadline = std::time::Instant::now() + STALE_SESSION_CLOSE_TIMEOUT;
+    while sender.is_connection_active(db_id).await {
+        if std::time::Instant::now() >= deadline {
+            // Clean the old session up now; its own player_disconnected, if it ever
+            // comes, may then tear down the new one.
+            error!(
+                "auth (player_init): stale session of {} still open after {:?}, cleaning it up without waiting",
+                db_id, STALE_SESSION_CLOSE_TIMEOUT
+            );
+            if let Err(e) = events.emit_core("player_disconnected", &PlayerDisconnectedEvent {
+                player_id: db_id,
+                connection_id: String::new(),
+                reason: DisconnectReason::Kicked("superseded by a new connection".to_string()),
+                timestamp: current_timestamp(),
+            }).await
+            {
+                error!("auth (player_init): failed to emit player_disconnected for stale session of {}: {}", db_id, e);
+            }
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
 }
+
+/// How long `evict_stale_session` waits for Horizon to drop a kicked stale session.
+/// The kick goes ahead of any queued frame, so it normally takes a few milliseconds.
+const STALE_SESSION_CLOSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
 pub async fn handle_player_init(
     event: PlayerInit,

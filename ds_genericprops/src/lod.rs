@@ -54,9 +54,9 @@
 //! 1248 players (preprod 2026-10-04, the single delivery thread at 100 %).
 //!
 //! **Bitcode recipients** (`ds_protocol::props`) get each payload as two GORC
-//! frames instead of the JSON envelope: the position and rotation, unreliable
-//! (datagrams on WebTransport), and the other keys, reliable, only when there are
-//! any. The clocks of the trip ride with the transform, and `player_id` is left out
+//! frames instead of the JSON envelope: the position and rotation as
+//! `<event>/transform`, unreliable (datagrams on WebTransport), and the other keys
+//! as `<event>`, reliable, only when there are any. The clocks of the trip ride with the transform, and `player_id` is left out
 //! when it is the object's own id (the client has it from the zone entry). The
 //! frames are encoded once per version, on the first bitcode recipient. Since a
 //! datagram can be lost, a bitcode recipient served the last version gets its
@@ -894,7 +894,7 @@ async fn flush(events: &Arc<EventSystem>, definitions: &Arc<DashMap<String, Obje
                     channel,
                     seq: gorc_instances.next_sequence(gorc_id, channel),
                     event: events.event_table().key(event_name),
-                    transform_event: events.event_table().key(ds_protocol::TRANSFORM_EVENT),
+                    transform_event: events.event_table().key(&ds_protocol::transform_event(event_name)),
                     epoch,
                     object_id: &object_id,
                     data: &data,
@@ -1118,7 +1118,7 @@ mod tests {
             channel: 0,
             seq: 42,
             event: EventKey::name("move"),
-            transform_event: EventKey::name(ds_protocol::TRANSFORM_EVENT),
+            transform_event: EventKey::name(ds_protocol::transform_event("move")),
             epoch: 3,
             object_id,
             data,
@@ -1140,7 +1140,7 @@ mod tests {
         let frames = bitcode_frames(&input(&data, None, &object_id));
         assert!(frames.update.is_none(), "nothing reliable to send: the clocks ride with the transform");
         let (handle, seq, event, payload) = decode_gorc(frames.transform.as_ref().unwrap());
-        assert_eq!((handle, seq, event), (7, 42, EventKey::name(ds_protocol::TRANSFORM_EVENT)));
+        assert_eq!((handle, seq, event), (7, 42, EventKey::name("move/transform")));
         let transform: ds_protocol::TransformUpdate = bitcode::decode(&payload).unwrap();
         assert_eq!(transform.epoch, 3);
         assert_eq!(transform.position, Some([1.0, 2.0, 3.0]));

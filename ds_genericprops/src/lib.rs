@@ -117,14 +117,10 @@ impl SimplePlugin for GenericPropsPlugin {
         debug!("🎮 GenericPropsPlugin: Registering comprehensive GORC event handlers...");
         // Short ids for bitcode clients, frozen at the first connection: the GORC
         // events of props, and the messages every plugin sends (ds_common::client).
-        ds_common::client::declare_events(&events, &[
-            ds_protocol::TRANSFORM_EVENT,
-            "move",
-            "update_property",
-            "gorc_info",
-            "gorc_zone_enter",
-            "gorc_zone_exit",
-        ]);
+        for event in ["move", "update_property", "gorc_info"] {
+            ds_common::client::declare_events(&events, &[event, &ds_protocol::transform_event(event)]);
+        }
+        ds_common::client::declare_events(&events, &["gorc_zone_enter", "gorc_zone_exit"]);
         ds_common::client::declare_events(&events, ds_protocol::messages::server_events::ALL);
         context.log(
             LogLevel::Info,

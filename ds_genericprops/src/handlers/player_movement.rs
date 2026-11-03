@@ -657,3 +657,111 @@ mod coalesce_tests {
         assert!(next_move(id).is_none());
     }
 }
+
+#[cfg(test)]
+mod movement_cost {
+    use super::*;
+    use crate::objectdefinition::ObjectDefinition;
+    use horizon_event_system::{GorcInstanceManager, Vec3};
+    use std::time::Duration;
+
+    const OBJECTS: usize = 55_000;
+    const PLAYERS: usize = 900;
+
+    fn def(name: &str) -> ObjectDefinition {
+        let path = format!("{}/props/{}_def.json", env!("CARGO_MANIFEST_DIR"), name);
+        ObjectDefinition::new(name.to_string(), serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap())
+    }
+
+    /// Preprod scale (2026-11-03): ~55 000 props, 900 players, spread over 20 km.
+    async fn world() -> (Arc<GorcInstanceManager>, Vec<(PlayerId, GorcObjectId, Vec3)>) {
+        let gorc = Arc::new(GorcInstanceManager::new());
+        let crate_def = def("crate_container");
+        let player_def = def("player");
+        let spot = |i: usize, spread: f64| {
+            let a = i as f64 * 2.399_963;
+            let r = spread * ((i % 997) as f64 / 997.0).sqrt();
+            Vec3::new(r * a.cos(), 0.0, r * a.sin())
+        };
+        for i in 0..OBJECTS {
+            let p = spot(i, 10_000.0);
+            let object = GenericProps::new(crate_def.clone(), json!({"position": {"x": p.x, "y": p.y, "z": p.z}}), GorcObjectId::new().to_string());
+            gorc.register_object_with_uuid(object, p, None).await;
+        }
+        let mut players = Vec::new();
+        for i in 0..PLAYERS {
+            let p = spot(i * 7 + 3, 10_000.0);
+            let player = PlayerId::new();
+            let id = GorcObjectId(player.0);
+            gorc.add_player(player, p).await;
+            let object = GenericProps::new(player_def.clone(), json!({"position": {"x": p.x, "y": p.y, "z": p.z}, "rotation": {"x": 0, "y": 0, "z": 0}}), id.to_string());
+            gorc.register_object_with_uuid(object, p, Some(id)).await;
+            players.push((player, id, p));
+        }
+        (gorc, players)
+    }
+
+    fn per_call(total: Duration, calls: usize) -> String {
+        format!("{:>9.1} µs", total.as_secs_f64() * 1e6 / calls as f64)
+    }
+
+    /// Timing only: `cargo test --release -p dyingstar_generic_props movement_cost -- --ignored --nocapture`.
+    ///
+    /// The calls one move makes, at preprod scale. 2026-11-03, before Horizon's zone
+    /// grid: 16 ms per player sweep (every 2 m), 70 ms past 5 m, 100 µs per object
+    /// update — ~1.4 ms of CPU per move on preprod. With it: 64 µs, 136 µs, 9 µs.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore]
+    async fn movement_cost() {
+        let (gorc, mut players) = world().await;
+        let moves = 2_000;
+        // A running player at 30 Hz: ~0.2 m per packet.
+        let step = Vec3::new(0.2, 0.0, 0.0);
+
+        let started = Instant::now();
+        for i in 0..moves {
+            let (_, id, _) = players[i % PLAYERS];
+            std::hint::black_box(gorc.get_object(id).await);
+        }
+        println!("get_object (clone of the player instance) {}", per_call(started.elapsed(), moves));
+
+        let started = Instant::now();
+        for i in 0..moves {
+            let (_, id, ref mut p) = players[i % PLAYERS];
+            *p = Vec3::new(p.x + step.x, p.y, p.z);
+            gorc.update_object_position(id, *p).await;
+        }
+        println!("update_object_position                   {}", per_call(started.elapsed(), moves));
+
+        let started = Instant::now();
+        for i in 0..moves {
+            let (player, _, p) = players[i % PLAYERS];
+            gorc.update_player_position(player, Vec3::new(p.x + 0.01 * (i / PLAYERS) as f64, p.y, p.z)).await;
+        }
+        println!("update_player_position, under 2 m        {}", per_call(started.elapsed(), moves));
+
+        let started = Instant::now();
+        for i in 0..moves {
+            let (player, _, ref mut p) = players[i % PLAYERS];
+            *p = Vec3::new(p.x + 3.0, p.y, p.z);
+            gorc.update_player_position(player, *p).await;
+        }
+        println!("update_player_position, 3 m (sweep)      {}", per_call(started.elapsed(), moves));
+
+        let started = Instant::now();
+        for i in 0..moves {
+            let (player, _, ref mut p) = players[i % PLAYERS];
+            *p = Vec3::new(p.x + 6.0, p.y, p.z);
+            gorc.update_player_position(player, *p).await;
+        }
+        println!("update_player_position, 6 m (+ recalc)   {}", per_call(started.elapsed(), moves));
+
+        let started = Instant::now();
+        for i in 0..moves {
+            let (player, id, p) = players[i % PLAYERS];
+            let update = json!({"player_id": player, "position": p, "rotation": Vec3::zero(), "servergodot_ms": 1.0, crate::lod::RECEIVED_STAMP_KEY: 1u64});
+            crate::lod::queue_sticky_owned(id, 0, "player", "move", &update, &["parent_id"], player);
+        }
+        println!("lod::queue_sticky_owned                  {}", per_call(started.elapsed(), moves));
+    }
+}

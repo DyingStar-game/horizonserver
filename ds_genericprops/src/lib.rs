@@ -858,7 +858,11 @@ impl GenericPropsPlugin {
         // Channel payloads are queued rather than emitted, and delivered from
         // here at the rate each recipient's distance earns it. Started last so
         // the loop only comes up once every handler that feeds it is live.
-        lod::start(Arc::clone(&events), Arc::clone(&self.definitions));
+        let lod_workers = ds_common::config::Config::new("ds_genericprops")
+            .get_value("lod_workers")
+            .and_then(|v| v.as_integer())
+            .map_or(lod::DEFAULT_WORKERS, |v| v.max(1) as usize);
+        lod::start(Arc::clone(&events), Arc::clone(&self.definitions), lod_workers);
         // Free memory back to the system: glibc keeps it otherwise (see memtrim).
         memtrim::start();
 

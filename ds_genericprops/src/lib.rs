@@ -411,22 +411,38 @@ impl GenericPropsPlugin {
         // `genericprops:get_objects_snapshot {request_id}` and awaits
         // `gameserver:objects_snapshot {request_id, items}`. With `uuids`, only those
         // objects (the players and vehicles of a hand-over, refreshed after its
-        // warm-up: the whole world took ~2.5 s under load).
+        // warm-up: the whole world took ~2.5 s under load). With `zones`, only the
+        // objects lying there, the world objects and the uuids of `also` (what one
+        // server simulates): see world::snapshot.
         events.on_plugin("genericprops", "get_objects_snapshot", move |event: serde_json::Value| {
             let request_id = event.get("request_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let only: Option<Vec<String>> = event.get("uuids").and_then(|v| v.as_array()).map(|uuids| {
-                uuids.iter().filter_map(|u| u.as_str().map(str::to_string)).collect()
-            });
-            info!("plugin genericprops (get_objects_snapshot): request {} for {} props", request_id,
-                only.as_ref().map_or(props.len(), |u| u.len()));
+            let strings = |key: &str| -> Option<Vec<String>> {
+                event.get(key).and_then(|v| v.as_array()).map(|values| {
+                    values.iter().filter_map(|u| u.as_str().map(str::to_string)).collect()
+                })
+            };
+            let only = strings("uuids");
+            let scope = match event.get("zones").map(|zones| serde_json::from_value::<Vec<ds_common::zone::Zone>>(zones.clone())) {
+                Some(Ok(zones)) => Some(world::SnapshotScope {
+                    zones,
+                    also: strings("also").unwrap_or_default().into_iter().collect(),
+                }),
+                Some(Err(e)) => {
+                    error!("plugin genericprops (get_objects_snapshot): request {} has unreadable zones ({}): whole world", request_id, e);
+                    None
+                }
+                None => None,
+            };
+            info!("plugin genericprops (get_objects_snapshot): request {} for {} props{}", request_id,
+                only.as_ref().map_or(props.len(), |u| u.len()),
+                scope.as_ref().map_or(String::new(), |s| format!(" in [{}]", ds_common::zone::zones_label(&s.zones))));
 
             let props = Arc::clone(&props);
             let gorc_instances = Arc::clone(&gorc_instances);
             let events = Arc::clone(&snapshot_events);
 
             handle_snapshot.spawn(async move {
-                let mut items: HashMap<String, GenericPropsRequest> = HashMap::new();
-
+                let started = std::time::Instant::now();
                 // Keys first: iterating the DashMap holds a shard read lock, and the
                 // loop awaits on GORC — any insert/remove of a prop on that shard
                 // (a create, a player joining) would block its thread until then.
@@ -434,41 +450,10 @@ impl GenericPropsPlugin {
                     Some(only) => only.into_iter().filter(|uuid| props.contains_key(uuid)).collect(),
                     None => props.iter().map(|entry| entry.key().clone()).collect(),
                 };
-                for prop_uuid in uuids {
-                    let Ok(gorc_id) = GorcObjectId::from_str(&prop_uuid) else { continue };
-                    // Snapshot the instance data under the lock, resolve the world after
-                    // (resolve_world awaits on GORC for every ancestor).
-                    let snapshot = gorc_instances
-                        .with_object_mut(gorc_id, |instance| {
-                            instance.get_object::<GenericProps>().map(|gp| (
-                                gp.object_def.name.clone(),
-                                world::flatten_props(gp),
-                                gp.global_position,
-                                world::read_own_local_and_parent(gp),
-                            ))
-                        })
-                        .await
-                        .flatten();
-                    let Some((object_type, prop_properties, global_position, (own_local, parent_id))) = snapshot else {
-                        debug!("plugin genericprops (get_objects_snapshot): {} not in GORC, skipped", prop_uuid);
-                        continue;
-                    };
-                    let object_world = world::resolve_world_of(&gorc_instances, &object_type, own_local, parent_id).await;
-                    let mut object_data = Value::Object(prop_properties);
-                    world::inject_global_position(&mut object_data, global_position);
-                    world::inject_world(&mut object_data, &object_world);
-                    items.insert(
-                        prop_uuid.clone(),
-                        GenericPropsRequest {
-                            object_type,
-                            object_uuid: prop_uuid,
-                            object_data,
-                            broadcast_only: None,
-                        }
-                    );
-                }
+                let items = world::snapshot(&gorc_instances, uuids, scope.as_ref()).await;
 
-                info!("plugin genericprops (get_objects_snapshot): request {} answered with {} items", request_id, items.len());
+                info!("plugin genericprops (get_objects_snapshot): request {} answered with {} items in {:?}",
+                    request_id, items.len(), started.elapsed());
                 if let Err(e) = events.emit_plugin(
                     "gameserver",
                     "objects_snapshot",
@@ -873,7 +858,11 @@ impl GenericPropsPlugin {
         // Channel payloads are queued rather than emitted, and delivered from
         // here at the rate each recipient's distance earns it. Started last so
         // the loop only comes up once every handler that feeds it is live.
-        lod::start(Arc::clone(&events), Arc::clone(&self.definitions));
+        let lod_workers = ds_common::config::Config::new("ds_genericprops")
+            .get_value("lod_workers")
+            .and_then(|v| v.as_integer())
+            .map_or(lod::DEFAULT_WORKERS, |v| v.max(1) as usize);
+        lod::start(Arc::clone(&events), Arc::clone(&self.definitions), lod_workers);
         // Free memory back to the system: glibc keeps it otherwise (see memtrim).
         memtrim::start();
 

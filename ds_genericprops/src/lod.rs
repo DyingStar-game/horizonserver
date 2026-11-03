@@ -189,6 +189,51 @@ struct Counters {
     max_recipients: u64,
 }
 
+impl Counters {
+    /// Adds `other` to these counters and empties it.
+    fn absorb(&mut self, other: &mut Counters) {
+        self.evaluated += other.evaluated;
+        self.radius_scans += other.radius_scans;
+        self.recipients += other.recipients;
+        for (name, n) in other.sent.drain() {
+            *self.sent.entry(name).or_default() += n;
+        }
+        self.bytes += other.bytes;
+        self.max_recipients = self.max_recipients.max(other.max_recipients);
+        *other = Counters::default();
+    }
+}
+
+/// The counters every delivery thread hands over, read by the one that reports.
+fn merged_counters() -> &'static std::sync::Mutex<Counters> {
+    static MERGED: OnceLock<std::sync::Mutex<Counters>> = OnceLock::new();
+    MERGED.get_or_init(Default::default)
+}
+
+/// Delivery threads when the configuration names none (`lod_workers`).
+pub const DEFAULT_WORKERS: usize = 4;
+
+/// How often a delivery thread hands its counters over: well under REPORT_EVERY,
+/// so a report misses at most this much of another thread's work.
+const MERGE_EVERY: Duration = Duration::from_secs(1);
+
+/// The share of the streams one delivery thread serves: the objects whose id
+/// falls on `index` out of `count`. Every stream of an object is on the same
+/// thread, so an object's frames keep their order.
+#[derive(Clone, Copy)]
+struct Shard {
+    index: usize,
+    count: usize,
+}
+
+impl Shard {
+    const ALL: Shard = Shard { index: 0, count: 1 };
+
+    fn owns(&self, gorc_id: GorcObjectId) -> bool {
+        self.count <= 1 || (gorc_id.0.as_u128() % self.count as u128) as usize == self.index
+    }
+}
+
 fn queued_counters() -> &'static DashMap<String, AtomicU64> {
     static QUEUED: OnceLock<DashMap<String, AtomicU64>> = OnceLock::new();
     QUEUED.get_or_init(DashMap::new)
@@ -611,60 +656,82 @@ fn serialize_envelope(
     }
 }
 
-/// Start the delivery loop. Call once, at plugin startup.
+/// Start the delivery loop on `workers` threads, each serving its [`Shard`] of
+/// the streams. Call once, at plugin startup. One thread was the ceiling of the
+/// whole replication: at ~800 players (7 600 moves/s in, 42 000 messages/s out,
+/// preprod 2026-11-03) it ran at 100 % of its core while 13 more idled.
 ///
-/// Runs on its own thread with its own current-thread Tokio runtime rather than
-/// on the Luminal handle, for two reasons: Luminal has no timer driver, and the
-/// server's `server_tick` event — the other available clock — disappears
-/// entirely when `tick_interval_ms = 0`, which would silently stop all
-/// replication. Everything the loop awaits (`RwLock`, `DashMap`, an `mpsc`
-/// `try_send` behind `send_to_client`) is runtime-agnostic.
-pub fn start(events: Arc<EventSystem>, definitions: Arc<DashMap<String, ObjectDefinition>>) {
-    let spawned = std::thread::Builder::new()
-        .name("genericprops-lod".to_string())
-        .spawn(move || {
-            let runtime = match tokio::runtime::Builder::new_current_thread().enable_time().build() {
-                Ok(runtime) => runtime,
-                Err(e) => {
-                    error!("🚀 LOD: ❌ Failed to build delivery runtime: {} - channel updates will not be sent", e);
-                    return;
-                }
-            };
-
-            runtime.block_on(async move {
-                let mut ticker = tokio::time::interval(TICK);
-                // A stalled tick must not be repaid with a burst of catch-up
-                // ticks; delivery is rate limited, replaying the backlog is
-                // pointless work.
-                ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-                let mut ticks: u64 = 0;
-                let mut counters = Counters::default();
-                let mut last_report = Instant::now();
-                loop {
-                    ticker.tick().await;
-                    flush(&events, &definitions, &mut counters).await;
-
-                    ticks = ticks.wrapping_add(1);
-                    if last_report.elapsed() >= REPORT_EVERY {
-                        report(&mut counters, streams().len(), last_report.elapsed());
-                        last_report = Instant::now();
-                    }
-                    if ticks % GC_EVERY_TICKS == 0 {
-                        streams().retain(|_, stream| {
-                            stream.pending || stream.last_queued.elapsed() <= IDLE_RETENTION
-                        });
-                    }
-                }
-            });
-        });
-
-    match spawned {
-        Ok(_) => info!("🚀 LOD: delivery loop started ({} ms tick)", TICK.as_millis()),
-        Err(e) => error!("🚀 LOD: ❌ Failed to start delivery loop: {} - channel updates will not be sent", e),
+/// Each runs its own current-thread Tokio runtime rather than on the Luminal
+/// handle, for two reasons: Luminal has no timer driver, and the server's
+/// `server_tick` event — the other available clock — disappears entirely when
+/// `tick_interval_ms = 0`, which would silently stop all replication. Everything
+/// the loop awaits (`RwLock`, `DashMap`, an `mpsc` `try_send` behind
+/// `send_to_client`) is runtime-agnostic. Thread 0 also reports and sweeps.
+pub fn start(events: Arc<EventSystem>, definitions: Arc<DashMap<String, ObjectDefinition>>, workers: usize) {
+    let workers = workers.max(1);
+    let mut started = 0;
+    for index in 0..workers {
+        let shard = Shard { index, count: workers };
+        let (events, definitions) = (Arc::clone(&events), Arc::clone(&definitions));
+        let spawned = std::thread::Builder::new()
+            .name(format!("gp-lod-{}", index))
+            .spawn(move || deliver(events, definitions, shard));
+        match spawned {
+            Ok(_) => started += 1,
+            Err(e) => error!("🚀 LOD: ❌ Failed to start delivery thread {}: {} - its share of the updates will not be sent", index, e),
+        }
     }
+    info!("🚀 LOD: delivery loop started on {}/{} threads ({} ms tick)", started, workers, TICK.as_millis());
 }
 
-async fn flush(events: &Arc<EventSystem>, definitions: &Arc<DashMap<String, ObjectDefinition>>, counters: &mut Counters) {
+/// One delivery thread: flushes its shard every tick.
+fn deliver(events: Arc<EventSystem>, definitions: Arc<DashMap<String, ObjectDefinition>>, shard: Shard) {
+    let runtime = match tokio::runtime::Builder::new_current_thread().enable_time().build() {
+        Ok(runtime) => runtime,
+        Err(e) => {
+            error!("🚀 LOD: ❌ Failed to build delivery runtime {}: {} - its share of the updates will not be sent", shard.index, e);
+            return;
+        }
+    };
+
+    runtime.block_on(async move {
+        let mut ticker = tokio::time::interval(TICK);
+        // A stalled tick must not be repaid with a burst of catch-up
+        // ticks; delivery is rate limited, replaying the backlog is
+        // pointless work.
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut ticks: u64 = 0;
+        let mut counters = Counters::default();
+        let mut last_merge = Instant::now();
+        let mut last_report = Instant::now();
+        loop {
+            ticker.tick().await;
+            flush(&events, &definitions, &mut counters, shard).await;
+
+            ticks = ticks.wrapping_add(1);
+            if last_merge.elapsed() >= MERGE_EVERY {
+                merged_counters().lock().unwrap().absorb(&mut counters);
+                last_merge = Instant::now();
+            }
+            if shard.index != 0 {
+                continue;
+            }
+            if last_report.elapsed() >= REPORT_EVERY {
+                let mut merged = merged_counters().lock().unwrap();
+                merged.absorb(&mut counters);
+                report(&mut merged, streams().len(), last_report.elapsed());
+                last_report = Instant::now();
+            }
+            if ticks % GC_EVERY_TICKS == 0 {
+                streams().retain(|_, stream| {
+                    stream.pending || stream.last_queued.elapsed() <= IDLE_RETENTION
+                });
+            }
+        }
+    });
+}
+
+async fn flush(events: &Arc<EventSystem>, definitions: &Arc<DashMap<String, ObjectDefinition>>, counters: &mut Counters, shard: Shard) {
     let Some(gorc_instances) = events.get_gorc_instances() else {
         return;
     };
@@ -672,7 +739,11 @@ async fn flush(events: &Arc<EventSystem>, definitions: &Arc<DashMap<String, Obje
         return;
     };
 
-    let keys: Vec<StreamKey> = streams().iter().map(|entry| entry.key().clone()).collect();
+    let keys: Vec<StreamKey> = streams()
+        .iter()
+        .filter(|entry| shard.owns(entry.key().0))
+        .map(|entry| entry.key().clone())
+        .collect();
     if keys.is_empty() {
         return;
     }
@@ -982,6 +1053,15 @@ fn resolve_tiers(
 mod tests {
     use super::*;
 
+    /// The stream table is global and `flush` sweeps all of it, dropping the streams
+    /// of objects its GORC does not hold: the test that flushes runs alone, the
+    /// tests that only queue run beside each other (they failed 3 runs in 5).
+    static STREAMS_LOCK: std::sync::RwLock<()> = std::sync::RwLock::new(());
+
+    fn sharing_streams() -> std::sync::RwLockReadGuard<'static, ()> {
+        STREAMS_LOCK.read().unwrap_or_else(|e| e.into_inner())
+    }
+
     #[test]
     fn player_grid_finds_what_a_full_scan_finds() {
         // Players spread over a few km, some on cell edges and in negative cells.
@@ -1026,6 +1106,7 @@ mod tests {
 
     #[test]
     fn sticky_key_survives_being_overwritten_before_delivery() {
+        let _streams = sharing_streams();
         let id = GorcObjectId::new();
         // The one packet of a reparent...
         queue_sticky(id, 0, "player", "move", &json!({"position": 1, "parent_id": "planet"}), &["parent_id"]);
@@ -1053,6 +1134,7 @@ mod tests {
 
     #[test]
     fn a_repeated_sticky_value_is_declared_again() {
+        let _streams = sharing_streams();
         let id = GorcObjectId::new();
         // Previous session: reparented onto the planet, delivered.
         queue_sticky(id, 0, "player", "move", &json!({"position": 1, "parent_id": "planet"}), &["parent_id"]);
@@ -1066,6 +1148,7 @@ mod tests {
 
     #[test]
     fn forget_object_drops_every_stream_of_that_object_only() {
+        let _streams = sharing_streams();
         let (id, other) = (GorcObjectId::new(), GorcObjectId::new());
         queue_sticky(id, 0, "player", "move", &json!({"position": 1, "parent_id": "planet"}), &["parent_id"]);
         queue(id, 1, "player", "update_property", &json!({"head": 0.5}));
@@ -1087,6 +1170,7 @@ mod tests {
 
     #[test]
     fn a_received_stamp_keeps_the_payload_to_stamp_on_send() {
+        let _streams = sharing_streams();
         let id = GorcObjectId::new();
         let owner = PlayerId::new();
         queue_sticky_owned(id, 0, "player", "move",
@@ -1187,6 +1271,7 @@ mod tests {
 
     #[test]
     fn declaring_a_sticky_key_bumps_the_epoch() {
+        let _streams = sharing_streams();
         let id = GorcObjectId::new();
         assert_eq!(epoch(id), 0);
         queue_sticky(id, 0, "player", "move", &json!({"position": 1, "parent_id": "planet"}), &["parent_id"]);
@@ -1244,6 +1329,7 @@ mod tests {
 
     #[tokio::test]
     async fn bitcode_recipients_get_unreliable_transforms_then_repeats() {
+        let _streams = STREAMS_LOCK.write().unwrap_or_else(|e| e.into_inner());
         let (json_player, bitcode_player) = (PlayerId::new(), PlayerId::new());
         let recorder = Arc::new(Recorder {
             formats: HashMap::from([(json_player, Format::Json), (bitcode_player, Format::Bitcode)]),
@@ -1273,7 +1359,7 @@ mod tests {
         let position = json!({"position": {"x": 1.0, "y": 0.0, "z": 0.0}, "rotation": {"x": 0.0, "y": 1.0, "z": 0.0}});
         queue(gorc_id, 0, "lod_test_box", "move", &position);
         let mut counters = Counters::default();
-        flush(&events, &definitions, &mut counters).await;
+        flush(&events, &definitions, &mut counters, Shard::ALL).await;
 
         let json_frames = recorder.sent_to(json_player);
         assert_eq!(json_frames.len(), 1);
@@ -1287,7 +1373,7 @@ mod tests {
         // No new version: the transform is repeated at the channel's rate, then the stream settles.
         for _ in 0..TRANSFORM_REPEATS + 2 {
             tokio::time::sleep(Duration::from_millis(15)).await;
-            flush(&events, &definitions, &mut counters).await;
+            flush(&events, &definitions, &mut counters, Shard::ALL).await;
         }
         let bitcode_frames = recorder.sent_to(bitcode_player);
         assert_eq!(bitcode_frames.len(), 1 + TRANSFORM_REPEATS as usize);
@@ -1299,14 +1385,29 @@ mod tests {
 
         // A change of another key is a reliable update, with the new transform.
         queue(gorc_id, 0, "lod_test_box", "move", &json!({"position": {"x": 2.0, "y": 0.0, "z": 0.0}, "led": 0}));
-        flush(&events, &definitions, &mut counters).await;
+        flush(&events, &definitions, &mut counters, Shard::ALL).await;
         let new_frames: Vec<_> = recorder.sent_to(bitcode_player).into_iter().skip(1 + TRANSFORM_REPEATS as usize).collect();
         assert_eq!(new_frames.iter().map(|(d, _)| *d).collect::<Vec<_>>(), vec![Delivery::Reliable, Delivery::Unreliable]);
         forget_object(gorc_id);
     }
 
     #[test]
+    fn every_object_has_exactly_one_delivery_thread() {
+        let shards: Vec<Shard> = (0..4).map(|index| Shard { index, count: 4 }).collect();
+        let mut per_shard = [0usize; 4];
+        for _ in 0..1000 {
+            let id = GorcObjectId::new();
+            let owners: Vec<usize> = shards.iter().filter(|s| s.owns(id)).map(|s| s.index).collect();
+            assert_eq!(owners.len(), 1);
+            per_shard[owners[0]] += 1;
+            assert!(Shard::ALL.owns(id));
+        }
+        assert!(per_shard.iter().all(|n| *n > 150), "random ids spread over the threads: {:?}", per_shard);
+    }
+
+    #[test]
     fn plain_queue_has_no_sticky_variant() {
+        let _streams = sharing_streams();
         let id = GorcObjectId::new();
         queue(id, 0, "player", "move", &json!({"position": 1, "parent_id": "planet"}));
         queue(id, 0, "player", "move", &json!({"position": 2}));

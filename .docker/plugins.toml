@@ -119,6 +119,10 @@ queue_admit_per_server = 8
 # Seconds between two saves of every connected player's position / rotation / parent
 # to persistence (default 60, 0 = on disconnect only). Saved on disconnect anyway.
 player_save_interval_secs = 60
+# Threads delivering the channel updates to the clients (default 4). Each serves
+# its share of the objects; one thread was the ceiling of the whole replication at
+# ~800 players (100 % of its core, preprod 2026-11-03).
+lod_workers = 4
 
 [ds_player_authentication]
 log_level = "info"

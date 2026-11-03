@@ -465,8 +465,8 @@ impl ServerManager {
         }
 
         // Planets already created in Horizon (they arrive from resourcesdynamic
-        // asynchronously, possibly before us).
-        match self.worker().request_snapshot().await {
+        // asynchronously, possibly before us). The world objects only.
+        match self.worker().request_snapshot_in(&[], Vec::new()).await {
             Ok(items) => {
                 self.learn_planets_from(&items);
                 for server in self.servers.iter().filter(|s| s.state() == ServerState::Online) {
@@ -1412,7 +1412,8 @@ impl MeshWorker {
             MeshOp::Grant { server, gained } => self.grant_zones(&server, &gained, &servers).await,
             MeshOp::Reseed { server } => {
                 let mut result = OpResult::nothing(&servers);
-                if let Ok(items) = self.request_snapshot().await {
+                // No zone: the world objects only, what it preloads.
+                if let Ok(items) = self.request_snapshot_in(&[], Vec::new()).await {
                     result.planets = planets_in(&items);
                     let _ = handle_world_objects(&items, &server);
                 }
@@ -1421,24 +1422,36 @@ impl MeshWorker {
         }
     }
 
-    /// Asks genericprops for every object (with `_world`) and waits for the answer.
-    async fn request_snapshot(&self) -> Result<SnapshotItems, String> {
-        self.request_snapshot_of(None).await
+    /// Asks genericprops for the objects lying in `zones`, plus the world objects
+    /// (planets, stars) and `also` (what one of the op's servers simulates, wherever
+    /// it lies now), and waits for the answer. Every op used to read the whole world:
+    /// 52k objects took ~5.7 s to build and come back under load, past the 5 s
+    /// timeout, and every split aborted (preprod 2026-11-03).
+    async fn request_snapshot_in(&self, zones: &[Zone], also: Vec<String>) -> Result<SnapshotItems, String> {
+        self.request_snapshot_with(json!({ "zones": zones, "also": also })).await
     }
 
-    /// Same, for the listed objects only (`None`: every object). Building the whole
-    /// world took ~2.5 s under load (20k objects): a hand-over refreshing only its
-    /// players and their vehicles from it spawned them 2-3 s in the past.
-    async fn request_snapshot_of(&self, uuids: Option<Vec<String>>) -> Result<SnapshotItems, String> {
+    /// The listed objects only. A hand-over refreshing its players and their vehicles
+    /// from a whole-world snapshot spawned them 2-3 s in the past.
+    async fn request_snapshot_of(&self, uuids: Vec<String>) -> Result<SnapshotItems, String> {
+        self.request_snapshot_with(json!({ "uuids": uuids })).await
+    }
+
+    /// What `server` simulates: kept in the snapshot of an op on its zones even if it
+    /// already wandered out of them.
+    fn simulated_by(server: &Server) -> Vec<String> {
+        let mut uuids: Vec<String> = server.managed_objects.lock().unwrap().iter().cloned().collect();
+        uuids.extend(server.managed_players.lock().unwrap().iter().cloned());
+        uuids
+    }
+
+    async fn request_snapshot_with(&self, mut request: serde_json::Value) -> Result<SnapshotItems, String> {
         let request_id = uuid::Uuid::new_v4().to_string();
         let (tx, rx) = oneshot::channel::<SnapshotItems>();
         self.pending_snapshots.lock().unwrap().insert(request_id.clone(), tx);
 
         let timeout = self.rules.as_ref().map(|r| r.snapshot_timeout).unwrap_or(Duration::from_secs(5));
-        let request = match uuids {
-            Some(uuids) => json!({ "request_id": request_id, "uuids": uuids }),
-            None => json!({ "request_id": request_id }),
-        };
+        request["request_id"] = json!(request_id);
         if let Err(e) = self.context.events().emit_plugin("genericprops", "get_objects_snapshot", &request).await {
             self.pending_snapshots.lock().unwrap().remove(&request_id);
             return Err(format!("emit get_objects_snapshot failed: {}", e));
@@ -1457,7 +1470,10 @@ impl MeshWorker {
 
     async fn split(&self, parent: &Server, children: &[Server], op_servers: &[String], villages: Option<Vec<ObjectWorld>>) -> OpResult {
         let mut result = OpResult::nothing(op_servers);
-        let items = match self.request_snapshot().await {
+        let parent_zones = parent.zones();
+        // The players, habs and props the plan and the hand-over look at all lie in
+        // the parent's zones; the children's zones are cut from them.
+        let items = match self.request_snapshot_in(&parent_zones, Self::simulated_by(parent)).await {
             Ok(items) => items,
             Err(e) => {
                 error!("[mesh] split of {} aborted: {}", parent.server_name, e);
@@ -1466,7 +1482,6 @@ impl MeshWorker {
         };
         result.planets = planets_in(&items);
 
-        let parent_zones = parent.zones();
         let players: Vec<ObjectWorld> = items
             .values()
             .filter(|i| i.object_type == "player")
@@ -1608,7 +1623,9 @@ impl MeshWorker {
 
     async fn merge(&self, record: SplitRecord, survivor: &Server, released: &Server, op_servers: &[String]) -> OpResult {
         let mut result = OpResult::nothing(op_servers);
-        let items = match self.request_snapshot().await {
+        let released_zones = released.zones();
+        // What moves is what lies in the released zones.
+        let items = match self.request_snapshot_in(&released_zones, Self::simulated_by(released)).await {
             Ok(items) => items,
             Err(e) => {
                 error!("[mesh] merge of {} into {} aborted: {}", released.server_name, survivor.server_name, e);
@@ -1618,7 +1635,6 @@ impl MeshWorker {
         };
         result.planets = planets_in(&items);
 
-        let released_zones = released.zones();
         let survivor_zones = record.parent_zones_before.clone();
         info!(
             "[mesh] merge {} into {}: zones=[{}] (taking back [{}])",
@@ -1676,7 +1692,7 @@ impl MeshWorker {
             error!("[mesh] could not start {} on the orphaned zones", server.server_name);
             return result;
         }
-        match self.request_snapshot().await {
+        match self.request_snapshot_in(&zones, Vec::new()).await {
             Ok(items) => {
                 result.planets = planets_in(&items);
                 // Nobody simulates these players any more: no point waiting.
@@ -1701,7 +1717,7 @@ impl MeshWorker {
         if !server.update_zones(zones.clone()) {
             return result;
         }
-        let items = match self.request_snapshot().await {
+        let items = match self.request_snapshot_in(gained, Vec::new()).await {
             Ok(items) => items,
             Err(e) => {
                 error!("[mesh] {} gained zones [{}] but the snapshot failed: {}", server.server_name, zones_label(gained), e);
@@ -1805,7 +1821,7 @@ impl MeshWorker {
             let mut wanted: HashSet<String> = players.keys().cloned().collect();
             wanted.extend(also_players.iter().cloned());
             wanted.extend(ridden.iter().cloned());
-            match self.request_snapshot_of(Some(wanted.into_iter().collect())).await {
+            match self.request_snapshot_of(wanted.into_iter().collect()).await {
                 Ok(fresh) => {
                     fresh_players = Some(fresh.iter().filter(|(_, i)| i.object_type == "player").map(|(k, v)| (k.clone(), v.clone())).collect::<SnapshotItems>());
                     fresh_snapshot = Some(fresh);

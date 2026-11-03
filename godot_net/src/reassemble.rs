@@ -61,8 +61,22 @@ pub struct Drops {
     pub replayed: u64,
     /// A transform under another epoch than the object's current one.
     pub stale_epoch: u64,
-    /// A transform older than (or the same as) the last one applied.
+    /// A transform older than (or the same as) the last one applied: the sum of the
+    /// three below.
     pub stale_seq: u64,
+    /// The same `seq` as the last transform applied, of the same event: the server's
+    /// repeat of a version already applied (or the wire's duplicate of a datagram).
+    pub stale_seq_repeat: u64,
+    /// An older `seq` than the last transform applied, of the same event. The server
+    /// sends one stream's frames in `seq` order: overtaken on the wire.
+    pub stale_seq_late: u64,
+    /// An older `seq` than the last transform applied, which was of another event of
+    /// the channel (`move` and `update_property` share the channel's `seq`).
+    pub stale_seq_other_event: u64,
+    /// Not a drop: transforms received (applied or dropped), the base of the ratios.
+    pub transforms: u64,
+    /// Not a drop: transforms applied right after one of another event of the channel.
+    pub applied_after_other_event: u64,
     /// An event id missing from the `HelloAck` table.
     pub unknown_event: u64,
     /// A payload that does not decode.
@@ -92,6 +106,9 @@ struct Object {
 struct Stream {
     /// GORC `seq` of the last transform applied.
     last_seq: Option<u16>,
+    /// Event of the last transform applied (`move`, `update_property`...), to tell the
+    /// drops apart.
+    last_event: Option<String>,
     /// The last transform applied, while it is in the object's current frame.
     transform: Option<TransformUpdate>,
     /// Whether this channel carries transforms at all (an update of a channel that
@@ -301,6 +318,7 @@ impl Reassembler {
             (handle, channel),
             Stream {
                 last_seq: None,
+                last_event: None,
                 moves: transform.is_some(),
                 transform,
                 pending: None,
@@ -432,15 +450,28 @@ impl Reassembler {
         transform: TransformUpdate,
         out: &mut Vec<Inbound>,
     ) {
+        self.drops.transforms += 1;
         let epoch = self.objects.get(&handle).map_or(0, |o| o.epoch);
         if transform.epoch != epoch {
             self.drops.stale_epoch += 1;
             return;
         }
         let stream = self.streams.entry((handle, channel)).or_default();
-        if stream.last_seq.is_some_and(|last| !is_newer(seq, last)) {
+        let same_event = stream.last_event.as_deref().is_none_or(|last| last == event);
+        if let Some(last) = stream.last_seq.filter(|last| !is_newer(seq, *last)) {
             self.drops.stale_seq += 1;
+            match (seq == last, same_event) {
+                (true, _) => self.drops.stale_seq_repeat += 1,
+                (false, true) => self.drops.stale_seq_late += 1,
+                (false, false) => self.drops.stale_seq_other_event += 1,
+            }
             return;
+        }
+        if !same_event {
+            self.drops.applied_after_other_event += 1;
+        }
+        if stream.last_event.as_deref() != Some(event) {
+            stream.last_event = Some(event.to_string());
         }
         stream.last_seq = Some(seq);
         stream.moves = true;
@@ -734,6 +765,11 @@ mod tests {
             .is_empty()
         );
         assert_eq!(r.drops().stale_seq, 2);
+        assert_eq!(
+            (r.drops().stale_seq_repeat, r.drops().stale_seq_late),
+            (1, 1)
+        );
+        assert_eq!(r.drops().transforms, 3);
         // The counter wraps.
         let mut r = entered();
         assert_eq!(
@@ -767,6 +803,34 @@ mod tests {
             )
             .is_empty()
         );
+    }
+
+    #[test]
+    fn a_transform_of_another_event_moves_the_channel_seq() {
+        let mut r = entered();
+        let mv = |seq, x| gorc(seq, "move/transform", bitcode::encode(&transform(4, x)));
+        assert_eq!(messages(&mut r, mv(5, 5.0)).len(), 1);
+        // A property change of the same channel carries the position too, under the next seq.
+        let property = gorc(
+            6,
+            "update_property/transform",
+            bitcode::encode(&transform(4, 4.0)),
+        );
+        assert_eq!(messages(&mut r, property).len(), 1);
+        assert_eq!(r.drops().applied_after_other_event, 1);
+        // The repeat of the move is now older than the channel's last transform.
+        assert!(messages(&mut r, mv(5, 5.0)).is_empty());
+        let drops = r.drops();
+        assert_eq!(
+            (
+                drops.stale_seq,
+                drops.stale_seq_other_event,
+                drops.stale_seq_repeat
+            ),
+            (1, 1, 0)
+        );
+        assert_eq!(messages(&mut r, mv(7, 6.0)).len(), 1);
+        assert_eq!(r.drops().applied_after_other_event, 2);
     }
 
     #[test]

@@ -240,6 +240,11 @@ impl HorizonLink {
             ("replayed_after_zone_enter", drops.replayed),
             ("dropped_stale_epoch", drops.stale_epoch),
             ("dropped_stale_seq", drops.stale_seq),
+            ("dropped_stale_seq_repeat", drops.stale_seq_repeat),
+            ("dropped_stale_seq_late", drops.stale_seq_late),
+            ("dropped_stale_seq_other_event", drops.stale_seq_other_event),
+            ("transforms_in", drops.transforms),
+            ("applied_after_other_event", drops.applied_after_other_event),
             ("dropped_unknown_event", drops.unknown_event),
             ("dropped_bad_payload", drops.bad_payload),
         ] {

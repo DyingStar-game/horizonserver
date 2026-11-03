@@ -58,7 +58,8 @@
 //! `<event>/transform`, unreliable (datagrams on WebTransport), and the other keys
 //! as `<event>`, reliable, only when there are any. The clocks of the trip ride with the transform, and `player_id` is left out
 //! when it is the object's own id (the client has it from the zone entry). The
-//! frames are encoded once per version, on the first bitcode recipient. Since a
+//! frames are encoded once per version, on the first bitcode recipient (a stamped
+//! stream encodes them again on each send, under the same `seq`). Since a
 //! datagram can be lost, a bitcode recipient served the last version gets its
 //! transform [`TRANSFORM_REPEATS`] more times at the channel's rate: the "last
 //! version always goes out eventually" guarantee, without a reliable send. Every
@@ -337,6 +338,10 @@ struct Stream {
     epoch: u32,
     /// Bitcode frames of `version`, encoded on the first bitcode recipient.
     bitcode: Option<(u64, BitcodeFrames)>,
+    /// GORC `seq` given to `version` on its first bitcode recipient. A stamped stream
+    /// encodes its frames again on every send, and its repeats must still carry this
+    /// one: with a new seq, the client took an old position for a new one.
+    seq: Option<(u64, u16)>,
     /// Transforms still to resend to bitcode recipients served the last version.
     repeats: HashMap<PlayerId, u8>,
 }
@@ -571,6 +576,7 @@ fn enqueue(
         data_sticky: None,
         epoch: 0,
         bitcode: None,
+        seq: None,
         repeats: HashMap::new(),
     });
 
@@ -766,7 +772,7 @@ async fn flush(events: &Arc<EventSystem>, definitions: &Arc<DashMap<String, Obje
         let (gorc_id, channel) = (*gorc_id, *channel);
 
         // Snapshot what we need; the map is never held across an await.
-        let (version, bytes, bytes_sticky, sticky_version, object_type, owner, stamped, data, data_sticky, epoch, cached_frames) = {
+        let (version, bytes, bytes_sticky, sticky_version, object_type, owner, stamped, data, data_sticky, epoch, cached_frames, cached_seq) = {
             let Some(stream) = streams().get(&key) else {
                 continue;
             };
@@ -788,6 +794,7 @@ async fn flush(events: &Arc<EventSystem>, definitions: &Arc<DashMap<String, Obje
                 stream.data_sticky.clone(),
                 stream.epoch,
                 stream.bitcode.as_ref().filter(|(v, _)| *v == stream.version).map(|(_, frames)| frames.clone()),
+                stream.seq.filter(|(v, _)| *v == stream.version).map(|(_, seq)| seq),
             )
         };
 
@@ -961,10 +968,13 @@ async fn flush(events: &Arc<EventSystem>, definitions: &Arc<DashMap<String, Obje
                     (data, data_sticky)
                 };
                 let object_id = gorc_id.to_string();
+                // One seq per version: a repeat, or a later recipient of the same version,
+                // must be told it is the same position, which the client drops if it has it.
+                let seq = cached_seq.unwrap_or_else(|| gorc_instances.next_sequence(gorc_id, channel));
                 let frames = bitcode_frames(&FrameInput {
                     handle,
                     channel,
-                    seq: gorc_instances.next_sequence(gorc_id, channel),
+                    seq,
                     event: events.event_table().key(event_name),
                     transform_event: events.event_table().key(&ds_protocol::transform_event(event_name)),
                     epoch,
@@ -976,9 +986,10 @@ async fn flush(events: &Arc<EventSystem>, definitions: &Arc<DashMap<String, Obje
                         (Some(_), None) => Some(&data),
                     },
                 });
-                if stamped.is_none() {
-                    if let Some(mut stream) = streams().get_mut(&key) {
-                        if stream.version == version {
+                if let Some(mut stream) = streams().get_mut(&key) {
+                    if stream.version == version {
+                        stream.seq = Some((version, seq));
+                        if stamped.is_none() {
                             stream.bitcode = Some((version, frames.clone()));
                         }
                     }
@@ -1389,6 +1400,67 @@ mod tests {
         flush(&events, &definitions, &mut counters, Shard::ALL).await;
         let new_frames: Vec<_> = recorder.sent_to(bitcode_player).into_iter().skip(1 + TRANSFORM_REPEATS as usize).collect();
         assert_eq!(new_frames.iter().map(|(d, _)| *d).collect::<Vec<_>>(), vec![Delivery::Reliable, Delivery::Unreliable]);
+        forget_object(gorc_id);
+    }
+
+    #[tokio::test]
+    async fn stamped_repeats_keep_the_seq_of_their_version() {
+        let _streams = STREAMS_LOCK.write().unwrap_or_else(|e| e.into_inner());
+        let bitcode_player = PlayerId::new();
+        let recorder = Arc::new(Recorder {
+            formats: HashMap::from([(bitcode_player, Format::Bitcode)]),
+            ..Default::default()
+        });
+        let gorc = Arc::new(GorcInstanceManager::new());
+        let mut events = EventSystem::new();
+        events.set_gorc_instances(gorc.clone());
+        events.set_client_response_sender(recorder.clone());
+        let events = Arc::new(events);
+
+        let definition = ObjectDefinition::new("lod_test_stamped".to_string(), json!({"channels": [
+            {"zone": 0, "distance": 50.0, "frequency": 100.0, "properties": ["position", "rotation"]}
+        ]}));
+        let definitions = Arc::new(DashMap::new());
+        definitions.insert("lod_test_stamped".to_string(), definition.clone());
+        let gorc_id = GorcObjectId::new();
+        let object = crate::genericprops::GenericProps::new(
+            definition,
+            json!({"position": {"x": 0.0, "y": 0.0, "z": 0.0}, "rotation": {"x": 0.0, "y": 0.0, "z": 0.0}}),
+            gorc_id.to_string(),
+        );
+        gorc.register_object_with_uuid(object, Vec3::new(0.0, 0.0, 0.0), Some(gorc_id)).await;
+        gorc.add_player(bitcode_player, Vec3::new(2.0, 0.0, 0.0)).await;
+
+        let stamped_move = |x: f64| json!({"position": {"x": x, "y": 0.0, "z": 0.0}, "rotation": {"x": 0.0, "y": 0.0, "z": 0.0},
+            RECEIVED_STAMP_KEY: 10});
+        let transforms = |recorder: &Recorder| -> Vec<(u16, serde_json::Value)> {
+            recorder.sent_to(bitcode_player).iter().map(|(delivery, bytes)| {
+                assert_eq!(*delivery, Delivery::Unreliable);
+                let (_, seq, _, payload) = decode_gorc(&bytes::Bytes::from(bytes.clone()));
+                let transform: ds_protocol::TransformUpdate = bitcode::decode(&payload).unwrap();
+                (seq, transform.extra.to_value().unwrap())
+            }).collect()
+        };
+
+        queue(gorc_id, 0, "lod_test_stamped", "move", &stamped_move(1.0));
+        let mut counters = Counters::default();
+        flush(&events, &definitions, &mut counters, Shard::ALL).await;
+        for _ in 0..TRANSFORM_REPEATS + 2 {
+            tokio::time::sleep(Duration::from_millis(15)).await;
+            flush(&events, &definitions, &mut counters, Shard::ALL).await;
+        }
+        let sent = transforms(&recorder);
+        assert_eq!(sent.len(), 1 + TRANSFORM_REPEATS as usize);
+        let first_seq = sent[0].0;
+        assert!(sent.iter().all(|(seq, _)| *seq == first_seq), "a repeat is the same version: {:?}", sent);
+        assert!(sent.iter().all(|(_, extra)| extra.get(SENT_STAMP_KEY).is_some()), "each send is stamped");
+
+        // The next version is a new position, under a newer seq.
+        queue(gorc_id, 0, "lod_test_stamped", "move", &stamped_move(2.0));
+        flush(&events, &definitions, &mut counters, Shard::ALL).await;
+        let sent = transforms(&recorder);
+        assert_eq!(sent.len(), 2 + TRANSFORM_REPEATS as usize);
+        assert_eq!(sent.last().unwrap().0, first_seq.wrapping_add(1));
         forget_object(gorc_id);
     }
 

@@ -36,7 +36,7 @@ pub fn handle_object_create(
 		props: Arc<DashMap<String, GorcObjectId>>,
 		events: Arc<EventSystem>,
 		event: serde_json::Value,
-		handle: luminal::Handle,
+		handle: tokio::runtime::Handle,
 		spawn_in_gameserver: bool,
 		queue_objects_create: PendingChildren,
 		live_players: Arc<DashSet<PlayerId>>,

@@ -208,7 +208,7 @@ pub fn handle_object_update(
 		props: Arc<DashMap<String, GorcObjectId>>,
 		events: Arc<EventSystem>,
 		event: serde_json::Value,
-		handle: luminal::Handle,
+		handle: tokio::runtime::Handle,
 		send_to_server_godot: bool,
 	) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 		// Parse request first

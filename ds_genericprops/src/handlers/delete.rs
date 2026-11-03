@@ -19,7 +19,7 @@ pub fn handle_object_delete(
 		props: Arc<DashMap<String, GorcObjectId>>,
 		events: Arc<EventSystem>,
 		event: serde_json::Value,
-		handle: luminal::Handle
+		handle: tokio::runtime::Handle
 	) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 		// Parse request first
 		debug!("🎮 GenericPropsPlugin: Handling object delete event {:?}", event);

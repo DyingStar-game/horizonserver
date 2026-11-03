@@ -123,6 +123,27 @@ impl GorcObject for GenericProps {
 		Ok(serde_json::to_vec(&self.data[&layer.channel])?)
 	}
 
+	/// JSON clients get the channel's object as before; bitcode clients a
+	/// `ds_protocol::PropState`: position and rotation apart, the other keys as a
+	/// `DynValue` (the shape `lod` uses for later updates).
+	fn serialize_for_layer_as(
+		&self,
+		layer: &ReplicationLayer,
+		format: horizon_event_system::Format,
+	) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+		match format {
+			horizon_event_system::Format::Json => self.serialize_for_layer(layer),
+			horizon_event_system::Format::Bitcode => {
+				let data = self.data.get(&layer.channel).ok_or("Invalid channel for this object type")?;
+				let mut state = prop_state(data);
+				if let Ok(gorc_id) = GorcObjectId::from_str(&self.uuid) {
+					state.transform.epoch = crate::lod::epoch(gorc_id);
+				}
+				Ok(horizon_event_system::protocol::bitcode::encode(&state))
+			}
+		}
+	}
+
 	fn get_layers(&self) -> Vec<ReplicationLayer> {
 		//TODO make a channels type with a into<Vec>() impl
 		let mut layers = Vec::new();
@@ -160,4 +181,16 @@ impl GorcObject for GenericProps {
 	fn on_register(&mut self, object_id: GorcObjectId) {
         let _ = object_id; // Default implementation does nothing
     }
+}
+
+/// A channel's data as a bitcode `PropState`. Data that is not a JSON object goes
+/// whole into the other keys.
+pub fn prop_state(data: &serde_json::Value) -> ds_protocol::PropState {
+	match data.as_object() {
+		Some(map) => {
+			let (transform, rest) = ds_protocol::props::split(map);
+			ds_protocol::PropState { transform, data: ds_protocol::DynValue::from(&serde_json::Value::Object(rest)) }
+		}
+		None => ds_protocol::PropState { transform: Default::default(), data: ds_protocol::DynValue::from(data) },
+	}
 }

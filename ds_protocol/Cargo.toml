@@ -4,7 +4,10 @@ version = "0.1.0"
 edition = "2024"
 description = "DyingStar payloads between Horizon and its clients, in JSON and bitcode"
 
+# Explicit versions, not `workspace = true`: the NPC service and the Godot extension
+# depend on this crate through git without the rest of this workspace.
 [dependencies]
-serde = { workspace = true }
-serde_json = { workspace = true }
-bitcode = { workspace = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Exact pin, as in Horizon: bitcode only guarantees its format within a version.
+bitcode = { version = "=0.6.9", features = ["serde"] }

@@ -950,6 +950,9 @@ checksum = "1aaf95b3e5c8f23aa320147307562d361db0ae0d51242340f558153b4eb2439b"
 name = "ds_common"
 version = "0.1.0"
 dependencies = [
+ "bytes 1.11.1",
+ "ds_protocol",
+ "horizon_event_system",
  "serde",
  "serde_json",
  "toml",
@@ -984,9 +987,11 @@ name = "dyingstar_generic_props"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "bytes 1.11.1",
  "chrono",
  "dashmap",
  "ds_common",
+ "ds_protocol",
  "futures 0.3.32",
  "horizon_event_system",
  "luminal_rt",
@@ -2848,6 +2853,7 @@ dependencies = [
  "chrono",
  "dotenvy",
  "ds_common",
+ "ds_protocol",
  "fake",
  "futures 0.3.32",
  "futures-util",
@@ -2875,6 +2881,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "ds_common",
+ "ds_protocol",
  "futures 0.3.32",
  "horizon_event_system",
  "jsonwebtoken 9.3.1",
@@ -2920,6 +2927,7 @@ dependencies = [
  "chrono",
  "dashmap",
  "ds_common",
+ "ds_protocol",
  "futures 0.3.32",
  "horizon_event_system",
  "livekit",
@@ -2964,6 +2972,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "ds_common",
+ "ds_protocol",
  "futures 0.3.32",
  "horizon_event_system",
  "rand 0.8.5",

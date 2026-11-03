@@ -207,7 +207,10 @@ impl SimplePlugin for DyingstarPropsPlugin {
 
         // we receive spawn_request from godot client (press key for example)
         // we will spawn a genericobject (box50cm, box4m, ship, etc)
-        events.on_client("props", "spawn_request", move |event: serde_json::Value, _player_id: PlayerId, _connection: ClientConnectionRef| {
+        // Typed (JSON or bitcode); the payload is the request itself, without the
+        // `{player_id, data}` wrapper `on_client` used to give.
+        events.on_client_packed("props", "spawn_request", move |request: ds_protocol::SpawnRequest, _player_id: PlayerId, _connection: ClientConnectionRef| {
+            let event = request.into_value();
             // prepare clones/local copies used by the async task so they are moved, not the outer variables
             let events = events_for_spawn.clone();
 
@@ -224,13 +227,13 @@ impl SimplePlugin for DyingstarPropsPlugin {
                 // 2/ send to plugin genericobject for creation in gorc
                 // TODO: perhaps change the "object_data" with the data deceived to be dynamic, to test
                 if let Err(e) = events_task.emit_plugin("genericprops", "create_object", &serde_json::json!({
-                    "object_type": event_task["data"]["entity"],
+                    "object_type": event_task["entity"],
                     "object_uuid": uuid,
                     "object_data": {
-                        "position": event_task["data"]["position"],
+                        "position": event_task["position"],
                         "rotation": {"x":0.0, "y": 0.0, "z":0.0},
-                        "scenename": event_task["data"]["scenename"],
-                        "parent_id": event_task["data"]["parent_id"],
+                        "scenename": event_task["scenename"],
+                        "parent_id": event_task["parent_id"],
                     } 
                 })).await {
                     tracing::error!("Failed to emit plugin event to genericprops: {}", e);

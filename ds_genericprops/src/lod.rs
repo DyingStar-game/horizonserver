@@ -187,6 +187,12 @@ struct Counters {
     bytes: u64,
     /// Largest audience a single evaluation saw.
     max_recipients: u64,
+    /// Transform repeats sent to bitcode recipients.
+    repeats: u64,
+    /// Repeats a new version followed before all [`TRANSFORM_REPEATS`] went out: sent
+    /// while the object was still moving, in a slot its source left empty, rather than
+    /// after it stopped.
+    repeats_superseded: u64,
 }
 
 impl Counters {
@@ -200,6 +206,8 @@ impl Counters {
         }
         self.bytes += other.bytes;
         self.max_recipients = self.max_recipients.max(other.max_recipients);
+        self.repeats += other.repeats;
+        self.repeats_superseded += other.repeats_superseded;
         *other = Counters::default();
     }
 }
@@ -274,7 +282,7 @@ fn report(counters: &mut Counters, streams_total: usize, elapsed: Duration) {
     // end in an OOM (see player_movement::coalesce).
     let (moves_in, moves_coalesced, draining) = crate::handlers::player_movement::intake_report();
     info!(
-        "[lod] moves in={:.0}/s coalesced={:.0}/s draining={} | queued [{}] | streams={} evaluated={:.0}/s radius_scans={:.0}/s | sent [{}] total={:.0}/s {:.1} KB/s | recipients/eval avg={:.1} max={}",
+        "[lod] moves in={:.0}/s coalesced={:.0}/s draining={} | queued [{}] | streams={} evaluated={:.0}/s radius_scans={:.0}/s | sent [{}] total={:.0}/s {:.1} KB/s repeats={:.0}/s superseded={:.0}/s | recipients/eval avg={:.1} max={}",
         moves_in as f64 / secs,
         moves_coalesced as f64 / secs,
         draining,
@@ -285,6 +293,8 @@ fn report(counters: &mut Counters, streams_total: usize, elapsed: Duration) {
         sent.join(" "),
         sent_total as f64 / secs,
         counters.bytes as f64 / secs / 1024.0,
+        counters.repeats as f64 / secs,
+        counters.repeats_superseded as f64 / secs,
         if counters.evaluated == 0 { 0.0 } else { counters.recipients as f64 / counters.evaluated as f64 },
         counters.max_recipients,
     );
@@ -870,7 +880,9 @@ async fn flush(events: &Arc<EventSystem>, definitions: &Arc<DashMap<String, Obje
             for (player_id, _) in &due {
                 stream.sent.insert(*player_id, (version, now));
                 // Served a new version: its repeats start over once it is sent.
-                stream.repeats.remove(player_id);
+                if let Some(left) = stream.repeats.remove(player_id) {
+                    counters.repeats_superseded += u64::from(TRANSFORM_REPEATS - left);
+                }
             }
             for player_id in &repeat_due {
                 if let Some((_, sent_at)) = stream.sent.get_mut(player_id) {
@@ -1004,6 +1016,7 @@ async fn flush(events: &Arc<EventSystem>, definitions: &Arc<DashMap<String, Obje
                 counters.bytes += transform.len() as u64;
                 let _ = sender.send_frame(*player_id, Outbound::unreliable(transform.clone())).await;
             }
+            counters.repeats += repeat_due.len() as u64;
             if !bitcode_due.is_empty() {
                 if let Some(mut stream) = streams().get_mut(&key) {
                     for (player_id, _) in &bitcode_due {
@@ -1389,6 +1402,16 @@ mod tests {
         flush(&events, &definitions, &mut counters, Shard::ALL).await;
         let new_frames: Vec<_> = recorder.sent_to(bitcode_player).into_iter().skip(1 + TRANSFORM_REPEATS as usize).collect();
         assert_eq!(new_frames.iter().map(|(d, _)| *d).collect::<Vec<_>>(), vec![Delivery::Reliable, Delivery::Unreliable]);
+        // Every repeat went out before the next version: the object had stopped.
+        assert_eq!((counters.repeats, counters.repeats_superseded), (TRANSFORM_REPEATS as u64, 0));
+
+        // A version that comes after one repeat only: that repeat filled a slot of a moving object.
+        tokio::time::sleep(Duration::from_millis(15)).await;
+        flush(&events, &definitions, &mut counters, Shard::ALL).await;
+        queue(gorc_id, 0, "lod_test_box", "move", &json!({"position": {"x": 3.0, "y": 0.0, "z": 0.0}, "led": 0}));
+        tokio::time::sleep(Duration::from_millis(15)).await;
+        flush(&events, &definitions, &mut counters, Shard::ALL).await;
+        assert_eq!((counters.repeats, counters.repeats_superseded), (TRANSFORM_REPEATS as u64 + 1, 1));
         forget_object(gorc_id);
     }
 

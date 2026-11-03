@@ -168,13 +168,7 @@ pub fn handle_object_create(
 
 					if &req_data.object_type == "player" {
 						// Send GORC object info to client on channel 0 (player's own object)
-						if let Err(e) = events.emit_gorc_instance(
-							gorc_id,
-							0, // Channel 0 for critical info
-							"gorc_zone_enter",
-							&req_data.object_data,
-							horizon_event_system::Dest::Client
-						).await {
+						if let Err(e) = announce_new_player(&events, gorc_id, &req_data.object_data).await {
 							error!("🎮 GORC: ❌ Failed to send GORC info to client: {}", e);
 						} else {
 							debug!("🎮 GORC: ✅ Sent GORC object info to client: {}", &req_data.object_data);
@@ -305,3 +299,72 @@ pub fn handle_object_create(
 		Ok(())
 	}
 
+
+/// Shows a new player's object to the subscribers of its channel 0: the player itself,
+/// and the players already around.
+///
+/// A JSON client gets the GORC event `gorc_zone_enter` it has always got, which names
+/// the object. A bitcode client gets a `ZoneEnter` frame instead: it learns an object's
+/// handle only there, so the same event as a GORC frame named a handle it had never
+/// seen, waited for that zone entry in vain and was dropped — the player never spawned
+/// (7002).
+async fn announce_new_player(
+	events: &EventSystem,
+	gorc_id: GorcObjectId,
+	object_data: &serde_json::Value,
+) -> Result<(), String> {
+	use horizon_event_system::protocol::{bitcode, encode_server, json, ServerFrame};
+	use horizon_event_system::{Format, Outbound};
+
+	let gorc_instances = events.get_gorc_instances().ok_or("no GORC instances manager")?;
+	let sender = events.get_client_response_sender().ok_or("no client response sender")?;
+	let instance = gorc_instances
+		.get_object(gorc_id)
+		.await
+		.ok_or_else(|| format!("object instance {} not found", gorc_id))?;
+	let subscribers = instance.get_subscribers(0);
+	if subscribers.is_empty() {
+		return Ok(());
+	}
+
+	let object_id = gorc_id.to_string();
+	let json_frame: bytes::Bytes = serde_json::to_vec(&json::GorcEvent {
+		channel: 0,
+		data: object_data,
+		event_type: "gorc_zone_enter",
+		object_id: object_id.clone(),
+		object_type: &instance.type_name,
+		player_id: object_id,
+		seq: None,
+		timestamp: horizon_event_system::utils::current_timestamp(),
+	})
+	.map_err(|e| e.to_string())?
+	.into();
+	let bitcode_frame = gorc_instances.object_handle(gorc_id).map(|handle| {
+		encode_server(&ServerFrame::ZoneEnter {
+			handle,
+			object_id: *gorc_id.0.as_bytes(),
+			object_type: instance.type_name.clone(),
+			channel: 0,
+			zone_data: bitcode::encode(&crate::genericprops::prop_state(object_data)),
+		})
+	});
+
+	for player_id in subscribers {
+		let format = sender.connection_profile(player_id).await.map(|profile| profile.format).unwrap_or_default();
+		let frame = match format {
+			Format::Json => json_frame.clone(),
+			Format::Bitcode => match &bitcode_frame {
+				Some(frame) => frame.clone(),
+				None => {
+					warn!("🎮 GORC: player object {} has no wire handle, not shown to bitcode player {}", gorc_id, player_id);
+					continue;
+				}
+			},
+		};
+		if let Err(e) = sender.send_frame(player_id, Outbound::reliable(frame)).await {
+			debug!("🎮 GORC: player object {} not shown to player {}: {}", gorc_id, player_id, e);
+		}
+	}
+	Ok(())
+}

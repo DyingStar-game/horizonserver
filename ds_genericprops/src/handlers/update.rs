@@ -24,18 +24,23 @@ pub fn handle_client_update_request(
 	_luminal_handle: Handle,
 ) -> Result<(), EventError> {
 	
-	// Parse the movement data from the GORC event payload
-    let event_data = serde_json::from_slice::<serde_json::Value>(&gorc_event.data)
-        .map_err(|e| {
-            error!("🚀 GORC: ❌ Failed to parse JSON from GORC event data: {}", e);
-            EventError::HandlerExecution("Invalid JSON in update request".to_string())
-        })?;
-    
-    let req_data = serde_json::from_value::<GenericPropsGORCUpdateRequest>(event_data)
-        .map_err(|e| {
-            error!("🚀 GORC: ❌ Failed to parse GenericPropsGORCUpdateRequest: {}", e);
+	// The payload is JSON or bitcode, as the client's listener speaks.
+    let request = horizon_event_system::protocol::payload::decode_packed::<ds_protocol::PropUpdateRequest>(
+        gorc_event.format,
+        &gorc_event.data,
+    )
+    .map_err(|e| {
+        error!("🚀 GORC: ❌ Failed to parse {} update request: {}", gorc_event.format, e);
+        EventError::HandlerExecution("Invalid update request format".to_string())
+    })?;
+    let req_data = GenericPropsGORCUpdateRequest {
+        object_uuid: request.object_uuid,
+        new_data: request.new_data.to_value().map_err(|e| {
+            error!("🚀 GORC: ❌ Malformed update request data: {}", e);
             EventError::HandlerExecution("Invalid update request format".to_string())
-        })?;
+        })?,
+        channel: request.channel,
+    };
     
     let object_type = object_instance.type_name.clone();
 

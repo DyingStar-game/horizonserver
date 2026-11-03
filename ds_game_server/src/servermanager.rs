@@ -1278,7 +1278,6 @@ impl ServerManager {
 
     async fn send_servers_info_to_clients(&self, context: &Arc<dyn ServerContext>, serverinfo: &ServerInfo, server: &Server) {
         let events = context.events();
-        let sender = events.get_client_response_sender();
 
         let event = json!({
             "godotserver": {
@@ -1313,14 +1312,15 @@ impl ServerManager {
         crate::plugin_rt().spawn(async move {
             for player_id in player_ids.iter() {
                 client_event["player_id"] = player_id.clone().into();
-                let data = serde_json::to_vec(&client_event).unwrap_or_default();
-                if let Some(sender_arc) = &sender {
-                    let obj_player_id = PlayerId::from_str(player_id.as_str()).unwrap_or_else(|_| PlayerId::new());
-                    if let Err(e) = sender_arc.send_to_client(obj_player_id, data).await {
-                        warn!("Failed to send serverinfo to player {}: {}", player_id, e);
-                    }
-                } else {
-                    warn!("No client response sender available to send event to player {}", player_id);
+                let obj_player_id = PlayerId::from_str(player_id.as_str()).unwrap_or_else(|_| PlayerId::new());
+                // In the player's format: this JSON to a JSON client, a serverinfo event to a bitcode one.
+                if let Err(e) = ds_common::client::send_message(
+                    &events,
+                    obj_player_id,
+                    ds_protocol::messages::server_events::SERVER_INFO,
+                    &client_event,
+                ).await {
+                    warn!("Failed to send serverinfo to player {}: {}", player_id, e);
                 }
             }
         });

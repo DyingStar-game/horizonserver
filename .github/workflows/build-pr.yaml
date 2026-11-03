@@ -34,6 +34,7 @@ jobs:
               - 'Horizon'
               - '.gitmodules'
               - '.docker/Dockerfile.server'
+              - 'Cargo.lock'
               - '.docker/entrypoint.sh'
               - '.docker/production_config.toml'
             # Each filter mirrors the COPY instructions of its Dockerfile. If one

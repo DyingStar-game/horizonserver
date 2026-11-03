@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use chrono::Utc;
 use horizon_event_system::{
-    create_complete_horizon_system, CompressionType, create_simple_plugin, defObject, EventSystem, PlayerId, LogLevel, PluginError, ReplicationLayer, ReplicationPriority, ServerContext, SimplePlugin, Vec3, PlayerDisconnectedEvent, ClientConnectionRef, GorcObject, GorcEvent, Dest
+    CompressionType, create_simple_plugin, defObject, EventSystem, PlayerId, LogLevel, PluginError, ReplicationLayer, ReplicationPriority, ServerContext, SimplePlugin, Vec3, PlayerDisconnectedEvent, ClientConnectionRef, GorcObject, GorcEvent, Dest
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -79,13 +79,6 @@ impl SimplePlugin for DyingstarPropsPlugin {
     async fn register_handlers(&mut self, events: Arc<EventSystem>, context: Arc<dyn ServerContext>) -> Result<(), PluginError> {
         info!("🔧 DyingstarPropsPlugin: Registering event handlers...");
 
-        // Enter the plugin runtime only for the synchronous call that needs a reactor.
-        // Drop the EnterGuard before any .await so the register_handlers future remains Send.
-        let (gevents, mut gorc_system) = {
-            let _enter = self.runtime.handle().enter();
-            create_complete_horizon_system(context.clone())
-        }.map_err(|e| PluginError::ExecutionError(format!("failed to create complete horizon system: {}", e)))?;
- 
         // clone the plugin runtime so sync handlers can spawn tasks onto it without requiring
         // a reactor on the current thread.
         let runtime_for_handlers = self.runtime.clone();
@@ -97,13 +90,6 @@ impl SimplePlugin for DyingstarPropsPlugin {
         let runtime_for_disconnect = self.runtime.clone();
         let runtime_for_props_update = self.runtime.clone();
 
-
-        // create per-handler clones of the GORC system so closures don't move the same value
-        let gorc_for_new_player = gorc_system.clone();
-        let gorc_for_spawn = gorc_system.clone();
-        let gorc_for_players_update = gorc_system.clone();
-        let gorc_for_disconnect = gorc_system.clone();
-        let gorc_for_props_update = gorc_system.clone();
 
         // register_handlers runs inside an async runtime — spawn tasks directly with tokio::spawn
         // (remove the previous runtime construction/Handle logic)
@@ -221,7 +207,10 @@ impl SimplePlugin for DyingstarPropsPlugin {
 
         // we receive spawn_request from godot client (press key for example)
         // we will spawn a genericobject (box50cm, box4m, ship, etc)
-        events.on_client("props", "spawn_request", move |event: serde_json::Value, _player_id: PlayerId, _connection: ClientConnectionRef| {
+        // Typed (JSON or bitcode); the payload is the request itself, without the
+        // `{player_id, data}` wrapper `on_client` used to give.
+        events.on_client_packed("props", "spawn_request", move |request: ds_protocol::SpawnRequest, _player_id: PlayerId, _connection: ClientConnectionRef| {
+            let event = request.into_value();
             // prepare clones/local copies used by the async task so they are moved, not the outer variables
             let events = events_for_spawn.clone();
 
@@ -238,13 +227,13 @@ impl SimplePlugin for DyingstarPropsPlugin {
                 // 2/ send to plugin genericobject for creation in gorc
                 // TODO: perhaps change the "object_data" with the data deceived to be dynamic, to test
                 if let Err(e) = events_task.emit_plugin("genericprops", "create_object", &serde_json::json!({
-                    "object_type": event_task["data"]["entity"],
+                    "object_type": event_task["entity"],
                     "object_uuid": uuid,
                     "object_data": {
-                        "position": event_task["data"]["position"],
+                        "position": event_task["position"],
                         "rotation": {"x":0.0, "y": 0.0, "z":0.0},
-                        "scenename": event_task["data"]["scenename"],
-                        "parent_id": event_task["data"]["parent_id"],
+                        "scenename": event_task["scenename"],
+                        "parent_id": event_task["parent_id"],
                     } 
                 })).await {
                     tracing::error!("Failed to emit plugin event to genericprops: {}", e);
@@ -265,38 +254,6 @@ impl SimplePlugin for DyingstarPropsPlugin {
         let players_for_disconnect = self.players.clone();
         let events_for_disconnect = events.clone();
         let events_clone3 = events.clone();
-
-        // Spawn the GORC tick loop in a dedicated OS thread with its own current-thread Tokio runtime.
-        // This avoids requiring the gorc tick future to be `Send`.
-        {
-            // take ownership of gorc_system
-            let mut gorc_loop = gorc_system;
-            std::thread::Builder::new()
-                .name("dyingstar-gorc-loop".into())
-                .spawn(move || {
-                    let rt = tokio::runtime::Builder::new_current_thread()
-                        .enable_all()
-                        .build()
-                        .expect("failed to build gorc loop runtime");
-
-                    rt.block_on(async move {
-                        loop {
-                            // Process GORC replication
-                            if let Err(e) = gorc_loop.tick().await {
-                                error!("GORC tick error: {}", e);
-                            }
-                            
-                            // print result of gorc_loop.get_stats()
-                            // let stats = gorc_loop.get_stats().await;
-                            // println!("GORC stats: {:?}", stats);
-
-                            // Run at ~60Hz
-                            tokio::time::sleep(std::time::Duration::from_millis(16)).await;
-                        }
-                    });
-                })
-                .expect("failed to spawn gorc loop thread");
-        }
 
         let planets_clone = self.planets.clone();
         let runtime = self.runtime.clone();

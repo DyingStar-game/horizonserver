@@ -2,7 +2,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use base64;
 use uuid::Uuid;
+use ds_common::client::respond_message;
 use ds_common::events::DSErrorMessage;
+use ds_protocol::messages::server_events;
+pub use ds_protocol::PlayerInit;
 use horizon_event_system::{
     current_timestamp, ClientConnectionRef, DisconnectReason, EventSystem, PlayerDisconnectedEvent, PlayerId, Vec3
 };
@@ -21,39 +24,17 @@ pub const TOKEN_REFUSED_CODE: i64 = 1341;
 
 /// Tells the client why its init is refused, so it does not wait for a spawn that will
 /// never come (it would end in error 7002 after its spawn watchdog).
-async fn send_init_error(connection: &ClientConnectionRef, code: i64, message: &str) {
-    let payload = serde_json::to_vec(&serde_json::json!({
+async fn send_init_error(events: &EventSystem, connection: &ClientConnectionRef, code: i64, message: &str) {
+    let payload = serde_json::json!({
         "type": "error",
         "code": code,
         "message": message,
-    }))
-    .expect("failed to serialize error payload");
-    if let Err(e) = connection.respond(&payload).await {
+    });
+    if let Err(e) = respond_message(events, connection, server_events::ERROR, &payload).await {
         error!("Failed to send init error {} to client: {}", code, e);
     }
 }
 
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PlayerInit {
-    pub data: PlayerInitData,
-    pub player_id: PlayerId,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PlayerInitData {
-    pub token: String,
-    /// What the client claims to be. Only honoured with `BYPASS_AUTH=true`: otherwise
-    /// the realm role `npc` of the token decides (see `resolve_is_npc`). Still accepted
-    /// so older clients and bots keep deserializing.
-    #[serde(default)]
-    pub is_npc: bool,
-    /// The client asks for the clocks of its own moves (client.ini debug_move_clocks):
-    /// kept by ds_game_server until the disconnect and given to every Godot server
-    /// that manages the player.
-    #[serde(default)]
-    pub move_clocks: bool,
-}
 
 /// JWT claims of the token (verified by `jwt::JwtVerifier`, or only decoded when
 /// `VERIFY_JWT_SIGNATURE=false`).
@@ -112,11 +93,11 @@ pub fn resolve_is_npc(client_flag: bool, roles: &[String], auth_bypassed: bool) 
 /// `plugingameserver:new_player`, and the client gives up with error 7002 after 60 s
 /// (preprod, 2026-10-14, player 488cf437).
 ///
-/// The old session is closed the way a normal disconnect would close it
-/// (`player_disconnected`, which every plugin cleans up on), then kicked: the kick
-/// drops the connection from the manager, so when its socket finally dies it finds
-/// no player id and does not emit a second `player_disconnected` — which would now
-/// tear down the new session.
+/// The old session is kicked, then awaited until Horizon has dropped it. Horizon emits
+/// `player_disconnected` (with `player_db_id`, which every plugin cleans up on) before
+/// it drops a kicked connection, so once the old connection is gone that event has
+/// been handled, and it can no longer arrive after this connection takes the id over
+/// — where it would tear down the new session.
 async fn evict_stale_session(events: &Arc<EventSystem>, player_id: PlayerId, player_db_id: &str) {
     let Ok(db_id) = PlayerId::from_str(player_db_id) else {
         return;
@@ -136,19 +117,36 @@ async fn evict_stale_session(events: &Arc<EventSystem>, player_id: PlayerId, pla
         "auth (player_init): player {} already has an open connection, closing that stale session before connection {} takes over",
         db_id, player_id
     );
-    if let Err(e) = events.emit_core("player_disconnected", &PlayerDisconnectedEvent {
-        player_id: db_id,
-        connection_id: String::new(),
-        reason: DisconnectReason::Error("superseded by a new connection".to_string()),
-        timestamp: current_timestamp(),
-    }).await
-    {
-        error!("auth (player_init): failed to emit player_disconnected for stale session of {}: {}", db_id, e);
-    }
     if let Err(e) = sender.kick(db_id, Some("Superseded by a new connection".to_string())).await {
         warn!("auth (player_init): could not kick stale session of {}: {}", db_id, e);
     }
+    let deadline = std::time::Instant::now() + STALE_SESSION_CLOSE_TIMEOUT;
+    while sender.is_connection_active(db_id).await {
+        if std::time::Instant::now() >= deadline {
+            // Clean the old session up now; its own player_disconnected, if it ever
+            // comes, may then tear down the new one.
+            error!(
+                "auth (player_init): stale session of {} still open after {:?}, cleaning it up without waiting",
+                db_id, STALE_SESSION_CLOSE_TIMEOUT
+            );
+            if let Err(e) = events.emit_core("player_disconnected", &PlayerDisconnectedEvent {
+                player_id: db_id,
+                connection_id: String::new(),
+                reason: DisconnectReason::Kicked("superseded by a new connection".to_string()),
+                timestamp: current_timestamp(),
+            }).await
+            {
+                error!("auth (player_init): failed to emit player_disconnected for stale session of {}: {}", db_id, e);
+            }
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
 }
+
+/// How long `evict_stale_session` waits for Horizon to drop a kicked stale session.
+/// The kick goes ahead of any queued frame, so it normally takes a few milliseconds.
+const STALE_SESSION_CLOSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
 pub async fn handle_player_init(
     event: PlayerInit,
@@ -158,16 +156,15 @@ pub async fn handle_player_init(
     server_state_ok: Arc<AtomicBool>,
     token_check: Arc<TokenCheck>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    info!("auth (player_init): START handle_player_init player data: {:?}", event.data);
+    info!("auth (player_init): START handle_player_init (is_npc: {}, move_clocks: {})", event.is_npc, event.move_clocks);
     if !server_state_ok.load(Ordering::Relaxed) {
         warn!("Player {:?} tried to init but server is not ready yet", player_id);
-        let payload = serde_json::to_vec(&serde_json::json!({
+        let payload = serde_json::json!({
             "type": "error",
             "code": 1338,
             "message": "Server not yet ready"
-        }))
-        .expect("failed to serialize error payload");
-        if let Err(e) = connection.respond(&payload).await {
+        });
+        if let Err(e) = respond_message(&events, &connection, server_events::ERROR, &payload).await {
             error!("Failed to send server-not-ready error to client: {}", e);
         }
         return Ok(());
@@ -191,7 +188,7 @@ pub async fn handle_player_init(
         (id, name, Vec::new())
     } else {
         let claims = match token_check.as_ref() {
-            TokenCheck::Verify(verifier) => match verifier.verify(&event.data.token).await {
+            TokenCheck::Verify(verifier) => match verifier.verify(&event.token).await {
                 Ok(claims) => Some(claims),
                 Err(rejection) => {
                     error!("auth (player_init): invalid JWT for player_id {:?}, init rejected: {}", player_id, rejection);
@@ -199,19 +196,19 @@ pub async fn handle_player_init(
                         TokenRejection::Expired => (TOKEN_EXPIRED_CODE, "Session expired"),
                         TokenRejection::Invalid(_) => (TOKEN_REFUSED_CODE, "Authentication refused"),
                     };
-                    send_init_error(&connection, code, message).await;
+                    send_init_error(&events, &connection, code, message).await;
                     return Err(format!("invalid JWT: {}", rejection).into());
                 }
             },
             TokenCheck::Misconfigured(reason) => {
                 error!("auth (player_init): JWT verification is not configured, init of player_id {:?} rejected: {}", player_id, reason);
-                send_init_error(&connection, TOKEN_REFUSED_CODE, "Authentication unavailable").await;
+                send_init_error(&events, &connection, TOKEN_REFUSED_CODE, "Authentication unavailable").await;
                 return Err(format!("JWT verification not configured: {}", reason).into());
             }
             TokenCheck::DecodeOnly => {
                 // VERIFY_JWT_SIGNATURE=false (development): payload read, signature not checked.
                 warn!("VERIFY_JWT_SIGNATURE=false — JWT of player_id {:?} decoded WITHOUT signature verification", player_id);
-                decode_jwt_payload(&event.data.token)
+                decode_jwt_payload(&event.token)
             }
         };
         if let Some(ref c) = claims {
@@ -248,12 +245,12 @@ pub async fn handle_player_init(
     };
 
 
-    let payload = serde_json::to_vec(&serde_json::json!({
+    let payload = serde_json::json!({
         "player_id": player_db_id,
         "type": "init_ack"
-    })).expect("failed to serialize payload");
+    });
 
-    if let Err(e) = connection.respond(&payload).await
+    if let Err(e) = respond_message(&events, &connection, server_events::INIT_ACK, &payload).await
     {
         error!("Failed to send init_ack to client: {}", e);
     }
@@ -284,7 +281,7 @@ pub async fn handle_player_init(
     // Before the spawn, so the first Godot server already gets it.
     if let Err(e) = events.emit_plugin("gameserver", "move_clocks", &serde_json::json!({
         "player_uuid": player_db_id,
-        "enabled": event.data.move_clocks,
+        "enabled": event.move_clocks,
     })).await
     {
         error!("Failed to emit gameserver:move_clocks: {}", e);
@@ -304,8 +301,8 @@ pub async fn handle_player_init(
         error!("Failed to emit gameserver:player_roles: {}", e);
     }
 
-    let is_npc = resolve_is_npc(event.data.is_npc, &roles, bypass_auth);
-    if event.data.is_npc && !is_npc {
+    let is_npc = resolve_is_npc(event.is_npc, &roles, bypass_auth);
+    if event.is_npc && !is_npc {
         warn!(
             "auth (player_init): player {} ({}) claims to be an NPC without the '{}' realm role, treated as a human",
             player_db_id, player_name, NPC_ROLE

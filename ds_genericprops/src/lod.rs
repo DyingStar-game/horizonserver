@@ -227,6 +227,7 @@ struct Shard {
 }
 
 impl Shard {
+    #[cfg(test)]
     const ALL: Shard = Shard { index: 0, count: 1 };
 
     fn owns(&self, gorc_id: GorcObjectId) -> bool {

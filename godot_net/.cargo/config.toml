@@ -1,0 +1,4 @@
+# The Godot API the bindings are generated from: dumped from the project's Godot binary
+# (4.7, precision=double) by build.sh, not committed (7 MB).
+[env]
+GODOT4_GDEXTENSION_JSON = { value = "godot/extension_api.json", relative = true }

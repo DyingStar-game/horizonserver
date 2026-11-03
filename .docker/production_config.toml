@@ -50,26 +50,29 @@ tick_interval_ms = 16
 # ============================================================================
 # Defines the 3D coordinate space that this server instance manages
 # For distributed servers, each instance should handle a different region
-# Client listeners (Horizon Client Transport v2). Every key is optional; without
-# these sections Horizon serves WebSocket + JSON on bind_address, as before.
-# Target: every client on WebTransport + bitcode; WebSocket + JSON stays only until
-# the Godot client speaks bitcode.
-# [server.websocket]
-# protocol = "json"            # "json" | "bitcode"
-# compression = "none"         # "none" | "zstd" | "lz4"
-#
-# [server.webtransport]        # HTTP/3 over QUIC, one UDP port
-# enabled = false
-# bind_address = "0.0.0.0:7043"
-# protocol = "bitcode"
-# compression = "zstd"
-# cert_path = "tls/cert.pem"   # required: WebTransport always runs over TLS
-# key_path = "tls/key.pem"
-# unreliable_max_age_ms = 100  # older unreliable frames are dropped
-#
-# [server.compression]         # listeners with compression = "zstd" or "lz4"
-# level = 1
-# min_size = 128
+# Client listeners (Horizon Client Transport v2).
+# Target: every client on WebTransport + bitcode. The WebSocket + JSON listener on
+# bind_address stays until the Godot client speaks bitcode.
+[server.websocket]
+protocol = "json"
+compression = "none"
+
+# HTTP/3 over QUIC, one UDP port (kubernetes horizon chart: webTransport.port).
+# The certificate comes from cert-manager, mounted at /app/tls; without it this
+# listener stops with an error and WebSocket keeps working.
+[server.webtransport]
+enabled = true
+bind_address = "0.0.0.0:7043"
+protocol = "bitcode"
+compression = "zstd"
+cert_path = "/app/tls/tls.crt"
+key_path = "/app/tls/tls.key"
+unreliable_max_age_ms = 100  # older unreliable frames (transforms) are dropped
+
+# Listeners with compression = "zstd" or "lz4".
+[server.compression]
+level = 1
+min_size = 128               # smaller frames are batched per recipient
 
 [server.region]
 # World boundaries (in game units)

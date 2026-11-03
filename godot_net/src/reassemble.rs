@@ -51,6 +51,9 @@ const ORPHAN_MAX_HANDLES: usize = 4096;
 /// [`PropUpdate`]: the plugins' own zone enter / exit notices.
 const PLAIN_GORC_EVENTS: &[&str] = &["gorc_zone_enter", "gorc_zone_exit"];
 
+/// The event that moves a player: `update_property`'s position is ignored for them.
+const MOVE_EVENT: &str = "move";
+
 /// Frames dropped, by reason.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Drops {
@@ -61,8 +64,8 @@ pub struct Drops {
     pub replayed: u64,
     /// A transform under another epoch than the object's current one.
     pub stale_epoch: u64,
-    /// A transform older than (or the same as) the last one applied: the sum of the
-    /// three below.
+    /// A transform older than (or the same as) the last one applied: the sum of
+    /// `stale_seq_repeat`, `stale_seq_late` and `stale_seq_other_event`.
     pub stale_seq: u64,
     /// The same `seq` as the last transform applied, of the same event: the server's
     /// repeat of a version already applied (or the wire's duplicate of a datagram).
@@ -73,6 +76,10 @@ pub struct Drops {
     /// An older `seq` than the last transform applied, which was of another event of
     /// the channel (`move` and `update_property` share the channel's `seq`).
     pub stale_seq_other_event: u64,
+    /// Among `stale_seq_other_event`: `move` versions newer than every `move` received
+    /// so far, so never applied. Counted once per version, not per copy. The rest of
+    /// `stale_seq_other_event` costs no position.
+    pub stale_seq_move_unseen: u64,
     /// Not a drop: transforms received (applied or dropped), the base of the ratios.
     pub transforms: u64,
     /// Not a drop: transforms applied right after one of another event of the channel.
@@ -109,6 +116,8 @@ struct Stream {
     /// Event of the last transform applied (`move`, `update_property`...), to tell the
     /// drops apart.
     last_event: Option<String>,
+    /// GORC `seq` of the newest `move` received, applied or dropped.
+    last_move_seq: Option<u16>,
     /// The last transform applied, while it is in the object's current frame.
     transform: Option<TransformUpdate>,
     /// Whether this channel carries transforms at all (an update of a channel that
@@ -319,6 +328,7 @@ impl Reassembler {
             Stream {
                 last_seq: None,
                 last_event: None,
+                last_move_seq: None,
                 moves: transform.is_some(),
                 transform,
                 pending: None,
@@ -458,8 +468,16 @@ impl Reassembler {
         }
         let stream = self.streams.entry((handle, channel)).or_default();
         let same_event = stream.last_event.as_deref().is_none_or(|last| last == event);
+        let unseen_move =
+            event == MOVE_EVENT && stream.last_move_seq.is_none_or(|last| is_newer(seq, last));
+        if unseen_move {
+            stream.last_move_seq = Some(seq);
+        }
         if let Some(last) = stream.last_seq.filter(|last| !is_newer(seq, *last)) {
             self.drops.stale_seq += 1;
+            if unseen_move {
+                self.drops.stale_seq_move_unseen += 1;
+            }
             match (seq == last, same_event) {
                 (true, _) => self.drops.stale_seq_repeat += 1,
                 (false, true) => self.drops.stale_seq_late += 1,
@@ -829,8 +847,43 @@ mod tests {
             ),
             (1, 1, 0)
         );
+        // That copy of the move costs nothing: the client has this position.
+        assert_eq!(r.drops().stale_seq_move_unseen, 0);
         assert_eq!(messages(&mut r, mv(7, 6.0)).len(), 1);
         assert_eq!(r.drops().applied_after_other_event, 2);
+    }
+
+    #[test]
+    fn a_move_never_received_before_a_newer_property_is_counted_once() {
+        let mut r = entered();
+        let mv = |seq, x| gorc(seq, "move/transform", bitcode::encode(&transform(4, x)));
+        let property = |seq| {
+            gorc(
+                seq,
+                "update_property/transform",
+                bitcode::encode(&transform(4, 4.0)),
+            )
+        };
+        assert_eq!(messages(&mut r, mv(5, 5.0)).len(), 1);
+        // Seq 6 is a move still on its way when the property under seq 7 lands.
+        assert_eq!(messages(&mut r, property(7)).len(), 1);
+        assert!(messages(&mut r, mv(6, 6.0)).is_empty());
+        assert_eq!(r.drops().stale_seq_move_unseen, 1);
+        // Its repeats are dropped too, but it is one position lost.
+        assert!(messages(&mut r, mv(6, 6.0)).is_empty());
+        let drops = r.drops();
+        assert_eq!(
+            (drops.stale_seq_other_event, drops.stale_seq_move_unseen),
+            (2, 1)
+        );
+        // A property losing to a newer move costs no player position.
+        assert_eq!(messages(&mut r, mv(9, 9.0)).len(), 1);
+        assert!(messages(&mut r, property(8)).is_empty());
+        let drops = r.drops();
+        assert_eq!(
+            (drops.stale_seq_other_event, drops.stale_seq_move_unseen),
+            (3, 1)
+        );
     }
 
     #[test]

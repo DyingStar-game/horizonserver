@@ -243,6 +243,7 @@ impl HorizonLink {
             ("dropped_stale_seq_repeat", drops.stale_seq_repeat),
             ("dropped_stale_seq_late", drops.stale_seq_late),
             ("dropped_stale_seq_other_event", drops.stale_seq_other_event),
+            ("dropped_stale_seq_move_unseen", drops.stale_seq_move_unseen),
             ("transforms_in", drops.transforms),
             ("applied_after_other_event", drops.applied_after_other_event),
             ("dropped_unknown_event", drops.unknown_event),

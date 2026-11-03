@@ -18,7 +18,7 @@ use crate::handlers::initial_objects::{
 use crate::mesh::{plan_split_n, plan_village_split, MeshRules, VILLAGE_SPLIT_MAX_PLAYERS_SHARE};
 use crate::server::{Server, ServerState};
 
-use ds_common::events::GenericPropsRequest;
+use ds_common::events::{GenericPropsRequest, ObjectsSnapshot};
 use ds_common::mesh_load::{PoolLoad, ServerLoad};
 use ds_common::world::{ObjectWorld, Point3};
 use ds_common::zone::{is_world_object, zones_contain, zones_label, Zone};
@@ -607,18 +607,8 @@ impl ServerManager {
         }
 
         let pending = Arc::clone(&self.pending_snapshots);
-        let result = events.on_plugin("gameserver", "objects_snapshot", move |event: serde_json::Value| {
-            let request_id = event["request_id"].as_str().unwrap_or_default().to_string();
-            let Some(sender) = pending.lock().unwrap().remove(&request_id) else {
-                warn!("[mesh] objects_snapshot for unknown request {}", request_id);
-                return Ok(());
-            };
-            match serde_json::from_value::<SnapshotItems>(event["items"].clone()) {
-                Ok(items) => {
-                    let _ = sender.send(items);
-                }
-                Err(e) => error!("[mesh] objects_snapshot {} unparsable: {}", request_id, e),
-            }
+        let result = events.on_plugin("gameserver", "objects_snapshot", move |snapshot: ObjectsSnapshot| {
+            deliver_snapshot(&pending, snapshot);
             Ok(())
         }).await;
         if let Err(e) = result {
@@ -1383,6 +1373,15 @@ fn log_freeze_coverage(parent: &Server, items: &SnapshotItems, before: &[Zone], 
     );
 }
 
+/// Hands a `gameserver:objects_snapshot` to the op waiting for it (`request_snapshot_with`).
+fn deliver_snapshot(pending: &Mutex<HashMap<String, oneshot::Sender<SnapshotItems>>>, snapshot: ObjectsSnapshot) {
+    let Some(sender) = pending.lock().unwrap().remove(&snapshot.request_id) else {
+        warn!("[mesh] objects_snapshot for unknown request {}", snapshot.request_id);
+        return;
+    };
+    let _ = sender.send(snapshot.items);
+}
+
 fn planets_in(items: &SnapshotItems) -> Vec<(String, String)> {
     items
         .values()
@@ -1972,5 +1971,53 @@ mod discovery_tests {
         let addresses = d.resolve().await.unwrap();
         assert!(!addresses.is_empty());
         assert!(addresses.iter().all(|a| a.starts_with("ws://") && a.ends_with(":8980")), "{:?}", addresses);
+    }
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+    use horizon_event_system::EventSystem;
+
+    fn item(uuid: &str) -> GenericPropsRequest {
+        GenericPropsRequest {
+            object_type: "box".into(),
+            object_uuid: uuid.into(),
+            object_data: json!({"parent_id": "hab", "_world": ObjectWorld::space_at(Point3::new(1.0, 2.0, 3.0))}),
+            broadcast_only: None,
+        }
+    }
+
+    /// genericprops emits `ObjectsSnapshot` and the manager reads it back typed, through
+    /// the EventSystem as between the two plugins: the waiting op gets the items.
+    #[tokio::test]
+    async fn a_snapshot_reaches_the_op_waiting_for_it() {
+        let events = Arc::new(EventSystem::new());
+        let pending: Arc<Mutex<HashMap<String, oneshot::Sender<SnapshotItems>>>> = Arc::new(Mutex::new(HashMap::new()));
+        let handler_pending = Arc::clone(&pending);
+        events
+            .on_plugin("gameserver", "objects_snapshot", move |snapshot: ObjectsSnapshot| {
+                deliver_snapshot(&handler_pending, snapshot);
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let (tx, rx) = oneshot::channel();
+        pending.lock().unwrap().insert("wanted".to_string(), tx);
+
+        // Unknown request first: ignored, the waiting one stays pending.
+        let stray = ObjectsSnapshot { request_id: "stray".into(), items: HashMap::from([("x".to_string(), item("x"))]) };
+        events.emit_plugin("gameserver", "objects_snapshot", &stray).await.unwrap();
+        assert!(pending.lock().unwrap().contains_key("wanted"));
+
+        let items: SnapshotItems = ["a", "b"].iter().map(|u| (u.to_string(), item(u))).collect();
+        let answer = ObjectsSnapshot { request_id: "wanted".into(), items };
+        events.emit_plugin("gameserver", "objects_snapshot", &answer).await.unwrap();
+
+        let got = rx.await.expect("the op gets its snapshot");
+        assert_eq!(got.len(), 2);
+        let world = ObjectWorld::from_object_data(&got["a"].object_data).expect("_world survives the trip");
+        assert_eq!(world.local_position, Point3::new(1.0, 2.0, 3.0));
+        assert!(pending.lock().unwrap().is_empty());
     }
 }

@@ -475,14 +475,9 @@ impl GenericPropsPlugin {
 
                 info!("plugin genericprops (get_objects_snapshot): request {} answered with {} items in {:?}",
                     request_id, items.len(), started.elapsed());
-                if let Err(e) = events.emit_plugin(
-                    "gameserver",
-                    "objects_snapshot",
-                    &json!({
-                        "request_id": request_id,
-                        "items": items
-                    }),
-                ).await {
+                // Typed, not `json!`: that copied the whole snapshot into a Value first.
+                let answer = ds_common::events::ObjectsSnapshot { request_id, items };
+                if let Err(e) = events.emit_plugin("gameserver", "objects_snapshot", &answer).await {
                     error!("plugin genericprops (get_objects_snapshot): failed to emit objects_snapshot: {}", e);
                 }
             });

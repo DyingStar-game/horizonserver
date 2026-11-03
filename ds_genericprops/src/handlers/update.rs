@@ -238,7 +238,7 @@ pub fn handle_object_update(
 				match GorcObjectId::from_str(&req_data.object_uuid) {
 					Ok(gorc_id) => {
 						// Check if this GORC ID actually exists in the instance manager
-						if gorc_instances.get_object(gorc_id).await.is_some() {
+						if gorc_instances.get_object_type(gorc_id).await.is_some() {
 							debug!("🎮 GORC: ✅ Found object via direct GORC ID lookup: {}", req_data.object_uuid);
 							// Add to props map for faster future lookups
 							props_clone.insert(req_data.object_uuid.clone(), gorc_id);
@@ -273,7 +273,7 @@ pub fn handle_object_update(
 							}
 						}
 					}
-				} else if gorc_instances.get_object(gorc_id).await.is_some() {
+				} else if gorc_instances.get_object_type(gorc_id).await.is_some() {
 					// Apply the incoming properties IN PLACE, under the instance lock, and take
 					// back the set of dirty zones. Cloning the instance, mutating the clone and
 					// writing it back would race with handle_player_movement, which touches this

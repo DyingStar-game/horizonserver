@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["ds_common",
+    "ds_protocol",
     "ds_game_server", 
     "ds_player_authentication",
     "ds_genericprops",
@@ -14,6 +15,7 @@ members = ["ds_common",
 # Event system (CLI will update this to horizon_event_system)
 horizon_event_system = { path = "./Horizon/crates/horizon_event_system" }
 horizon_protocol = { path = "./Horizon/crates/horizon_protocol" }
+ds_protocol = { path = "./ds_protocol" }
 
 # === Horizon deps copied from root Cargo.toml of Horizon ===
 # === Async Runtime & Networking ===

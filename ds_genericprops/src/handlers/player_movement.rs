@@ -89,7 +89,7 @@ fn unknown_player_notify_times() -> &'static DashMap<String, Instant> {
 /// cooldown; once per cooldown window we log a warning and re-emit player_quit
 /// to the game server plugin (same payload as the disconnect path in lib.rs) so
 /// the Godot server gets another chance to despawn the player.
-fn notify_unknown_player(object_uuid: &str, events: &Arc<EventSystem>, handle: &luminal::Handle) {
+fn notify_unknown_player(object_uuid: &str, events: &Arc<EventSystem>, handle: &tokio::runtime::Handle) {
     let map = unknown_player_notify_times();
     if let Some(entry) = map.get(object_uuid) {
         if entry.value().elapsed().as_secs_f64() < UNKNOWN_PLAYER_NOTIFY_COOLDOWN_SECS {
@@ -134,7 +134,7 @@ pub fn handle_movement_request_sync(
     event: serde_json::Value,
     props: Arc<DashMap<String, GorcObjectId>>,
     events: Arc<EventSystem>,
-    handle: luminal::Handle,
+    handle: tokio::runtime::Handle,
 ) -> Result<(), EventError> {
     debug!("🚀 GenericPropsPlugin: Handling player movement event {:?}", event);
 

@@ -48,7 +48,7 @@ pub fn handle_object_delete(
 				match GorcObjectId::from_str(&req_data.object_uuid) {
 					Ok(gorc_id) => {
 						// Check if this GORC ID actually exists in the instance manager
-						if gorc_instances.get_object(gorc_id).await.is_some() {
+						if gorc_instances.get_object_type(gorc_id).await.is_some() {
 							debug!("🎮 GORC: ✅ Found object via direct GORC ID lookup: {}", req_data.object_uuid);
 							// Add to props map for faster future lookups
 							props_clone.insert(req_data.object_uuid.clone(), gorc_id);

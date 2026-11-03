@@ -14,6 +14,23 @@ use crate::objectdefinition::ObjectDefinition;
 use crate::genericprops::GenericProps;
 use crate::handlers::world;
 
+/// Creates waiting for their parent, by parent uuid. Every create used to scan the
+/// whole queue, cloning and parsing each waiting create, under the write lock: 4 031
+/// children waited at a preprod start (2026-11-03), whose world took 12 minutes to load
+/// on 37 busy cores.
+pub type PendingChildren = Arc<RwLock<HashMap<String, Vec<serde_json::Value>>>>;
+
+/// Holds `create` until `parent_uuid` is created. A child queued again replaces its
+/// earlier create.
+async fn wait_for_parent(queue: &PendingChildren, parent_uuid: &str, child_uuid: &str, create: serde_json::Value) {
+	let mut queue = queue.write().await;
+	let waiting = queue.entry(parent_uuid.to_string()).or_default();
+	match waiting.iter().position(|queued| queued["object_uuid"].as_str() == Some(child_uuid)) {
+		Some(index) => waiting[index] = create,
+		None => waiting.push(create),
+	}
+}
+
 pub fn handle_object_create(
 		definitions: Arc<DashMap<String, ObjectDefinition>>,
 		props: Arc<DashMap<String, GorcObjectId>>,
@@ -21,7 +38,7 @@ pub fn handle_object_create(
 		event: serde_json::Value,
 		handle: luminal::Handle,
 		spawn_in_gameserver: bool,
-		queue_objects_create: Arc<RwLock<HashMap<String, serde_json::Value>>>,
+		queue_objects_create: PendingChildren,
 		live_players: Arc<DashSet<PlayerId>>,
 	) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 		
@@ -67,9 +84,9 @@ pub fn handle_object_create(
 				// Check if parent already exists in gorc_instances, if not put in queue for later processing
 				if let Some(ref pid) = parent_id {
 					if let Ok(parent_gorc_id) = GorcObjectId::from_str(pid) {
-						if !gorc_instances.get_object(parent_gorc_id).await.is_some() {
+						if !gorc_instances.get_object_type(parent_gorc_id).await.is_some() {
 							warn!("🚀 GORC: ⚠️ Parent object {} for child {} not found in GORC instances during creation", pid, uuid);
-							queue_objects_create.write().await.insert(req_data.object_uuid.clone(), serde_json::to_value(&req_data).unwrap());
+							wait_for_parent(&queue_objects_create, pid, &req_data.object_uuid, serde_json::to_value(&req_data).unwrap()).await;
 							return;
 						}
 					}
@@ -242,40 +259,11 @@ pub fn handle_object_create(
 					}
 				}
 
-				   // Check queue_objects_create for objects waiting on this parent
-				   let created_uuid = req_data.object_uuid.clone();
-				   let mut to_process: Vec<serde_json::Value> = Vec::new();
-				   {
-					   let mut queue = queue_objects_create.write().await;
-					   debug!("[QUEUE DEBUG] Checking queued children after parent {} creation. Queue size: {}", created_uuid, queue.len());
-					   for (key, value) in queue.iter() {
-						   debug!("[QUEUE DEBUG] Key: {} Value: {}", key, value);
-					   }
-					   let keys_to_remove: Vec<String> = queue.iter()
-						   .filter_map(|(key, value)| {
-							   if let Ok(queued_req) = serde_json::from_value::<GenericPropsRequest>(value.clone()) {
-								   // Check if parent_id matches the object we just created
-								   let parent_id = queued_req.object_data.as_object()
-									   .and_then(|obj| obj.get("parent_id"))
-									   .and_then(|v| v.as_str())
-									   .filter(|s| !s.is_empty());
-								   debug!("[QUEUE DEBUG] For queued key {}: parent_id={:?}, created_uuid={}", key, parent_id, created_uuid);
-								   if parent_id == Some(created_uuid.as_str()) {
-									   debug!("[QUEUE DEBUG] Match found: queued child {} will be processed.", key);
-									   return Some(key.clone());
-								   }
-							   }
-							   None
-						   })
-						   .collect();
-					   for key in &keys_to_remove {
-						   debug!("[QUEUE DEBUG] Removing and processing queued child: {}", key);
-					   }
-					   for key in keys_to_remove {
-						   if let Some(value) = queue.remove(&key) {
-							   to_process.push(value);
-						   }
-					   }
+				   // The creates that waited for this object, now their parent exists.
+				   let to_process: Vec<serde_json::Value> =
+					   queue_objects_create.write().await.remove(&req_data.object_uuid).unwrap_or_default();
+				   if !to_process.is_empty() {
+					   debug!("[QUEUE] {} queued child(ren) of {} created now", to_process.len(), req_data.object_uuid);
 				   }
 
 				   // Process queued objects outside of the lock
@@ -367,4 +355,23 @@ async fn announce_new_player(
 		}
 	}
 	Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[tokio::test]
+	async fn children_wait_by_parent_and_a_requeue_replaces() {
+		let queue: PendingChildren = Default::default();
+		wait_for_parent(&queue, "hab", "crate-1", serde_json::json!({"object_uuid": "crate-1", "v": 1})).await;
+		wait_for_parent(&queue, "hab", "crate-2", serde_json::json!({"object_uuid": "crate-2"})).await;
+		wait_for_parent(&queue, "hab", "crate-1", serde_json::json!({"object_uuid": "crate-1", "v": 2})).await;
+		wait_for_parent(&queue, "other", "crate-3", serde_json::json!({"object_uuid": "crate-3"})).await;
+
+		let children = queue.write().await.remove("hab").unwrap();
+		assert_eq!(children.len(), 2);
+		assert_eq!(children[0]["v"], 2, "queued again: the latest create");
+		assert_eq!(queue.read().await.len(), 1, "the other parent's child still waits");
+	}
 }

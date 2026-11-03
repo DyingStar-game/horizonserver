@@ -269,7 +269,7 @@ impl GenericPropsPlugin {
     ) -> Result<(), PluginError> {
         println!("🎮 GenericPropsPlugin: Registering GORC handler");
 		
-        let queue_objects_create: Arc<RwLock<HashMap<String, serde_json::Value>>> = Arc::new(RwLock::new(HashMap::new()));
+        let queue_objects_create: handlers::create::PendingChildren = Arc::new(RwLock::new(HashMap::new()));
 
         // Clone for first handler
         let update_events1 = events.clone();
@@ -694,7 +694,7 @@ impl GenericPropsPlugin {
                 }) {
                     if let Some(uuid_str) = first_with_uuid["object_uuid"].as_str() {
                         if let Ok(gorc_id) = GorcObjectId::from_str(uuid_str) {
-                            if gorc_instances.get_object(gorc_id).await.is_some() {
+                            if gorc_instances.get_object_type(gorc_id).await.is_some() {
                                 debug!(
                                     "plugin genericprops (items_end): startup items already imported (found UUID {}), skipping",
                                     uuid_str

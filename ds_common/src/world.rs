@@ -1,8 +1,9 @@
 //! The **world** an object lives in: `space` or one planet, derived from its
 //! `parent_id` chain (player > vehicle > planet > space). Computed by
-//! ds_genericprops (the owner of `parent_id`) and injected as `object_data["_world"]`
-//! in every payload ds_game_server consumes, so the game-server plugin can decide
-//! which Godot server owns an object without any GORC lookup of its own.
+//! ds_genericprops (the owner of `parent_id`) and given with every payload ds_game_server
+//! consumes (`object_data["_world"]`, or `SnapshotItem::world` in a snapshot), so the
+//! game-server plugin can decide which Godot server owns an object without any GORC
+//! lookup of its own.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

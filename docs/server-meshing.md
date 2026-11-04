@@ -40,21 +40,22 @@ planet. `local_position` is the sum of the local positions up to the world origi
 (the planet centre) — for space it is the absolute position.
 
 Injected in: `plugingameserver:new_player`, `gameserverplugin:spawn_object`,
-`gameserverplugin:update_prop`, `gameserverplugin:player_out_of_zone` (`item`),
-and every item of `gameserver:objects_snapshot`. Both `_world` and
-`_global_position` are Horizon-internal and stripped before the Godot wire
-(`ObjectWorld::strip_internal_keys`).
+`gameserverplugin:update_prop`, `gameserverplugin:player_out_of_zone` (`item`).
+Both `_world` and `_global_position` are Horizon-internal and stripped before the
+Godot wire (`ObjectWorld::strip_internal_keys`).
 
 ## Snapshot request / response
 
 ```
 genericprops:get_objects_snapshot   {"request_id": "<uuid>"}
-gameserver:objects_snapshot         {"request_id": "<uuid>", "items": {"<uuid>": GenericPropsRequest, ...}}
+gameserver:objects_snapshot         {"request_id": "<uuid>", "items": {"<uuid>": SnapshotItem, ...}}
 ```
 
-Every object with its flattened properties, `_global_position` and `_world`. The
-ServerManager awaits the answer through a `oneshot` keyed by `request_id`
-(`snapshot_timeout_secs`).
+A `SnapshotItem` holds what a mesh op reads, typed (`world`, without its `chain` and
+`planet_name`; `parent_id`, `seat`, `poi_uuid`, `name`), and the flattened properties
+as JSON text (`object_data`), which Horizon copies to Godot without parsing them, but
+for the players (`move_clocks`, `roles`). The ServerManager awaits the answer through
+a `oneshot` keyed by `request_id` (`snapshot_timeout_secs`).
 
 ## Horizon → Godot `server/zone`
 

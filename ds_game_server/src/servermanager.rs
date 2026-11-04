@@ -18,7 +18,7 @@ use crate::handlers::initial_objects::{
 use crate::mesh::{plan_split_n, plan_village_split, MeshRules, VILLAGE_SPLIT_MAX_PLAYERS_SHARE};
 use crate::server::{Server, ServerState};
 
-use ds_common::events::{GenericPropsRequest, ObjectsSnapshot};
+use ds_common::events::{ObjectsSnapshot, SnapshotItem};
 use ds_common::mesh_load::{PoolLoad, ServerLoad};
 use ds_common::world::{ObjectWorld, Point3};
 use ds_common::zone::{is_world_object, zones_contain, zones_label, Zone};
@@ -50,7 +50,7 @@ pub struct ServerInfo {
     pub dormant_spawn: bool,
 }
 
-pub type SnapshotItems = HashMap<String, GenericPropsRequest>;
+pub type SnapshotItems = HashMap<String, SnapshotItem>;
 
 /// Everything the manager loop reacts to.
 #[derive(Debug)]
@@ -1321,11 +1321,10 @@ impl ServerManager {
 /// player with a `seat`. A player on foot has a parent too (planet frame,
 /// apartment), which must not be held back.
 fn ridden_objects(items: &SnapshotItems) -> HashSet<String> {
-    let text = |i: &GenericPropsRequest, key: &str| i.object_data.get(key).and_then(|v| v.as_str()).unwrap_or("").to_string();
     items
         .values()
-        .filter(|i| i.object_type == "player" && !text(i, "seat").is_empty())
-        .map(|i| text(i, "parent_id"))
+        .filter(|i| i.object_type == "player" && i.seat.as_deref().is_some_and(|seat| !seat.is_empty()))
+        .filter_map(|i| i.parent_id.clone())
         .filter(|parent| !parent.is_empty())
         .collect()
 }
@@ -1350,8 +1349,8 @@ fn log_freeze_coverage(parent: &Server, items: &SnapshotItems, before: &[Zone], 
     let (mut frozen, mut in_lost, mut managed_frozen) = (0usize, 0usize, 0usize);
     let mut missed: Vec<String> = Vec::new();
     for item in items.values().filter(|i| !is_world_object(&i.object_type)) {
-        let Some(world) = ObjectWorld::from_object_data(&item.object_data) else { continue };
-        if zones_contain(keep, &world) {
+        let world = &item.world;
+        if zones_contain(keep, world) {
             continue;
         }
         frozen += 1;
@@ -1359,7 +1358,7 @@ fn log_freeze_coverage(parent: &Server, items: &SnapshotItems, before: &[Zone], 
         if is_managed {
             managed_frozen += 1;
         }
-        if zones_contain(before, &world) {
+        if zones_contain(before, world) {
             in_lost += 1;
             if !is_managed {
                 missed.push(format!("{}:{}", item.object_type, item.object_uuid));
@@ -1386,7 +1385,7 @@ fn planets_in(items: &SnapshotItems) -> Vec<(String, String)> {
     items
         .values()
         .filter(|i| i.object_type == "planet")
-        .map(|i| (i.object_uuid.clone(), i.object_data["name"].as_str().unwrap_or_default().to_string()))
+        .map(|i| (i.object_uuid.clone(), i.name.clone().unwrap_or_default()))
         .collect()
 }
 
@@ -1484,14 +1483,13 @@ impl MeshWorker {
         let players: Vec<ObjectWorld> = items
             .values()
             .filter(|i| i.object_type == "player")
-            .filter_map(|i| ObjectWorld::from_object_data(&i.object_data))
+            .map(|i| i.world.clone())
             .collect();
         // The habs of each village (by poi_uuid): the cuts keep clear of them when they can.
         let mut habs: HashMap<String, Vec<ObjectWorld>> = HashMap::new();
         for item in items.values().filter(|i| i.object_type == "spawnbuilding") {
-            let village = item.object_data.get("poi_uuid").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
-            if let (Some(village), Some(world)) = (village, ObjectWorld::from_object_data(&item.object_data)) {
-                habs.entry(village.to_string()).or_default().push(world);
+            if let Some(village) = item.poi_uuid.as_deref().filter(|s| !s.is_empty()) {
+                habs.entry(village.to_string()).or_default().push(item.world.clone());
             }
         }
         let spawned: Vec<Vec<ObjectWorld>> = habs.into_values().collect();
@@ -1653,7 +1651,7 @@ impl MeshWorker {
         let to_move: SnapshotItems = items
             .iter()
             .filter(|(_, i)| !is_world_object(&i.object_type))
-            .filter(|(_, i)| ObjectWorld::from_object_data(&i.object_data).map_or(false, |w| zones_contain(&released_zones, &w)))
+            .filter(|(_, i)| zones_contain(&released_zones, &i.world))
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
         let to_spawn: SnapshotItems = to_move
@@ -1670,7 +1668,7 @@ impl MeshWorker {
         let to_freeze: SnapshotItems = overlay(to_move, fresh)
             .into_iter()
             .filter(|(_, i)| !is_world_object(&i.object_type))
-            .filter(|(_, i)| ObjectWorld::from_object_data(&i.object_data).map_or(false, |w| zones_contain(&released_zones, &w)))
+            .filter(|(_, i)| zones_contain(&released_zones, &i.world))
             .collect();
         if let Err(e) = handle_freeze_object(&to_freeze, released, &[]) {
             error!("[mesh] freeze on {} failed: {}", released.server_name, e);
@@ -1729,7 +1727,7 @@ impl MeshWorker {
         let to_spawn: SnapshotItems = items
             .into_iter()
             .filter(|(uuid, i)| !is_world_object(&i.object_type) && !managed.contains(uuid) && !players.contains(uuid))
-            .filter(|(_, i)| ObjectWorld::from_object_data(&i.object_data).map_or(false, |w| zones_contain(gained, &w)))
+            .filter(|(_, i)| zones_contain(gained, &i.world))
             .collect();
         if to_spawn.is_empty() {
             return result;
@@ -1858,7 +1856,7 @@ impl MeshWorker {
                 source
                     .iter()
                     .filter(|(uuid, _)| !already_players.contains(*uuid))
-                    .filter(|(_, i)| ObjectWorld::from_object_data(&i.object_data).map_or(false, |w| zones_contain(zones, &w)))
+                    .filter(|(_, i)| zones_contain(zones, &i.world))
                     .map(|(k, v)| (k.clone(), v.clone()))
                     .collect()
             } else {
@@ -1896,8 +1894,8 @@ impl MeshWorker {
     async fn prewarm_players(&self, server: &Server, items: &SnapshotItems, zones: &[Zone]) {
         let mut by_planet: HashMap<String, Vec<Point3>> = HashMap::new();
         for item in items.values().filter(|i| i.object_type == "player") {
-            let Some(world) = ObjectWorld::from_object_data(&item.object_data) else { continue };
-            if !zones_contain(zones, &world) {
+            let world = &item.world;
+            if !zones_contain(zones, world) {
                 continue;
             }
             if let Some(planet) = &world.planet_uuid {
@@ -1979,13 +1977,38 @@ mod snapshot_tests {
     use super::*;
     use horizon_event_system::EventSystem;
 
-    fn item(uuid: &str) -> GenericPropsRequest {
-        GenericPropsRequest {
+    fn item(uuid: &str) -> SnapshotItem {
+        SnapshotItem {
             object_type: "box".into(),
             object_uuid: uuid.into(),
-            object_data: json!({"parent_id": "hab", "_world": ObjectWorld::space_at(Point3::new(1.0, 2.0, 3.0))}),
-            broadcast_only: None,
+            world: ObjectWorld::space_at(Point3::new(1.0, 2.0, 3.0)),
+            parent_id: Some("hab".into()),
+            seat: None,
+            poi_uuid: None,
+            name: None,
+            object_data: serde_json::value::to_raw_value(&json!({"parent_id": "hab", "weight": 12.5})).unwrap(),
         }
+    }
+
+    /// Only a seated player's parent is ridden: on foot, the parent is a planet or a building.
+    #[test]
+    fn ridden_objects_are_the_parents_of_seated_players() {
+        let player = |uuid: &str, parent: &str, seat: Option<&str>| {
+            let mut player = item(uuid);
+            player.object_type = "player".into();
+            player.parent_id = Some(parent.into());
+            player.seat = seat.map(str::to_string);
+            (uuid.to_string(), player)
+        };
+        let items: SnapshotItems = HashMap::from([
+            player("driver", "truck", Some("SeatDriver")),
+            player("walker", "planet", None),
+            player("left-the-seat", "building", Some("")),
+            player("no-parent", "", Some("SeatDriver")),
+            // A box "seated" in something is not a player.
+            ("box".to_string(), SnapshotItem { seat: Some("x".into()), parent_id: Some("shelf".into()), ..item("box") }),
+        ]);
+        assert_eq!(ridden_objects(&items), HashSet::from(["truck".to_string()]));
     }
 
     /// genericprops emits `ObjectsSnapshot` and the manager reads it back typed, through
@@ -2016,8 +2039,8 @@ mod snapshot_tests {
 
         let got = rx.await.expect("the op gets its snapshot");
         assert_eq!(got.len(), 2);
-        let world = ObjectWorld::from_object_data(&got["a"].object_data).expect("_world survives the trip");
-        assert_eq!(world.local_position, Point3::new(1.0, 2.0, 3.0));
+        assert_eq!(got["a"].world.local_position, Point3::new(1.0, 2.0, 3.0));
+        assert_eq!(got["a"].object_data.get(), r#"{"parent_id":"hab","weight":12.5}"#, "the properties arrive as they left");
         assert!(pending.lock().unwrap().is_empty());
     }
 }

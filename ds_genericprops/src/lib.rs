@@ -426,8 +426,9 @@ impl GenericPropsPlugin {
         let handle_snapshot = tasks.clone();
         let snapshot_events = Arc::clone(&events);
 
-        // Snapshot of every object, with its flattened properties, `_global_position`
-        // and `_world` (space / planet + local position). Request/response pair used
+        // Snapshot of every object: its flattened properties as JSON text, its world
+        // (space / planet + local position) and the fields a mesh op reads
+        // (ds_common::events::SnapshotItem). Request/response pair used
         // by ds_game_server's ServerManager to plan a split or a merge: it emits
         // `genericprops:get_objects_snapshot {request_id}` and awaits
         // `gameserver:objects_snapshot {request_id, items}`. With `uuids`, only those
@@ -475,7 +476,6 @@ impl GenericPropsPlugin {
 
                 info!("plugin genericprops (get_objects_snapshot): request {} answered with {} items in {:?}",
                     request_id, items.len(), started.elapsed());
-                // Typed, not `json!`: that copied the whole snapshot into a Value first.
                 let answer = ds_common::events::ObjectsSnapshot { request_id, items };
                 if let Err(e) = events.emit_plugin("gameserver", "objects_snapshot", &answer).await {
                     error!("plugin genericprops (get_objects_snapshot): failed to emit objects_snapshot: {}", e);

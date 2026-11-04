@@ -12,7 +12,7 @@ luminal_rt = "0.4.1"
 tokio = { version = "1.48", features = ["full"] }
 futures = "0.3"
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0.143"
+serde_json = { version = "1.0.143", features = ["raw_value"] }
 thiserror = "2.0.12"
 tracing = "0.1.41"
 async-trait = "0.1"

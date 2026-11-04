@@ -4,12 +4,12 @@
 //! result is serialised into `object_data["_world"]` for ds_game_server.
 
 use dashmap::DashMap;
-use ds_common::events::GenericPropsRequest;
+use ds_common::events::{GenericPropsRequest, SnapshotItem};
 use ds_common::world::{ObjectWorld, Point3, WorldChainEntry, WorldKind};
 use ds_common::zone::{is_world_object, zones_contain, Zone};
 use horizon_event_system::{GorcInstanceManager, GorcObjectId, Vec3};
 use serde_json::{Map, Value};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use tracing::{debug, warn};
 
@@ -246,7 +246,7 @@ pub async fn resolve_world_of_cached(
     }
 }
 
-/// The full item of an object as ds_game_server expects it in a snapshot: every
+/// The full item of an object as ds_game_server expects it in a live message: every
 /// property flattened, plus `_global_position` and `_world`.
 pub async fn full_item(gorc: &Arc<GorcInstanceManager>, uuid: &str) -> Option<GenericPropsRequest> {
     let gorc_id = GorcObjectId::from_str(uuid).ok()?;
@@ -281,15 +281,48 @@ impl SnapshotScope {
     }
 }
 
-/// The full items of `uuids` (see `full_item`), only those `scope` keeps when given.
-/// The worlds share one `ChainCache`, and an object out of scope is never flattened:
-/// a split asked for the whole world (52k objects, preprod 2026-11-03), which took
-/// 2.6 s to build and as long again to reach ds_game_server, past its 5 s timeout.
+/// One object of a snapshot, its properties written to JSON once, in place: `flatten_props`
+/// without the copy. A key several channels hold is the last one's, as there.
+fn snapshot_item(gp: &GenericProps, object_uuid: String, mut world: ObjectWorld) -> Option<SnapshotItem> {
+    let mut flat: BTreeMap<&str, &Value> = BTreeMap::new();
+    for properties in gp.data.values() {
+        if let Value::Object(map) = properties {
+            for (key, value) in map.iter() {
+                flat.insert(key.as_str(), value);
+            }
+        }
+    }
+    let object_data = match serde_json::value::to_raw_value(&flat) {
+        Ok(object_data) => object_data,
+        Err(e) => {
+            warn!("[world] snapshot: properties of {} unwritable ({}), skipped", object_uuid, e);
+            return None;
+        }
+    };
+    let text = |key: &str| flat.get(key).and_then(|v| v.as_str()).map(str::to_string);
+    world.chain.clear();
+    world.planet_name = None;
+    Some(SnapshotItem {
+        object_type: gp.object_def.name.clone(),
+        object_uuid,
+        parent_id: text("parent_id"),
+        seat: text("seat"),
+        poi_uuid: text("poi_uuid"),
+        name: text("name"),
+        world,
+        object_data,
+    })
+}
+
+/// The snapshot items of `uuids`, only those `scope` keeps when given. The worlds share
+/// one `ChainCache`, and an object out of scope is never written: a split asked for the
+/// whole world (52k objects, preprod 2026-11-03), which took 2.6 s to build and as long
+/// again to reach ds_game_server, past its 5 s timeout.
 pub async fn snapshot(
     gorc: &Arc<GorcInstanceManager>,
     uuids: Vec<String>,
     scope: Option<&SnapshotScope>,
-) -> HashMap<String, GenericPropsRequest> {
+) -> HashMap<String, SnapshotItem> {
     let mut items = HashMap::new();
     let mut chains = ChainCache::default();
     for uuid in uuids {
@@ -297,13 +330,11 @@ pub async fn snapshot(
         // Read under the lock, resolve the world after (it awaits on GORC for each ancestor).
         let head = gorc
             .with_object_mut(gorc_id, |instance| {
-                instance.get_object::<GenericProps>().map(|gp| {
-                    (gp.object_def.name.clone(), gp.global_position, read_own_local_and_parent(gp))
-                })
+                instance.get_object::<GenericProps>().map(|gp| (gp.object_def.name.clone(), read_own_local_and_parent(gp)))
             })
             .await
             .flatten();
-        let Some((object_type, global_position, (own_local, parent_id))) = head else {
+        let Some((object_type, (own_local, parent_id))) = head else {
             debug!("[world] snapshot: {} not in GORC, skipped", uuid);
             continue;
         };
@@ -311,17 +342,13 @@ pub async fn snapshot(
         if scope.is_some_and(|scope| !scope.keeps(&uuid, &object_type, &object_world)) {
             continue;
         }
-        let Some(properties) = gorc
-            .with_object_mut(gorc_id, |instance| instance.get_object::<GenericProps>().map(flatten_props))
+        let item = gorc
+            .with_object_mut(gorc_id, |instance| instance.get_object::<GenericProps>().and_then(|gp| snapshot_item(gp, uuid.clone(), object_world)))
             .await
-            .flatten()
-        else {
-            continue;
-        };
-        let mut object_data = Value::Object(properties);
-        inject_global_position(&mut object_data, global_position);
-        inject_world(&mut object_data, &object_world);
-        items.insert(uuid.clone(), GenericPropsRequest { object_type, object_uuid: uuid, object_data, broadcast_only: None });
+            .flatten();
+        if let Some(item) = item {
+            items.insert(uuid, item);
+        }
     }
     items
 }
@@ -483,19 +510,70 @@ mod tests {
         let worlds = |ty: &str| items.values().filter(|i| i.object_type == ty).count();
         assert_eq!(worlds("planet"), 2, "both planets: every server needs its reference frames");
         assert!(items.contains_key(&elsewhere), "listed in `also`");
-        let on_tarsis = items.values().filter(|i| {
-            i.object_type != "planet" && ObjectWorld::from_object_data(&i.object_data).unwrap().planet_uuid.as_deref() == Some(tarsis.as_str())
-        });
+        let on_tarsis = items.values().filter(|i| i.object_type != "planet" && i.world.planet_uuid.as_deref() == Some(tarsis.as_str()));
         assert_eq!(on_tarsis.count(), 1, "nothing else of Tarsis 1");
         assert_eq!(items.len(), 2 + 1 + 3 + 1, "planets, SandBox's hab and crates, the `also` crate");
 
-        // Same items as one full_item each (no cache), for what is kept.
+        // Same as one full_item each (no cache), for what is kept: its properties
+        // without the internal keys, and its world without what no reader uses.
         for (uuid, item) in &items {
             let alone = full_item(&gorc, uuid).await.unwrap();
-            assert_eq!(item.object_data, alone.object_data, "{} ({})", uuid, item.object_type);
+            let mut world = ObjectWorld::from_object_data(&alone.object_data).unwrap();
+            world.chain.clear();
+            world.planet_name = None;
+            assert_eq!(item.world, world, "{} ({})", uuid, item.object_type);
+            let mut properties = alone.object_data.clone();
+            ObjectWorld::strip_internal_keys(&mut properties);
+            let written: Value = serde_json::from_str(item.object_data.get()).unwrap();
+            assert_eq!(written, properties, "{} ({})", uuid, item.object_type);
+            assert_eq!(item.object_type, alone.object_type);
+            assert_eq!(item.object_uuid, alone.object_uuid);
+            let text = |key: &str| properties.get(key).and_then(|v| v.as_str()).map(str::to_string);
+            assert_eq!((&item.parent_id, &item.name), (&text("parent_id"), &text("name")), "{} ({})", uuid, item.object_type);
         }
         // Unscoped, the whole world.
         assert_eq!(snapshot(&gorc, uuids.clone(), None).await.len(), uuids.len());
+    }
+
+    /// What `flatten_props` gives, across channels, without its copy; and the typed
+    /// fields read as the flattened map was: an empty text stays, another type is none.
+    #[test]
+    fn a_snapshot_item_holds_the_flattened_properties_and_its_typed_fields() {
+        let definition = ObjectDefinition::new("player".to_string(), json!({"channels": [
+            {"zone": 0, "distance": 100.0, "frequency": 10.0, "properties": ["position", "parent_id", "seat"]},
+            {"zone": 1, "distance": 101.0, "frequency": 5.0, "properties": ["name", "poi_uuid", "weight"]},
+        ]}));
+        let object = GenericProps::new(definition, json!({
+            "position": {"x": 1.5, "y": 0.0, "z": 0.0},
+            "parent_id": "truck",
+            "seat": "",
+            "name": "Alice",
+            "poi_uuid": 12,
+            "weight": 72.5,
+        }), GorcObjectId::new().to_string());
+        let world = fold_world(Vec3::new(1.5, 0.0, 0.0), &[
+            node("truck", "vehicle", Some("p"), (1.0, 0.0, 0.0)),
+            node("p", "planet", None, (1e9, 0.0, 0.0)),
+        ]);
+        assert!(!world.chain.is_empty());
+        let local_position = world.local_position;
+        let planet_uuid = world.planet_uuid.clone();
+
+        let item = snapshot_item(&object, object.uuid.clone(), world).unwrap();
+
+        let written: Value = serde_json::from_str(item.object_data.get()).unwrap();
+        assert_eq!(written, Value::Object(flatten_props(&object)));
+        assert!(written.get(ObjectWorld::KEY).is_none() && written.get(ObjectWorld::GLOBAL_POSITION_KEY).is_none());
+        assert_eq!(item.parent_id.as_deref(), Some("truck"));
+        assert_eq!(item.seat.as_deref(), Some(""));
+        assert_eq!(item.name.as_deref(), Some("Alice"));
+        assert_eq!(item.poi_uuid, None);
+        assert_eq!((item.object_type.as_str(), item.object_uuid.as_str()), ("player", object.uuid.as_str()));
+        // What the zone tests read stays; `chain` is written, empty: it has no serde default.
+        assert_eq!((item.world.local_position, &item.world.planet_uuid), (local_position, &planet_uuid));
+        assert_eq!(item.world.planet_name, None);
+        let written = serde_json::to_value(&item).unwrap();
+        assert_eq!(written["world"]["chain"], json!([]));
     }
 
     /// Timing only: `cargo test -p dyingstar_generic_props snapshot_cost -- --ignored --nocapture`.
@@ -549,11 +627,86 @@ mod tests {
         let started = std::time::Instant::now();
         let scoped = snapshot(&gorc, uuids.clone(), Some(&scope)).await;
         let scoped_cost = started.elapsed();
-        let json_len = |items: &HashMap<String, GenericPropsRequest>| serde_json::to_vec(items).unwrap().len();
+        fn json_len<T: serde::Serialize>(items: &T) -> usize {
+            serde_json::to_vec(items).unwrap().len()
+        }
         println!(
             "{} objects: before {:?} ({} B JSON) | now, whole world {:?} | scoped to one planet {:?} ({} items, {} B JSON)",
             uuids.len(), old_cost, json_len(&old), whole_cost, scoped_cost, scoped.len(), json_len(&scoped)
         );
         assert_eq!(whole.len(), old.len());
+    }
+
+    /// One planet, its habs, and boxes with the properties of the real definition.
+    async fn crowded_planet(boxes: usize) -> (Arc<GorcInstanceManager>, String, Vec<String>) {
+        let gorc = Arc::new(GorcInstanceManager::new());
+        let planet = register(&gorc, "planet", json!({
+            "name": "SandBox", "positions": [{"x": 1e9, "y": 0.0, "z": 0.0}],
+        })).await;
+        let definition: Value = serde_json::from_str(include_str!("../../props/box_def.json")).unwrap();
+        let definition = ObjectDefinition::new("box".to_string(), definition);
+        let mut uuids = vec![planet.clone()];
+        let mut hab = String::new();
+        for i in 0..boxes {
+            if i % 50 == 0 {
+                hab = register(&gorc, "spawnbuilding", json!({
+                    "position": {"x": i as f64, "y": 0.0, "z": 0.0}, "parent_id": planet,
+                })).await;
+                uuids.push(hab.clone());
+            }
+            let id = GorcObjectId::new();
+            let object = GenericProps::new(definition.clone(), json!({
+                "position": {"x": 1.2345678 * i as f64, "y": 0.987654321, "z": -4.56789012},
+                "rotation": {"x": 0.1234567, "y": 0.7654321, "z": -0.3333333},
+                "opened": false, "parent_id": hab, "led_state": 0,
+                "qrcode": format!("QR-{}", i), "symbol": "box_small", "parcel_number": i, "weight": 12.5,
+                "scenename": "res://props/box/box_small.tscn",
+            }), id.to_string());
+            gorc.register_object_with_uuid(object, Vec3::zero(), Some(id)).await;
+            uuids.push(id.to_string());
+        }
+        (gorc, planet, uuids)
+    }
+
+    /// Timing only, what a first split pays per step:
+    /// `cargo test --release -p dyingstar_generic_props snapshot_return_cost -- --ignored --nocapture`.
+    #[tokio::test]
+    #[ignore]
+    async fn snapshot_return_cost() {
+        let (gorc, planet, uuids) = crowded_planet(74_000).await;
+        let zones = vec![Zone::planet(&planet, "SandBox")];
+        let started = std::time::Instant::now();
+        let items = snapshot(&gorc, uuids.clone(), None).await;
+        let build = started.elapsed();
+        let answer = ds_common::events::ObjectsSnapshot { request_id: "r".to_string(), items };
+        let started = std::time::Instant::now();
+        let bytes = serde_json::to_vec(&answer).unwrap();
+        let send = started.elapsed();
+        let started = std::time::Instant::now();
+        let received: ds_common::events::ObjectsSnapshot = serde_json::from_slice(&bytes).unwrap();
+        let receive = started.elapsed();
+        let started = std::time::Instant::now();
+        let inside = received.items.values().filter(|i| zones_contain(&zones, &i.world)).count();
+        let zone_test = started.elapsed();
+        let started = std::time::Instant::now();
+        let copy = received.items.clone();
+        let clone = started.elapsed();
+        drop(copy);
+        let started = std::time::Instant::now();
+        let mut on_wire = 0usize;
+        // What ds_game_server's send_item writes.
+        #[derive(serde::Serialize)]
+        struct Data<'a> { object_type: &'a str, object_uuid: &'a str, object_data: &'a serde_json::value::RawValue }
+        #[derive(serde::Serialize)]
+        struct Event<'a> { namespace: &'a str, event: &'a str, data: Data<'a> }
+        for item in received.items.values() {
+            let data = Data { object_type: &item.object_type, object_uuid: &item.object_uuid, object_data: &item.object_data };
+            on_wire += serde_json::to_string(&Event { namespace: "server", event: "initial_object", data }).unwrap().len();
+        }
+        let to_godot = started.elapsed();
+        println!(
+            "{} objects, {:.1} MB between plugins, {:.1} MB to Godot, {} in the zones\nbuild {:?} | send {:?} | receive {:?} | zone test {:?} | clone {:?} | to Godot {:?}",
+            received.items.len(), bytes.len() as f64 / 1e6, on_wire as f64 / 1e6, inside, build, send, receive, zone_test, clone, to_godot
+        );
     }
 }

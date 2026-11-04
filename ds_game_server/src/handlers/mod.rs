@@ -65,6 +65,11 @@ pub type WsWriter = Arc<Mutex<Option<Outbox>>>;
 /// Queues one JSON message for the Godot server; never blocks. Fails when the
 /// connection is gone (no writer, or its thread stopped on a write error).
 pub fn send_ws(websocket: &WsWriter, tag: &str, message: &Value) -> Result<(), EventError> {
+    send_ws_text(websocket, tag, message.to_string())
+}
+
+/// `send_ws` of a message already written to JSON.
+pub fn send_ws_text(websocket: &WsWriter, tag: &str, message: String) -> Result<(), EventError> {
     let ws_guard = websocket.lock().map_err(|e| {
         error!("[{}] websocket lock error: {}", tag, e);
         EventError::HandlerExecution(format!("websocket lock error: {}", e))
@@ -74,7 +79,7 @@ pub fn send_ws(websocket: &WsWriter, tag: &str, message: &Value) -> Result<(), E
         return Err(EventError::HandlerExecution("No websocket writer available".to_string()));
     };
     outbox.pending.fetch_add(1, Ordering::Relaxed);
-    if outbox.tx.send(OwnedMessage::Text(message.to_string())).is_err() {
+    if outbox.tx.send(OwnedMessage::Text(message)).is_err() {
         outbox.pending.fetch_sub(1, Ordering::Relaxed);
         error!("[{}] websocket writer of the game server stopped", tag);
         return Err(EventError::HandlerExecution("Message blocked: writer stopped".to_string()));

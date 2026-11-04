@@ -20,13 +20,19 @@
 //!
 //! **Transforms and epochs.** A transform is in the frame of the object's parent. Every
 //! frame carries the object's epoch, bumped by the server at each change of parent: a
-//! transform is applied only under the epoch of the last reliable frame (zone entry or
-//! update), and only if its `seq` is newer than the last applied one. A reliable update
-//! is delivered joined with the object's latest transform, as a JSON client got both in
-//! one message (`player_update` reads `position` next to `parent_id`). When the parent
-//! has just changed, no transform of the new frame is known yet: the update waits for
-//! the first one (the server repeats the last transform of a version, so one comes),
-//! at most [`HOLD_TIMEOUT`], after which it is delivered alone.
+//! transform is applied only under the object's epoch, and only if its `seq` is newer
+//! than the last applied one. That epoch comes from the zone entry, then only from a
+//! `move` declaring its `parent_id`: the object's other reliable updates carry the epoch
+//! of the moment they were queued, older than the declaration or newer and ahead of it,
+//! and following them would apply a position under a parent it does not belong to.
+//!
+//! A reliable update is delivered joined with the object's latest transform, as a JSON
+//! client got both in one message (`player_update` reads `position` next to `parent_id`).
+//! When the parent has just changed, no transform of the new frame is known yet: the
+//! update waits for the first one (the server repeats the last transform of a version, so
+//! one comes), at most [`HOLD_TIMEOUT`], after which it is delivered alone. It is never
+//! dropped: `parent_id` is declared once, and a client that misses it applies coordinates
+//! of the new parent under the old one (leaving a building for the planet: in space).
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -53,6 +59,9 @@ const PLAIN_GORC_EVENTS: &[&str] = &["gorc_zone_enter", "gorc_zone_exit"];
 
 /// The event that moves a player: `update_property`'s position is ignored for them.
 const MOVE_EVENT: &str = "move";
+
+/// The key of a `move` that declares the object's new parent.
+const PARENT_KEY: &str = "parent_id";
 
 /// Frames dropped, by reason.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -123,8 +132,9 @@ struct Stream {
     /// Whether this channel carries transforms at all (an update of a channel that
     /// never does is never held).
     moves: bool,
-    /// A reliable update waiting for a transform of the new frame.
-    pending: Option<Pending>,
+    /// The reliable updates waiting for a transform of the new frame, one per event, in
+    /// arrival order. `move` and `update_property` share the channel of a player.
+    pending: Vec<Pending>,
 }
 
 #[derive(Debug)]
@@ -244,14 +254,11 @@ impl Reassembler {
         self.drops.unknown_handle += dropped;
         let mut expired = Vec::new();
         for (&(handle, channel), stream) in &mut self.streams {
-            if stream
-                .pending
-                .as_ref()
-                .is_some_and(|p| now.duration_since(p.since) >= HOLD_TIMEOUT)
-                && let Some(pending) = stream.pending.take()
-            {
-                expired.push((handle, channel, pending));
-            }
+            let (due, waiting): (Vec<_>, Vec<_>) = std::mem::take(&mut stream.pending)
+                .into_iter()
+                .partition(|p| now.duration_since(p.since) >= HOLD_TIMEOUT);
+            stream.pending = waiting;
+            expired.extend(due.into_iter().map(|pending| (handle, channel, pending)));
         }
         for (handle, channel, pending) in expired {
             if let Some(message) =
@@ -331,7 +338,7 @@ impl Reassembler {
                 last_move_seq: None,
                 moves: transform.is_some(),
                 transform,
-                pending: None,
+                pending: Vec::new(),
             },
         );
         out.push(Inbound::Message(json!({
@@ -494,23 +501,19 @@ impl Reassembler {
         stream.last_seq = Some(seq);
         stream.moves = true;
         stream.transform = Some(without_extra(transform.clone()));
-        let pending = stream.pending.take();
-        let mut messages = Vec::with_capacity(2);
-        match pending {
-            Some(pending) if pending.event == event => {
-                messages.push((event.to_string(), join(&transform, &pending.rest)));
+        // The updates of other events of the channel are delivered with this frame's
+        // position, then the transform's own event with its own update, if any.
+        let pending = std::mem::take(&mut stream.pending);
+        let mut messages = Vec::with_capacity(pending.len() + 1);
+        let mut own_rest = Map::new();
+        for held in pending {
+            if held.event == event {
+                own_rest = held.rest;
+            } else {
+                messages.push((held.event, join(&without_extra(transform.clone()), &held.rest)));
             }
-            Some(pending) => {
-                // An update of another event of the channel: delivered with this frame's
-                // position, then the transform's own event.
-                messages.push((
-                    pending.event.clone(),
-                    join(&without_extra(transform.clone()), &pending.rest),
-                ));
-                messages.push((event.to_string(), join(&transform, &Map::new())));
-            }
-            None => messages.push((event.to_string(), join(&transform, &Map::new()))),
         }
+        messages.push((event.to_string(), join(&transform, &own_rest)));
         for (event, data) in messages {
             out.extend(
                 self.gorc_message(handle, channel, &event, Value::Object(data))
@@ -530,8 +533,11 @@ impl Reassembler {
         now: Instant,
         out: &mut Vec<Inbound>,
     ) {
-        // Reliable frames come in order: their epoch is the object's.
-        if let Some(object) = self.objects.get_mut(&handle)
+        // Reliable frames come in order, so a declaration's epoch is the object's. No other
+        // update moves it (see the module docs).
+        if event == MOVE_EVENT
+            && rest.contains_key(PARENT_KEY)
+            && let Some(object) = self.objects.get_mut(&handle)
             && object.epoch != epoch
         {
             object.epoch = epoch;
@@ -547,15 +553,13 @@ impl Reassembler {
             (Some(transform), _) => join(transform, &rest),
             (None, true) => {
                 // Hold until a transform of the new frame arrives.
-                match &mut stream.pending {
-                    Some(pending) if pending.event == event => pending.rest.extend(rest),
-                    _ => {
-                        stream.pending = Some(Pending {
-                            event: event.to_string(),
-                            rest,
-                            since: now,
-                        })
-                    }
+                match stream.pending.iter_mut().find(|p| p.event == event) {
+                    Some(pending) => pending.rest.extend(rest),
+                    None => stream.pending.push(Pending {
+                        event: event.to_string(),
+                        rest,
+                        since: now,
+                    }),
                 }
                 return;
             }
@@ -924,6 +928,67 @@ mod tests {
         assert_eq!(out[0]["data"]["position"]["x"], 101.0);
     }
 
+    /// A player turning their head: `update_property` carries the whole channel,
+    /// `parent_id` included, which the client only applies from a `move`.
+    fn head_turn(epoch: u32) -> Vec<u8> {
+        update(epoch, json!({"head": 0.3, "parent_id": "planet"}))
+    }
+
+    #[test]
+    fn a_property_during_the_hold_does_not_replace_the_new_parent() {
+        let mut r = entered();
+        assert!(messages(&mut r, gorc(2, "move", update(5, json!({"parent_id": "planet"})))).is_empty());
+        assert!(messages(&mut r, gorc(3, "update_property", head_turn(5))).is_empty());
+        let out = messages(
+            &mut r,
+            gorc(4, "move/transform", bitcode::encode(&transform(5, 101.0))),
+        );
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0]["event_type"], "update_property");
+        assert_eq!(out[0]["data"]["head"], 0.3);
+        assert_eq!(out[1]["event_type"], "move");
+        assert_eq!(out[1]["data"]["parent_id"], "planet");
+        assert_eq!(out[1]["data"]["position"]["x"], 101.0);
+    }
+
+    #[test]
+    fn a_property_queued_before_the_new_parent_does_not_stop_its_moves() {
+        let mut r = entered();
+        messages(&mut r, gorc(2, "move", update(5, json!({"parent_id": "planet"}))));
+        // Queued under the previous epoch, served after the declaration.
+        messages(&mut r, gorc(3, "update_property", update(4, json!({"head": 0.3}))));
+        let out = messages(
+            &mut r,
+            gorc(4, "move/transform", bitcode::encode(&transform(5, 101.0))),
+        );
+        assert_eq!(r.drops().stale_epoch, 0);
+        assert_eq!(out[1]["data"]["parent_id"], "planet");
+        assert_eq!(out[1]["data"]["position"]["x"], 101.0);
+    }
+
+    #[test]
+    fn a_property_ahead_of_the_new_parent_lets_no_position_through() {
+        let mut r = entered();
+        // Queued after the reparent, served before the declaration.
+        messages(&mut r, gorc(2, "update_property", head_turn(5)));
+        // A position of the new frame, its parent still unknown: not applied.
+        assert!(
+            messages(
+                &mut r,
+                gorc(3, "move/transform", bitcode::encode(&transform(5, 100.0)))
+            )
+            .is_empty()
+        );
+        assert_eq!(r.drops().stale_epoch, 1);
+        assert!(messages(&mut r, gorc(3, "move", update(5, json!({"parent_id": "planet"})))).is_empty());
+        let out = messages(
+            &mut r,
+            gorc(4, "move/transform", bitcode::encode(&transform(5, 101.0))),
+        );
+        assert_eq!(out[0]["event_type"], "move");
+        assert_eq!(out[0]["data"]["parent_id"], "planet");
+    }
+
     #[test]
     fn an_update_in_the_same_frame_comes_with_the_latest_transform() {
         let mut r = entered();
@@ -957,6 +1022,27 @@ mod tests {
             panic!("{out:?}")
         };
         assert_eq!(message["data"], json!({"parent_id": "ship"}));
+    }
+
+    #[test]
+    fn every_held_update_is_delivered_after_the_timeout() {
+        let mut r = entered();
+        let start = Instant::now();
+        let mut out = Vec::new();
+        r.push(gorc(2, "move", update(5, json!({"parent_id": "planet"}))), start, &mut out);
+        r.push(gorc(3, "update_property", head_turn(5)), start + HOLD_TIMEOUT / 2, &mut out);
+        r.expire(start + HOLD_TIMEOUT, &mut out);
+        let [Inbound::Message(message)] = out.as_slice() else {
+            panic!("{out:?}")
+        };
+        assert_eq!(message["event_type"], "move");
+        assert_eq!(message["data"], json!({"parent_id": "planet"}));
+        out.clear();
+        r.expire(start + HOLD_TIMEOUT * 2, &mut out);
+        let [Inbound::Message(message)] = out.as_slice() else {
+            panic!("{out:?}")
+        };
+        assert_eq!(message["event_type"], "update_property");
     }
 
     #[test]

@@ -60,8 +60,12 @@ const PLAIN_GORC_EVENTS: &[&str] = &["gorc_zone_enter", "gorc_zone_exit"];
 /// The event that moves a player: `update_property`'s position is ignored for them.
 const MOVE_EVENT: &str = "move";
 
-/// The key of a `move` that declares the object's new parent.
+/// The key of a `move` (or of a generic prop's update) that declares the object's new parent.
 const PARENT_KEY: &str = "parent_id";
+
+/// The object type whose frame only a `move` declares: players (and NPCs), whose other
+/// updates carry the whole channel, `parent_id` included, under any epoch.
+const PLAYER_TYPE: &str = "player";
 
 /// Frames dropped, by reason.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -533,10 +537,16 @@ impl Reassembler {
         now: Instant,
         out: &mut Vec<Inbound>,
     ) {
-        // Reliable frames come in order, so a declaration's epoch is the object's. No other
-        // update moves it (see the module docs).
-        if event == MOVE_EVENT
-            && rest.contains_key(PARENT_KEY)
+        // Reliable frames come in order, so a declaration's epoch is the object's. A player's
+        // other updates never move it (see the module docs): only its `move` declares. A
+        // generic prop has no `move`: its `update_property` carrying `parent_id` under a new
+        // epoch is the declaration (the server starts a new epoch only when the parent
+        // changed). Without it, a truck's new parent came joined with a transform of the old
+        // frame and the truck was drawn a moment 6000 km away (2026-11-12).
+        let declares = rest.contains_key(PARENT_KEY)
+            && (event == MOVE_EVENT
+                || self.objects.get(&handle).is_some_and(|o| o.object_type != PLAYER_TYPE));
+        if declares
             && let Some(object) = self.objects.get_mut(&handle)
             && object.epoch != epoch
         {
@@ -888,6 +898,61 @@ mod tests {
             (drops.stale_seq_other_event, drops.stale_seq_move_unseen),
             (3, 1)
         );
+    }
+
+    fn prop_entered() -> Reassembler {
+        let mut r = entered();
+        let state = PropState {
+            transform: transform(4, 1.0),
+            data: DynValue::from(json!({"parent_id": "planet", "speed": 0.0})),
+        };
+        messages(
+            &mut r,
+            ServerFrame::ZoneEnter {
+                handle: 8,
+                object_id: [9; 16],
+                object_type: "vehicle".into(),
+                channel: 0,
+                zone_data: bitcode::encode(&state),
+            },
+        );
+        r
+    }
+
+    fn prop_gorc(seq: u16, event: &str, payload: Vec<u8>) -> ServerFrame {
+        ServerFrame::GorcEvent {
+            handle: 8,
+            channel: 0,
+            seq,
+            event: EventKey::name(event),
+            payload,
+        }
+    }
+
+    #[test]
+    fn a_prop_s_new_parent_never_comes_with_a_transform_of_the_old_frame() {
+        let mut r = prop_entered();
+        // Driving: transforms of the planet's frame.
+        let out = messages(&mut r, prop_gorc(2, "update_property/transform", bitcode::encode(&transform(4, 4450680.0))));
+        assert_eq!(out.len(), 1);
+        // Onto the lift: the new parent, under the new epoch, held for a transform of its frame.
+        assert!(
+            messages(&mut r, prop_gorc(3, "update_property", update(5, json!({"parent_id": "platform", "speed": 1.0}))))
+                .is_empty()
+        );
+        // A transform of the planet's frame arriving late: never applied under the platform.
+        assert!(
+            messages(&mut r, prop_gorc(4, "update_property/transform", bitcode::encode(&transform(4, 4450681.0))))
+                .is_empty()
+        );
+        let out = messages(&mut r, prop_gorc(5, "update_property/transform", bitcode::encode(&transform(5, -1.5))));
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0]["data"]["parent_id"], "platform");
+        assert_eq!(out[0]["data"]["position"]["x"], -1.5);
+        // The same parent sent again with the channel: no new frame, delivered with the latest transform.
+        let out = messages(&mut r, prop_gorc(6, "update_property", update(5, json!({"parent_id": "platform", "speed": 2.0}))));
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0]["data"]["position"]["x"], -1.5);
     }
 
     #[test]

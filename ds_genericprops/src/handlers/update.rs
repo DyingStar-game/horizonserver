@@ -282,9 +282,22 @@ pub fn handle_object_update(
 					// lost for good and every later global position is resolved against the wrong
 					// parent. Working in place also leaves the live zone_manager and subscriber
 					// lists untouched.
+					// A new parent, not the same one sent again: the object's next frames go out
+					// under a new epoch (lod::new_frame), read before the payload replaces it.
+					let declared_parent = req_data.object_data.get("parent_id").and_then(|v| v.as_str()).map(str::to_string);
 					let zone_set = gorc_instances.with_object_mut(gorc_id, |instance| {
-						let zone_set = instance.get_object_mut::<GenericProps>()
-							.expect("Object must exists")
+						let props = instance.get_object_mut::<GenericProps>().expect("Object must exists");
+						if let Some(declared) = &declared_parent {
+							let previous = props.data.values()
+								.filter_map(|zone_data| zone_data.get("parent_id"))
+								.filter_map(|v| v.as_str())
+								.find(|s| !s.is_empty())
+								.unwrap_or("");
+							if previous != declared {
+								crate::lod::new_frame(gorc_id);
+							}
+						}
+						let zone_set = props
 							.update(without_type_echo(&req_data.object_data, &req_data.object_type));
 						for zone in &zone_set {
 							instance.mark_needs_update(*zone);

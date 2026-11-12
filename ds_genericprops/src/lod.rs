@@ -395,9 +395,21 @@ fn epochs() -> &'static DashMap<GorcObjectId, u32> {
 }
 
 /// The object's epoch: how many times a sticky key (`parent_id`) was declared on
-/// one of its streams. Carried by its bitcode frames and zone entries.
+/// one of its streams, or [`new_frame`] said its parent changed. Carried by its
+/// bitcode frames and zone entries.
 pub fn epoch(gorc_id: GorcObjectId) -> u32 {
     epochs().get(&gorc_id).map_or(0, |epoch| *epoch)
+}
+
+/// The object's parent changed: its next frames are in another frame of reference,
+/// under a new epoch, so a client never joins the new `parent_id` with a transform
+/// of the old frame. For the generic props, whose updates carry the whole payload of
+/// their channel (`parent_id` included) every time, so a sticky key cannot tell a
+/// change from a repeat: their update handler compares the parent itself. A truck
+/// driving onto a lift's platform was drawn a moment 6000 km away (2026-11-12).
+pub fn new_frame(gorc_id: GorcObjectId) {
+    let mut epoch = epochs().entry(gorc_id).or_insert(0);
+    *epoch = epoch.wrapping_add(1);
 }
 
 /// The frames of one version of a stream, for bitcode recipients.
@@ -1127,6 +1139,18 @@ mod tests {
 
     fn data_of(bytes: &[u8]) -> serde_json::Value {
         serde_json::from_slice::<serde_json::Value>(bytes).unwrap()["data"].clone()
+    }
+
+    #[test]
+    fn a_new_parent_starts_a_new_epoch() {
+        let id = GorcObjectId::new();
+        let before = epoch(id);
+        new_frame(id);
+        assert_eq!(epoch(id), before.wrapping_add(1), "the next frames are in another frame of reference");
+        queue(id, 0, "vehicle", "update_property", &json!({"position": 1, "parent_id": "platform"}));
+        assert_eq!(epoch(id), before.wrapping_add(1), "a plain update does not, parent_id or not");
+        streams().retain(|(gorc, _, _), _| *gorc != id);
+        epochs().remove(&id);
     }
 
     #[test]

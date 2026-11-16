@@ -46,6 +46,14 @@
 				"conversation",
 				"npc_arrived"
 			]
+		},
+		{
+			"zone": 1,
+			"distance": 200.0,
+			"frequency": 1.0,
+			"properties": [
+				"appearance"
+			]
 		}
 	]
 }

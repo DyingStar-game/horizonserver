@@ -2521,6 +2521,17 @@ mod tests {
     }
 
     #[test]
+    fn a_returning_player_keeps_its_appearance() {
+        // The game stores a player's look as the `appearance` property (set_appearance on its Godot
+        // server); persistence keeps it with everything else, and it comes back on the next spawn.
+        let arrival = returning(serde_json::json!({ "name": "bob", "appearance": "AQIDBA", "spawn_appartment_id": "b1" }));
+        assert_eq!(player_object_data(&arrival, Vec3::zero(), "b1", false)["appearance"], "AQIDBA");
+        let new = Arrival::new(&serde_json::json!({ "object_uuid": "p2", "object_data": { "name": "ann" } }), None);
+        assert!(player_object_data(&new, Vec3::zero(), "b2", true).get("appearance").is_none(),
+            "a new player has none: the game draws one from its uuid until it makes its own");
+    }
+
+    #[test]
     fn the_apartment_of_a_player_never_changes_unless_it_gets_a_new_one() {
         let arrival = returning(serde_json::json!({ "name": "bob", "spawn_appartment_id": "building-1" }));
         // Its own apartment found in another building record: the stored one stays.

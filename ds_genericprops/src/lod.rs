@@ -27,8 +27,20 @@
 //! [`queue_sticky`] names such keys: the stream remembers their last value and
 //! every recipient that has not yet been served a payload carrying it gets it
 //! merged into whatever payload it is served next. Nobody else pays for it —
-//! the key goes out once per recipient and per change, exactly as if the
+//! the key goes out once per recipient and per declaration, exactly as if the
 //! original packet had been delivered.
+//!
+//! A payload carrying [`RECEIVED_STAMP_KEY`] (the time Horizon read the update
+//! from the game server) is also stamped with [`SENT_STAMP_KEY`] when it goes
+//! out, so a client can tell the time spent here from the time spent on the
+//! wire. Such a stream keeps its payload and is serialized again on each tick it
+//! sends on — once for every recipient of that tick, not once per recipient.
+//!
+//! A stream queued with an owner ([`queue_sticky_owned`]: the player's own
+//! `move`) serves that owner at the channel's base `frequency`, whatever the
+//! ladder says: the ladder is for watching someone else, and the owner, at
+//! distance 0, otherwise fell into its innermost rung — 15 Hz for its own
+//! position (MovementProbe, 2026-10-22).
 //!
 //! Recipients are computed here rather than read from
 //! `ObjectInstance::subscribers` on purpose: `GorcInstanceManager::get_object`
@@ -40,6 +52,19 @@
 //! but on one copy of that map per flush, bucketed in a [`PlayerGrid`]: one full
 //! scan of every player per stream and per tier was the whole cost of the loop at
 //! 1248 players (preprod 2026-10-04, the single delivery thread at 100 %).
+//!
+//! **Bitcode recipients** (`ds_protocol::props`) get each payload as two GORC
+//! frames instead of the JSON envelope: the position and rotation as
+//! `<event>/transform`, unreliable (datagrams on WebTransport), and the other keys
+//! as `<event>`, reliable, only when there are any. The clocks of the trip ride with the transform, and `player_id` is left out
+//! when it is the object's own id (the client has it from the zone entry). The
+//! frames are encoded once per version, on the first bitcode recipient (a stamped
+//! stream encodes them again on each send, under the same `seq`). Since a
+//! datagram can be lost, a bitcode recipient served the last version gets its
+//! transform [`TRANSFORM_REPEATS`] more times at the channel's rate: the "last
+//! version always goes out eventually" guarantee, without a reliable send. Every
+//! frame carries the object's [`epoch`], bumped when a sticky key (`parent_id`) is
+//! declared, so the client never applies a transform under the wrong parent.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -47,7 +72,8 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
-use horizon_event_system::{current_timestamp, EventSystem, GorcObjectId, PlayerId, Vec3};
+use horizon_event_system::protocol::{bitcode, encode_server, EventKey, ServerFrame};
+use horizon_event_system::{current_timestamp, ClientResponseSender, EventSystem, Format, GorcObjectId, Outbound, PlayerId, Vec3};
 use serde_json::json;
 use tracing::{debug, error, info};
 
@@ -73,6 +99,14 @@ const IDLE_RETENTION: Duration = Duration::from_secs(30);
 /// Ticks between two sweeps for expired streams. Cheap enough at this spacing
 /// that it need not be smarter than a full pass over the map.
 const GC_EVERY_TICKS: u64 = 500;
+
+/// Payload key holding the time (unix ms) Horizon received the update from the
+/// game server. Its presence asks for [`SENT_STAMP_KEY`] on delivery.
+pub const RECEIVED_STAMP_KEY: &str = "horizon_received_ms";
+
+/// Payload key set to the time (unix ms) the payload was handed to the client
+/// connection, on streams whose payload carries [`RECEIVED_STAMP_KEY`].
+pub const SENT_STAMP_KEY: &str = "horizon_sent_ms";
 
 /// Time between two `[lod]` report lines. Measured in time, not in ticks: a loop
 /// running late is exactly when the line is needed, and 1000 slow ticks once
@@ -154,6 +188,60 @@ struct Counters {
     bytes: u64,
     /// Largest audience a single evaluation saw.
     max_recipients: u64,
+    /// Transform repeats sent to bitcode recipients.
+    repeats: u64,
+    /// Repeats a new version followed before all [`TRANSFORM_REPEATS`] went out: sent
+    /// while the object was still moving, in a slot its source left empty, rather than
+    /// after it stopped.
+    repeats_superseded: u64,
+}
+
+impl Counters {
+    /// Adds `other` to these counters and empties it.
+    fn absorb(&mut self, other: &mut Counters) {
+        self.evaluated += other.evaluated;
+        self.radius_scans += other.radius_scans;
+        self.recipients += other.recipients;
+        for (name, n) in other.sent.drain() {
+            *self.sent.entry(name).or_default() += n;
+        }
+        self.bytes += other.bytes;
+        self.max_recipients = self.max_recipients.max(other.max_recipients);
+        self.repeats += other.repeats;
+        self.repeats_superseded += other.repeats_superseded;
+        *other = Counters::default();
+    }
+}
+
+/// The counters every delivery thread hands over, read by the one that reports.
+fn merged_counters() -> &'static std::sync::Mutex<Counters> {
+    static MERGED: OnceLock<std::sync::Mutex<Counters>> = OnceLock::new();
+    MERGED.get_or_init(Default::default)
+}
+
+/// Delivery threads when the configuration names none (`lod_workers`).
+pub const DEFAULT_WORKERS: usize = 4;
+
+/// How often a delivery thread hands its counters over: well under REPORT_EVERY,
+/// so a report misses at most this much of another thread's work.
+const MERGE_EVERY: Duration = Duration::from_secs(1);
+
+/// The share of the streams one delivery thread serves: the objects whose id
+/// falls on `index` out of `count`. Every stream of an object is on the same
+/// thread, so an object's frames keep their order.
+#[derive(Clone, Copy)]
+struct Shard {
+    index: usize,
+    count: usize,
+}
+
+impl Shard {
+    #[cfg(test)]
+    const ALL: Shard = Shard { index: 0, count: 1 };
+
+    fn owns(&self, gorc_id: GorcObjectId) -> bool {
+        self.count <= 1 || (gorc_id.0.as_u128() % self.count as u128) as usize == self.index
+    }
 }
 
 fn queued_counters() -> &'static DashMap<String, AtomicU64> {
@@ -195,7 +283,7 @@ fn report(counters: &mut Counters, streams_total: usize, elapsed: Duration) {
     // end in an OOM (see player_movement::coalesce).
     let (moves_in, moves_coalesced, draining) = crate::handlers::player_movement::intake_report();
     info!(
-        "[lod] moves in={:.0}/s coalesced={:.0}/s draining={} | queued [{}] | streams={} evaluated={:.0}/s radius_scans={:.0}/s | sent [{}] total={:.0}/s {:.1} KB/s | recipients/eval avg={:.1} max={}",
+        "[lod] moves in={:.0}/s coalesced={:.0}/s draining={} | queued [{}] | streams={} evaluated={:.0}/s radius_scans={:.0}/s | sent [{}] total={:.0}/s {:.1} KB/s repeats={:.0}/s superseded={:.0}/s | recipients/eval avg={:.1} max={}",
         moves_in as f64 / secs,
         moves_coalesced as f64 / secs,
         draining,
@@ -206,6 +294,8 @@ fn report(counters: &mut Counters, streams_total: usize, elapsed: Duration) {
         sent.join(" "),
         sent_total as f64 / secs,
         counters.bytes as f64 / secs / 1024.0,
+        counters.repeats as f64 / secs,
+        counters.repeats_superseded as f64 / secs,
         if counters.evaluated == 0 { 0.0 } else { counters.recipients as f64 / counters.evaluated as f64 },
         counters.max_recipients,
     );
@@ -230,7 +320,7 @@ struct Stream {
     bytes_sticky: Option<Arc<Vec<u8>>>,
     /// Last value of every sticky key ever queued on this stream.
     sticky: serde_json::Map<String, serde_json::Value>,
-    /// Version at which a sticky key last changed. A recipient whose delivered
+    /// Version at which a sticky key was last declared. A recipient whose delivered
     /// version is older has never been served that value and gets `bytes_sticky`.
     sticky_version: u64,
     /// Last version delivered to each recipient, and when.
@@ -244,6 +334,171 @@ struct Stream {
     /// instead of running radius queries for them.
     next_due: Option<Instant>,
     last_queued: Instant,
+    /// The player this object is (its own `move` stream), served at the
+    /// channel's base frequency instead of the ladder's.
+    owner: Option<PlayerId>,
+    /// The payloads to stamp with [`SENT_STAMP_KEY`] on delivery, or `None`
+    /// when the payload asks for no stamp and `bytes` go out as they are.
+    stamped: Option<Stamped>,
+    /// The payload, for the bitcode frames.
+    data: Arc<serde_json::Value>,
+    /// The payload with the sticky keys merged, when it differs from `data`.
+    data_sticky: Option<Arc<serde_json::Value>>,
+    /// The object's epoch when this version was queued.
+    epoch: u32,
+    /// Bitcode frames of `version`, encoded on the first bitcode recipient.
+    bitcode: Option<(u64, BitcodeFrames)>,
+    /// GORC `seq` given to `version` on its first bitcode recipient. A stamped stream
+    /// encodes its frames again on every send, and its repeats must still carry this
+    /// one: with a new seq, the client took an old position for a new one.
+    seq: Option<(u64, u16)>,
+    /// Transforms still to resend to bitcode recipients served the last version.
+    repeats: HashMap<PlayerId, u8>,
+}
+
+/// What a stamped stream needs to serialize its envelope again at send time.
+#[derive(Clone)]
+struct Stamped {
+    data: serde_json::Value,
+    /// The payload with the sticky keys merged, when it differs from `data`.
+    data_sticky: Option<serde_json::Value>,
+    timestamp: u64,
+}
+
+/// Wall-clock time in unix milliseconds.
+pub fn unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
+}
+
+/// `data` with [`SENT_STAMP_KEY`] set to `sent_ms` (unchanged if not an object).
+fn with_sent_stamp(data: &serde_json::Value, sent_ms: u64) -> serde_json::Value {
+    let mut stamped = data.clone();
+    if let Some(map) = stamped.as_object_mut() {
+        map.insert(SENT_STAMP_KEY.to_string(), json!(sent_ms));
+    }
+    stamped
+}
+
+/// Transforms resent, unreliably, to a bitcode recipient already served the last
+/// version (see the module docs).
+pub const TRANSFORM_REPEATS: u8 = 3;
+
+/// Keys that travel with the transform of a bitcode frame instead of the reliable
+/// keys: they change with every payload and only describe it.
+const TRANSFORM_EXTRA_KEYS: [&str; 3] = ["servergodot_ms", RECEIVED_STAMP_KEY, SENT_STAMP_KEY];
+
+fn epochs() -> &'static DashMap<GorcObjectId, u32> {
+    static EPOCHS: OnceLock<DashMap<GorcObjectId, u32>> = OnceLock::new();
+    EPOCHS.get_or_init(DashMap::new)
+}
+
+/// The object's epoch: how many times a sticky key (`parent_id`) was declared on
+/// one of its streams, or [`new_frame`] said its parent changed. Carried by its
+/// bitcode frames and zone entries.
+pub fn epoch(gorc_id: GorcObjectId) -> u32 {
+    epochs().get(&gorc_id).map_or(0, |epoch| *epoch)
+}
+
+/// The object's parent changed: its next frames are in another frame of reference,
+/// under a new epoch, so a client never joins the new `parent_id` with a transform
+/// of the old frame. For the generic props, whose updates carry the whole payload of
+/// their channel (`parent_id` included) every time, so a sticky key cannot tell a
+/// change from a repeat: their update handler compares the parent itself. A truck
+/// driving onto a lift's platform was drawn a moment 6000 km away (2026-11-12).
+pub fn new_frame(gorc_id: GorcObjectId) {
+    let mut epoch = epochs().entry(gorc_id).or_insert(0);
+    *epoch = epoch.wrapping_add(1);
+}
+
+/// The frames of one version of a stream, for bitcode recipients.
+#[derive(Clone, Default)]
+struct BitcodeFrames {
+    /// Position and rotation, unreliable.
+    transform: Option<bytes::Bytes>,
+    /// The other keys, reliable.
+    update: Option<bytes::Bytes>,
+    /// The other keys with the sticky ones merged, for the recipients owed them.
+    update_sticky: Option<bytes::Bytes>,
+}
+
+/// What a stream needs to build its bitcode frames.
+struct FrameInput<'a> {
+    handle: u32,
+    channel: u8,
+    seq: u16,
+    event: EventKey,
+    transform_event: EventKey,
+    epoch: u32,
+    object_id: &'a str,
+    data: &'a serde_json::Value,
+    /// The payload with the sticky keys merged, when the stream has sticky keys.
+    data_sticky: Option<&'a serde_json::Value>,
+}
+
+/// Splits a payload into its transform and its other keys (`None` when there are
+/// none left). A payload that is not a JSON object goes whole into the other keys.
+fn split_payload(data: &serde_json::Value, object_id: &str, epoch: u32) -> (ds_protocol::TransformUpdate, Option<serde_json::Value>) {
+    let Some(map) = data.as_object() else {
+        return (ds_protocol::TransformUpdate { epoch, ..Default::default() }, Some(data.clone()));
+    };
+    let (mut transform, mut rest) = ds_protocol::props::split(map);
+    transform.epoch = epoch;
+    if !transform.is_empty() {
+        let extra: serde_json::Map<String, serde_json::Value> =
+            TRANSFORM_EXTRA_KEYS.iter().filter_map(|key| rest.remove_entry(*key)).collect();
+        if !extra.is_empty() {
+            transform.extra = ds_protocol::DynValue::from(&serde_json::Value::Object(extra));
+        }
+        if rest.get("player_id").and_then(|v| v.as_str()) == Some(object_id) {
+            rest.remove("player_id");
+        }
+    }
+    (transform, (!rest.is_empty()).then(|| serde_json::Value::Object(rest)))
+}
+
+fn bitcode_frames(input: &FrameInput) -> BitcodeFrames {
+    let frame = |event: &EventKey, payload: Vec<u8>| {
+        encode_server(&ServerFrame::GorcEvent {
+            handle: input.handle,
+            channel: input.channel,
+            seq: input.seq,
+            event: event.clone(),
+            payload,
+        })
+    };
+    let update = |rest: Option<serde_json::Value>| {
+        rest.map(|rest| {
+            frame(&input.event, bitcode::encode(&ds_protocol::PropUpdate {
+                epoch: input.epoch,
+                data: ds_protocol::DynValue::from(&rest),
+            }))
+        })
+    };
+    let (transform, rest) = split_payload(input.data, input.object_id, input.epoch);
+    let transform = (!transform.is_empty()).then(|| frame(&input.transform_event, bitcode::encode(&transform)));
+    let update_plain = update(rest);
+    let update_sticky = match input.data_sticky {
+        None => None,
+        Some(sticky) if std::ptr::eq(sticky, input.data) => update_plain.clone(),
+        Some(sticky) => update(split_payload(sticky, input.object_id, input.epoch).1),
+    };
+    BitcodeFrames { transform, update: update_plain, update_sticky }
+}
+
+/// The listener format of `player_id`, looked up once per flush.
+async fn format_of(
+    sender: &(dyn ClientResponseSender + Send + Sync),
+    formats: &mut HashMap<PlayerId, Format>,
+    player_id: PlayerId,
+) -> Format {
+    if let Some(format) = formats.get(&player_id) {
+        return *format;
+    }
+    let format = sender.connection_profile(player_id).await.map(|profile| profile.format).unwrap_or_default();
+    formats.insert(player_id, format);
+    format
 }
 
 fn streams() -> &'static DashMap<StreamKey, Stream> {
@@ -268,6 +523,15 @@ pub fn queue(
     queue_sticky(gorc_id, channel, object_type, event_name, data, &[]);
 }
 
+/// Drop every stream of `gorc_id`. Call when the object is (re)registered: a
+/// player reconnecting within [`IDLE_RETENTION`] gets the same id, and the
+/// stream of its previous session would otherwise carry over its sticky values
+/// (the old `parent_id`) and its per-recipient versions into the new one.
+pub fn forget_object(gorc_id: GorcObjectId) {
+    streams().retain(|(id, _, _), _| *id != gorc_id);
+    epochs().remove(&gorc_id);
+}
+
 /// [`queue`], with `sticky_keys` naming the keys of `data` that are sent on
 /// change only. Their last value is kept on the stream and merged into the
 /// next payload served to each recipient that has not seen it yet, so a
@@ -281,6 +545,32 @@ pub fn queue_sticky(
     event_name: &str,
     data: &serde_json::Value,
     sticky_keys: &[&str],
+) {
+    enqueue(gorc_id, channel, object_type, event_name, data, sticky_keys, None);
+}
+
+/// [`queue_sticky`] for the stream of a player's own object: `owner` is served
+/// at the channel's base frequency, everyone else by the ladder.
+pub fn queue_sticky_owned(
+    gorc_id: GorcObjectId,
+    channel: u8,
+    object_type: &str,
+    event_name: &str,
+    data: &serde_json::Value,
+    sticky_keys: &[&str],
+    owner: PlayerId,
+) {
+    enqueue(gorc_id, channel, object_type, event_name, data, sticky_keys, Some(owner));
+}
+
+fn enqueue(
+    gorc_id: GorcObjectId,
+    channel: u8,
+    object_type: &str,
+    event_name: &str,
+    data: &serde_json::Value,
+    sticky_keys: &[&str],
+    owner: Option<PlayerId>,
 ) {
     // One timestamp for both variants: they are the same update.
     let timestamp = current_timestamp();
@@ -302,20 +592,45 @@ pub fn queue_sticky(
         pending: false,
         next_due: None,
         last_queued: now,
+        owner,
+        stamped: None,
+        data: Arc::new(serde_json::Value::Null),
+        data_sticky: None,
+        epoch: 0,
+        bitcode: None,
+        seq: None,
+        repeats: HashMap::new(),
     });
 
     stream.version = stream.version.wrapping_add(1);
     stream.bytes = bytes;
     stream.pending = true;
     stream.last_queued = now;
+    stream.owner = owner;
+    let stamp = data.get(RECEIVED_STAMP_KEY).is_some();
+    let mut data_sticky: Option<serde_json::Value> = None;
+    stream.data = Arc::new(data.clone());
+    stream.data_sticky = None;
+    stream.bitcode = None;
+    if data.as_object().is_some_and(|payload| sticky_keys.iter().any(|key| payload.contains_key(*key))) {
+        // A new parent: transforms of the previous epoch must not be applied under it.
+        let mut epoch = epochs().entry(gorc_id).or_insert(0);
+        *epoch = epoch.wrapping_add(1);
+    }
+    stream.epoch = epoch(gorc_id);
 
     if let Some(payload) = data.as_object() {
         for sticky_key in sticky_keys {
+            // A sticky key is a DECLARATION, sent once, not a value to diff: the
+            // same value again is still news to whoever has not been served it.
+            // Comparing with the remembered value lost a reparent after a quick
+            // reconnect (2026-10-13): the stream of the previous session still held
+            // the same planet as `parent_id`, the version was not bumped, the
+            // packet was overwritten before delivery, and the client applied
+            // planet-local coordinates under its spawn apartment — in space.
             if let Some(value) = payload.get(*sticky_key) {
-                if stream.sticky.get(*sticky_key) != Some(value) {
-                    stream.sticky.insert(sticky_key.to_string(), value.clone());
-                    stream.sticky_version = stream.version;
-                }
+                stream.sticky.insert(sticky_key.to_string(), value.clone());
+                stream.sticky_version = stream.version;
             }
         }
         if stream.sticky.is_empty() {
@@ -329,16 +644,15 @@ pub fn queue_sticky(
             for (k, v) in &stream.sticky {
                 merged.entry(k.clone()).or_insert_with(|| v.clone());
             }
-            stream.bytes_sticky = serialize_envelope(
-                gorc_id,
-                channel,
-                object_type,
-                event_name,
-                &serde_json::Value::Object(merged),
-                timestamp,
-            );
+            let merged = serde_json::Value::Object(merged);
+            stream.bytes_sticky = serialize_envelope(gorc_id, channel, object_type, event_name, &merged, timestamp);
+            stream.data_sticky = Some(Arc::new(merged.clone()));
+            if stamp {
+                data_sticky = Some(merged);
+            }
         }
     }
+    stream.stamped = stamp.then(|| Stamped { data: data.clone(), data_sticky, timestamp });
 }
 
 /// The client envelope around a channel payload, serialized.
@@ -371,60 +685,82 @@ fn serialize_envelope(
     }
 }
 
-/// Start the delivery loop. Call once, at plugin startup.
+/// Start the delivery loop on `workers` threads, each serving its [`Shard`] of
+/// the streams. Call once, at plugin startup. One thread was the ceiling of the
+/// whole replication: at ~800 players (7 600 moves/s in, 42 000 messages/s out,
+/// preprod 2026-11-03) it ran at 100 % of its core while 13 more idled.
 ///
-/// Runs on its own thread with its own current-thread Tokio runtime rather than
-/// on the Luminal handle, for two reasons: Luminal has no timer driver, and the
-/// server's `server_tick` event — the other available clock — disappears
-/// entirely when `tick_interval_ms = 0`, which would silently stop all
-/// replication. Everything the loop awaits (`RwLock`, `DashMap`, an `mpsc`
-/// `try_send` behind `send_to_client`) is runtime-agnostic.
-pub fn start(events: Arc<EventSystem>, definitions: Arc<DashMap<String, ObjectDefinition>>) {
-    let spawned = std::thread::Builder::new()
-        .name("genericprops-lod".to_string())
-        .spawn(move || {
-            let runtime = match tokio::runtime::Builder::new_current_thread().enable_time().build() {
-                Ok(runtime) => runtime,
-                Err(e) => {
-                    error!("🚀 LOD: ❌ Failed to build delivery runtime: {} - channel updates will not be sent", e);
-                    return;
-                }
-            };
-
-            runtime.block_on(async move {
-                let mut ticker = tokio::time::interval(TICK);
-                // A stalled tick must not be repaid with a burst of catch-up
-                // ticks; delivery is rate limited, replaying the backlog is
-                // pointless work.
-                ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-                let mut ticks: u64 = 0;
-                let mut counters = Counters::default();
-                let mut last_report = Instant::now();
-                loop {
-                    ticker.tick().await;
-                    flush(&events, &definitions, &mut counters).await;
-
-                    ticks = ticks.wrapping_add(1);
-                    if last_report.elapsed() >= REPORT_EVERY {
-                        report(&mut counters, streams().len(), last_report.elapsed());
-                        last_report = Instant::now();
-                    }
-                    if ticks % GC_EVERY_TICKS == 0 {
-                        streams().retain(|_, stream| {
-                            stream.pending || stream.last_queued.elapsed() <= IDLE_RETENTION
-                        });
-                    }
-                }
-            });
-        });
-
-    match spawned {
-        Ok(_) => info!("🚀 LOD: delivery loop started ({} ms tick)", TICK.as_millis()),
-        Err(e) => error!("🚀 LOD: ❌ Failed to start delivery loop: {} - channel updates will not be sent", e),
+/// Each runs its own current-thread Tokio runtime rather than on the Luminal
+/// handle, for two reasons: Luminal has no timer driver, and the server's
+/// `server_tick` event — the other available clock — disappears entirely when
+/// `tick_interval_ms = 0`, which would silently stop all replication. Everything
+/// the loop awaits (`RwLock`, `DashMap`, an `mpsc` `try_send` behind
+/// `send_to_client`) is runtime-agnostic. Thread 0 also reports and sweeps.
+pub fn start(events: Arc<EventSystem>, definitions: Arc<DashMap<String, ObjectDefinition>>, workers: usize) {
+    let workers = workers.max(1);
+    let mut started = 0;
+    for index in 0..workers {
+        let shard = Shard { index, count: workers };
+        let (events, definitions) = (Arc::clone(&events), Arc::clone(&definitions));
+        let spawned = std::thread::Builder::new()
+            .name(format!("gp-lod-{}", index))
+            .spawn(move || deliver(events, definitions, shard));
+        match spawned {
+            Ok(_) => started += 1,
+            Err(e) => error!("🚀 LOD: ❌ Failed to start delivery thread {}: {} - its share of the updates will not be sent", index, e),
+        }
     }
+    info!("🚀 LOD: delivery loop started on {}/{} threads ({} ms tick)", started, workers, TICK.as_millis());
 }
 
-async fn flush(events: &Arc<EventSystem>, definitions: &Arc<DashMap<String, ObjectDefinition>>, counters: &mut Counters) {
+/// One delivery thread: flushes its shard every tick.
+fn deliver(events: Arc<EventSystem>, definitions: Arc<DashMap<String, ObjectDefinition>>, shard: Shard) {
+    let runtime = match tokio::runtime::Builder::new_current_thread().enable_time().build() {
+        Ok(runtime) => runtime,
+        Err(e) => {
+            error!("🚀 LOD: ❌ Failed to build delivery runtime {}: {} - its share of the updates will not be sent", shard.index, e);
+            return;
+        }
+    };
+
+    runtime.block_on(async move {
+        let mut ticker = tokio::time::interval(TICK);
+        // A stalled tick must not be repaid with a burst of catch-up
+        // ticks; delivery is rate limited, replaying the backlog is
+        // pointless work.
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut ticks: u64 = 0;
+        let mut counters = Counters::default();
+        let mut last_merge = Instant::now();
+        let mut last_report = Instant::now();
+        loop {
+            ticker.tick().await;
+            flush(&events, &definitions, &mut counters, shard).await;
+
+            ticks = ticks.wrapping_add(1);
+            if last_merge.elapsed() >= MERGE_EVERY {
+                merged_counters().lock().unwrap().absorb(&mut counters);
+                last_merge = Instant::now();
+            }
+            if shard.index != 0 {
+                continue;
+            }
+            if last_report.elapsed() >= REPORT_EVERY {
+                let mut merged = merged_counters().lock().unwrap();
+                merged.absorb(&mut counters);
+                report(&mut merged, streams().len(), last_report.elapsed());
+                last_report = Instant::now();
+            }
+            if ticks % GC_EVERY_TICKS == 0 {
+                streams().retain(|_, stream| {
+                    stream.pending || stream.last_queued.elapsed() <= IDLE_RETENTION
+                });
+            }
+        }
+    });
+}
+
+async fn flush(events: &Arc<EventSystem>, definitions: &Arc<DashMap<String, ObjectDefinition>>, counters: &mut Counters, shard: Shard) {
     let Some(gorc_instances) = events.get_gorc_instances() else {
         return;
     };
@@ -432,7 +768,11 @@ async fn flush(events: &Arc<EventSystem>, definitions: &Arc<DashMap<String, Obje
         return;
     };
 
-    let keys: Vec<StreamKey> = streams().iter().map(|entry| entry.key().clone()).collect();
+    let keys: Vec<StreamKey> = streams()
+        .iter()
+        .filter(|entry| shard.owns(entry.key().0))
+        .map(|entry| entry.key().clone())
+        .collect();
     if keys.is_empty() {
         return;
     }
@@ -440,6 +780,8 @@ async fn flush(events: &Arc<EventSystem>, definitions: &Arc<DashMap<String, Obje
     // One copy of every player position for the whole flush, built on the first
     // stream that is due (most ticks have none).
     let mut grid: Option<PlayerGrid> = None;
+    // The listener format of each recipient, looked up once per flush.
+    let mut formats: HashMap<PlayerId, Format> = HashMap::new();
 
     let now = Instant::now();
     // Half a tick of tolerance. Without it a rate is rounded up to the next
@@ -452,7 +794,7 @@ async fn flush(events: &Arc<EventSystem>, definitions: &Arc<DashMap<String, Obje
         let (gorc_id, channel) = (*gorc_id, *channel);
 
         // Snapshot what we need; the map is never held across an await.
-        let (version, bytes, bytes_sticky, sticky_version, object_type) = {
+        let (version, bytes, bytes_sticky, sticky_version, object_type, owner, stamped, data, data_sticky, epoch, cached_frames, cached_seq) = {
             let Some(stream) = streams().get(&key) else {
                 continue;
             };
@@ -468,10 +810,17 @@ async fn flush(events: &Arc<EventSystem>, definitions: &Arc<DashMap<String, Obje
                 stream.bytes_sticky.clone(),
                 stream.sticky_version,
                 stream.object_type.clone(),
+                stream.owner,
+                stream.stamped.clone(),
+                Arc::clone(&stream.data),
+                stream.data_sticky.clone(),
+                stream.epoch,
+                stream.bitcode.as_ref().filter(|(v, _)| *v == stream.version).map(|(_, frames)| frames.clone()),
+                stream.seq.filter(|(v, _)| *v == stream.version).map(|(_, seq)| seq),
             )
         };
 
-        let Some(tiers) = resolve_tiers(definitions, &object_type, channel) else {
+        let Some((tiers, base_frequency)) = resolve_tiers(definitions, &object_type, channel) else {
             // Unreachable by construction: `object_type` is the definition's own
             // name and channels come from the same definition. Dropping the
             // stream is still the right answer over guessing a radius — an
@@ -499,7 +848,7 @@ async fn flush(events: &Arc<EventSystem>, definitions: &Arc<DashMap<String, Obje
                 .iter()
                 .find(|tier| distance_sq <= tier.distance * tier.distance)
                 .map_or(outer.frequency, |tier| tier.frequency);
-            rates.insert(player_id, frequency);
+            rates.insert(player_id, owner_rate(owner, player_id, frequency, base_frequency));
         });
         counters.evaluated += 1;
         counters.radius_scans += 1;
@@ -509,6 +858,8 @@ async fn flush(events: &Arc<EventSystem>, definitions: &Arc<DashMap<String, Obje
         // Recipients to serve now, and whether each is still owed the sticky
         // keys: never served, or served nothing since their last change.
         let mut due: Vec<(PlayerId, bool)> = Vec::new();
+        // Bitcode recipients already served this version, owed a repeat of its transform.
+        let mut repeat_due: Vec<PlayerId> = Vec::new();
         {
             let Some(mut stream) = streams().get_mut(&key) else {
                 continue;
@@ -517,6 +868,7 @@ async fn flush(events: &Arc<EventSystem>, definitions: &Arc<DashMap<String, Obje
             // event is commented out upstream, so there is no exit hook to hang
             // this on — pruning against the live audience is the cleanup.
             stream.sent.retain(|player_id, _| rates.contains_key(player_id));
+            stream.repeats.retain(|player_id, left| *left > 0 && rates.contains_key(player_id));
 
             for (player_id, frequency) in &rates {
                 let (send, owed_sticky) = match stream.sent.get(player_id) {
@@ -532,6 +884,12 @@ async fn flush(events: &Arc<EventSystem>, definitions: &Arc<DashMap<String, Obje
                 };
                 if send {
                     due.push((*player_id, owed_sticky));
+                } else if stream.repeats.contains_key(player_id)
+                    && stream.sent.get(player_id).is_some_and(|(_, sent_at)| {
+                        now.saturating_duration_since(*sent_at) + slack >= interval(*frequency)
+                    })
+                {
+                    repeat_due.push(*player_id);
                 }
             }
 
@@ -540,7 +898,20 @@ async fn flush(events: &Arc<EventSystem>, definitions: &Arc<DashMap<String, Obje
             // carry the state anyway.
             for (player_id, _) in &due {
                 stream.sent.insert(*player_id, (version, now));
+                // Served a new version: its repeats start over once it is sent.
+                if let Some(left) = stream.repeats.remove(player_id) {
+                    counters.repeats_superseded += u64::from(TRANSFORM_REPEATS - left);
+                }
             }
+            for player_id in &repeat_due {
+                if let Some((_, sent_at)) = stream.sent.get_mut(player_id) {
+                    *sent_at = now;
+                }
+                if let Some(left) = stream.repeats.get_mut(player_id) {
+                    *left -= 1;
+                }
+            }
+            stream.repeats.retain(|_, left| *left > 0);
 
             stream.next_due = rates
                 .iter()
@@ -554,6 +925,7 @@ async fn flush(events: &Arc<EventSystem>, definitions: &Arc<DashMap<String, Obje
             // includes the "nobody is in range" case. A concurrent queue() that
             // bumped the version keeps the stream awake.
             if stream.version == version
+                && stream.repeats.is_empty()
                 && rates
                     .keys()
                     .all(|player_id| stream.sent.get(player_id).map_or(false, |(v, _)| *v >= version))
@@ -563,7 +935,36 @@ async fn flush(events: &Arc<EventSystem>, definitions: &Arc<DashMap<String, Obje
         }
 
         *counters.sent.entry(event_name.clone()).or_default() += due.len() as u64;
+        if due.is_empty() && repeat_due.is_empty() {
+            continue;
+        }
+        let mut json_due: Vec<(PlayerId, bool)> = Vec::with_capacity(due.len());
+        let mut bitcode_due: Vec<(PlayerId, bool)> = Vec::new();
         for (player_id, owed_sticky) in due {
+            match format_of(&*sender, &mut formats, player_id).await {
+                Format::Json => json_due.push((player_id, owed_sticky)),
+                Format::Bitcode => bitcode_due.push((player_id, owed_sticky)),
+            }
+        }
+        let sent_ms = unix_ms();
+        // A stamped stream is serialized again now, with the time it leaves.
+        let (bytes, bytes_sticky) = match &stamped {
+            Some(stamped) if !json_due.is_empty() => {
+                let envelope = |data: &serde_json::Value| {
+                    serialize_envelope(gorc_id, channel, &object_type, event_name, &with_sent_stamp(data, sent_ms),
+                        stamped.timestamp)
+                };
+                let Some(fresh) = envelope(&stamped.data) else { continue };
+                let fresh_sticky = match (&bytes_sticky, &stamped.data_sticky) {
+                    (None, _) => None,
+                    (Some(_), Some(merged)) => envelope(merged),
+                    (Some(_), None) => Some(Arc::clone(&fresh)),
+                };
+                (fresh, fresh_sticky)
+            }
+            _ => (bytes, bytes_sticky),
+        };
+        for (player_id, owed_sticky) in json_due {
             let payload = match (&bytes_sticky, owed_sticky) {
                 (Some(sticky), true) => sticky,
                 _ => &bytes,
@@ -573,6 +974,91 @@ async fn flush(events: &Arc<EventSystem>, definitions: &Arc<DashMap<String, Obje
                 debug!("🚀 LOD: send to player {} for object {} ch{} failed: {}", player_id, gorc_id, channel, e);
             }
         }
+
+        if bitcode_due.is_empty() && repeat_due.is_empty() {
+            continue;
+        }
+        let frames = match cached_frames {
+            Some(frames) if stamped.is_none() => frames,
+            _ => {
+                let Some(handle) = gorc_instances.object_handle(gorc_id) else {
+                    debug!("🚀 LOD: object {} has no wire handle, bitcode recipients skipped", gorc_id);
+                    continue;
+                };
+                // A stamped payload leaves with the time it leaves, as for JSON.
+                let (data, data_sticky) = if stamped.is_some() {
+                    (Arc::new(with_sent_stamp(&data, sent_ms)), data_sticky.map(|d| Arc::new(with_sent_stamp(&d, sent_ms))))
+                } else {
+                    (data, data_sticky)
+                };
+                let object_id = gorc_id.to_string();
+                // One seq per version: a repeat, or a later recipient of the same version,
+                // must be told it is the same position, which the client drops if it has it.
+                let seq = cached_seq.unwrap_or_else(|| gorc_instances.next_sequence(gorc_id, channel));
+                let frames = bitcode_frames(&FrameInput {
+                    handle,
+                    channel,
+                    seq,
+                    event: events.event_table().key(event_name),
+                    transform_event: events.event_table().key(&ds_protocol::transform_event(event_name)),
+                    epoch,
+                    object_id: &object_id,
+                    data: &data,
+                    data_sticky: match (&bytes_sticky, &data_sticky) {
+                        (None, _) => None,
+                        (Some(_), Some(merged)) => Some(merged),
+                        (Some(_), None) => Some(&data),
+                    },
+                });
+                if let Some(mut stream) = streams().get_mut(&key) {
+                    if stream.version == version {
+                        stream.seq = Some((version, seq));
+                        if stamped.is_none() {
+                            stream.bitcode = Some((version, frames.clone()));
+                        }
+                    }
+                }
+                frames
+            }
+        };
+        for (player_id, owed_sticky) in &bitcode_due {
+            let update = if *owed_sticky { frames.update_sticky.as_ref().or(frames.update.as_ref()) } else { frames.update.as_ref() };
+            if let Some(update) = update {
+                counters.bytes += update.len() as u64;
+                if let Err(e) = sender.send_frame(*player_id, Outbound::reliable(update.clone())).await {
+                    debug!("🚀 LOD: send to player {} for object {} ch{} failed: {}", player_id, gorc_id, channel, e);
+                }
+            }
+            if let Some(transform) = &frames.transform {
+                counters.bytes += transform.len() as u64;
+                let _ = sender.send_frame(*player_id, Outbound::unreliable(transform.clone())).await;
+            }
+        }
+        if let Some(transform) = &frames.transform {
+            for player_id in &repeat_due {
+                counters.bytes += transform.len() as u64;
+                let _ = sender.send_frame(*player_id, Outbound::unreliable(transform.clone())).await;
+            }
+            counters.repeats += repeat_due.len() as u64;
+            if !bitcode_due.is_empty() {
+                if let Some(mut stream) = streams().get_mut(&key) {
+                    for (player_id, _) in &bitcode_due {
+                        stream.repeats.insert(*player_id, TRANSFORM_REPEATS);
+                    }
+                    stream.pending = true;
+                }
+            }
+        }
+    }
+}
+
+/// The rate `player_id` is served at: the ladder's `frequency`, or for the
+/// object's `owner` the channel's `base_frequency` when that is higher.
+fn owner_rate(owner: Option<PlayerId>, player_id: PlayerId, frequency: f64, base_frequency: f64) -> f64 {
+    if owner == Some(player_id) {
+        frequency.max(base_frequency)
+    } else {
+        frequency
     }
 }
 
@@ -584,7 +1070,8 @@ fn interval(frequency: f64) -> Duration {
     }
 }
 
-/// Rate ladder declared for a channel, innermost tier first.
+/// Rate ladder declared for a channel, innermost tier first, and the channel's
+/// base frequency.
 ///
 /// Cloned per call rather than borrowed: the ladder is one or two elements and
 /// holding a `DashMap` guard across the awaits that follow would put the
@@ -593,15 +1080,24 @@ fn resolve_tiers(
     definitions: &Arc<DashMap<String, ObjectDefinition>>,
     object_type: &str,
     channel: u8,
-) -> Option<Vec<LodTier>> {
+) -> Option<(Vec<LodTier>, f64)> {
     let definition = definitions.get(object_type)?;
     let channel = definition.channel(channel)?;
-    Some(channel.lod.clone())
+    Some((channel.lod.clone(), channel.frequency))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The stream table is global and `flush` sweeps all of it, dropping the streams
+    /// of objects its GORC does not hold: the test that flushes runs alone, the
+    /// tests that only queue run beside each other (they failed 3 runs in 5).
+    static STREAMS_LOCK: std::sync::RwLock<()> = std::sync::RwLock::new(());
+
+    fn sharing_streams() -> std::sync::RwLockReadGuard<'static, ()> {
+        STREAMS_LOCK.read().unwrap_or_else(|e| e.into_inner())
+    }
 
     #[test]
     fn player_grid_finds_what_a_full_scan_finds() {
@@ -646,7 +1142,20 @@ mod tests {
     }
 
     #[test]
+    fn a_new_parent_starts_a_new_epoch() {
+        let id = GorcObjectId::new();
+        let before = epoch(id);
+        new_frame(id);
+        assert_eq!(epoch(id), before.wrapping_add(1), "the next frames are in another frame of reference");
+        queue(id, 0, "vehicle", "update_property", &json!({"position": 1, "parent_id": "platform"}));
+        assert_eq!(epoch(id), before.wrapping_add(1), "a plain update does not, parent_id or not");
+        streams().retain(|(gorc, _, _), _| *gorc != id);
+        epochs().remove(&id);
+    }
+
+    #[test]
     fn sticky_key_survives_being_overwritten_before_delivery() {
+        let _streams = sharing_streams();
         let id = GorcObjectId::new();
         // The one packet of a reparent...
         queue_sticky(id, 0, "player", "move", &json!({"position": 1, "parent_id": "planet"}), &["parent_id"]);
@@ -673,7 +1182,352 @@ mod tests {
     }
 
     #[test]
+    fn a_repeated_sticky_value_is_declared_again() {
+        let _streams = sharing_streams();
+        let id = GorcObjectId::new();
+        // Previous session: reparented onto the planet, delivered.
+        queue_sticky(id, 0, "player", "move", &json!({"position": 1, "parent_id": "planet"}), &["parent_id"]);
+        queue_sticky(id, 0, "player", "move", &json!({"position": 2}), &["parent_id"]);
+        // New session: leaves the apartment for the same planet.
+        queue_sticky(id, 0, "player", "move", &json!({"position": 3, "parent_id": "planet"}), &["parent_id"]);
+        let (v3, _, _, sv3) = stream_of(id);
+        assert_eq!(sv3, v3, "a recipient served version 2 must be owed the new declaration");
+        streams().remove(&(id, 0, "move".to_string()));
+    }
+
+    #[test]
+    fn forget_object_drops_every_stream_of_that_object_only() {
+        let _streams = sharing_streams();
+        let (id, other) = (GorcObjectId::new(), GorcObjectId::new());
+        queue_sticky(id, 0, "player", "move", &json!({"position": 1, "parent_id": "planet"}), &["parent_id"]);
+        queue(id, 1, "player", "update_property", &json!({"head": 0.5}));
+        queue(other, 0, "player", "move", &json!({"position": 1}));
+        forget_object(id);
+        assert!(!streams().iter().any(|entry| entry.key().0 == id));
+        assert!(streams().contains_key(&(other, 0, "move".to_string())));
+        streams().remove(&(other, 0, "move".to_string()));
+    }
+
+    #[test]
+    fn the_owner_is_served_at_the_base_rate_others_by_the_ladder() {
+        let (owner, other) = (PlayerId::new(), PlayerId::new());
+        assert_eq!(owner_rate(Some(owner), owner, 15.0, 30.0), 30.0);
+        assert_eq!(owner_rate(Some(owner), other, 15.0, 30.0), 15.0);
+        assert_eq!(owner_rate(None, owner, 15.0, 30.0), 15.0);
+        assert_eq!(owner_rate(Some(owner), owner, 60.0, 30.0), 60.0, "never slower than the ladder");
+    }
+
+    #[test]
+    fn a_received_stamp_keeps_the_payload_to_stamp_on_send() {
+        let _streams = sharing_streams();
+        let id = GorcObjectId::new();
+        let owner = PlayerId::new();
+        queue_sticky_owned(id, 0, "player", "move",
+            &json!({"position": 1, "parent_id": "planet", RECEIVED_STAMP_KEY: 10}), &["parent_id"], owner);
+        queue_sticky_owned(id, 0, "player", "move", &json!({"position": 2, RECEIVED_STAMP_KEY: 20}), &["parent_id"], owner);
+        {
+            let stream = streams().get(&(id, 0, "move".to_string())).expect("stream queued");
+            assert_eq!(stream.owner, Some(owner));
+            let stamped = stream.stamped.as_ref().expect("a received stamp asks for a sent one");
+            assert_eq!(stamped.data[RECEIVED_STAMP_KEY], json!(20));
+            assert_eq!(stamped.data_sticky.as_ref().unwrap()["parent_id"], json!("planet"));
+        }
+        assert_eq!(with_sent_stamp(&json!({"position": 2}), 30), json!({"position": 2, SENT_STAMP_KEY: 30}));
+        queue(id, 0, "player", "move", &json!({"position": 3}));
+        assert!(streams().get(&(id, 0, "move".to_string())).unwrap().stamped.is_none());
+        streams().remove(&(id, 0, "move".to_string()));
+    }
+
+    fn decode_gorc(bytes: &bytes::Bytes) -> (u32, u16, EventKey, Vec<u8>) {
+        match horizon_event_system::protocol::decode_server(bytes, usize::MAX).unwrap() {
+            ServerFrame::GorcEvent { handle, seq, event, payload, .. } => (handle, seq, event, payload),
+            other => panic!("not a GORC event: {:?}", other),
+        }
+    }
+
+    fn input<'a>(data: &'a serde_json::Value, data_sticky: Option<&'a serde_json::Value>, object_id: &'a str) -> FrameInput<'a> {
+        FrameInput {
+            handle: 7,
+            channel: 0,
+            seq: 42,
+            event: EventKey::name("move"),
+            transform_event: EventKey::name(ds_protocol::transform_event("move")),
+            epoch: 3,
+            object_id,
+            data,
+            data_sticky,
+        }
+    }
+
+    #[test]
+    fn a_move_is_one_transform_frame_with_its_clocks() {
+        let object_id = GorcObjectId::new().to_string();
+        let data = json!({
+            "player_id": object_id,
+            "position": {"x": 1.0, "y": 2.0, "z": 3.0},
+            "rotation": {"x": 0.0, "y": 0.5, "z": 0.0},
+            "servergodot_ms": 12.5,
+            RECEIVED_STAMP_KEY: 100,
+            SENT_STAMP_KEY: 101,
+        });
+        let frames = bitcode_frames(&input(&data, None, &object_id));
+        assert!(frames.update.is_none(), "nothing reliable to send: the clocks ride with the transform");
+        let (handle, seq, event, payload) = decode_gorc(frames.transform.as_ref().unwrap());
+        assert_eq!((handle, seq, event), (7, 42, EventKey::name("move/transform")));
+        let transform: ds_protocol::TransformUpdate = bitcode::decode(&payload).unwrap();
+        assert_eq!(transform.epoch, 3);
+        assert_eq!(transform.position, Some([1.0, 2.0, 3.0]));
+        assert_eq!(transform.extra.to_value().unwrap(),
+            json!({"servergodot_ms": 12.5, RECEIVED_STAMP_KEY: 100, SENT_STAMP_KEY: 101}));
+    }
+
+    #[test]
+    fn other_keys_are_a_reliable_update_and_sticky_ones_a_variant() {
+        let object_id = GorcObjectId::new().to_string();
+        let data = json!({"position": {"x": 1.0, "y": 2.0, "z": 3.0}, "action": "jump"});
+        let sticky = json!({"position": {"x": 1.0, "y": 2.0, "z": 3.0}, "action": "jump", "parent_id": "city"});
+        let frames = bitcode_frames(&input(&data, Some(&sticky), &object_id));
+        assert!(frames.transform.is_some());
+        let update = |bytes: &bytes::Bytes| {
+            let (_, _, event, payload) = decode_gorc(bytes);
+            assert_eq!(event, EventKey::name("move"));
+            let update: ds_protocol::PropUpdate = bitcode::decode(&payload).unwrap();
+            assert_eq!(update.epoch, 3);
+            update.data.to_value().unwrap()
+        };
+        assert_eq!(update(frames.update.as_ref().unwrap()), json!({"action": "jump"}));
+        assert_eq!(update(frames.update_sticky.as_ref().unwrap()), json!({"action": "jump", "parent_id": "city"}));
+    }
+
+    #[test]
+    fn a_player_id_other_than_the_object_stays() {
+        let object_id = GorcObjectId::new().to_string();
+        let data = json!({"position": {"x": 1.0, "y": 2.0, "z": 3.0}, "player_id": "someone-else"});
+        let (_, rest) = split_payload(&data, &object_id, 0);
+        assert_eq!(rest, Some(json!({"player_id": "someone-else"})));
+    }
+
+    #[test]
+    fn a_payload_without_transform_is_all_reliable() {
+        let object_id = GorcObjectId::new().to_string();
+        let data = json!({"led_state": 2, "servergodot_ms": 1});
+        let frames = bitcode_frames(&input(&data, None, &object_id));
+        assert!(frames.transform.is_none());
+        let (_, _, _, payload) = decode_gorc(frames.update.as_ref().unwrap());
+        let update: ds_protocol::PropUpdate = bitcode::decode(&payload).unwrap();
+        assert_eq!(update.data.to_value().unwrap(), data, "without a transform, nothing moves to extra");
+    }
+
+    #[test]
+    fn declaring_a_sticky_key_bumps_the_epoch() {
+        let _streams = sharing_streams();
+        let id = GorcObjectId::new();
+        assert_eq!(epoch(id), 0);
+        queue_sticky(id, 0, "player", "move", &json!({"position": 1, "parent_id": "planet"}), &["parent_id"]);
+        queue_sticky(id, 0, "player", "move", &json!({"position": 2}), &["parent_id"]);
+        assert_eq!(epoch(id), 1);
+        queue_sticky(id, 0, "player", "move", &json!({"position": 3, "parent_id": "city"}), &["parent_id"]);
+        assert_eq!(epoch(id), 2);
+        assert_eq!(streams().get(&(id, 0, "move".to_string())).unwrap().epoch, 2);
+        forget_object(id);
+        assert_eq!(epoch(id), 0);
+    }
+
+    use horizon_event_system::{AuthenticationStatus, Delivery, GorcInstanceManager, ListenerProfile, Transport};
+    use std::sync::Mutex;
+
+    /// Records what the delivery loop sends, and answers each player's format.
+    #[derive(Debug, Default)]
+    struct Recorder {
+        formats: HashMap<PlayerId, Format>,
+        frames: Mutex<Vec<(PlayerId, Delivery, Vec<u8>)>>,
+    }
+
+    impl Recorder {
+        fn sent_to(&self, player_id: PlayerId) -> Vec<(Delivery, Vec<u8>)> {
+            let frames = self.frames.lock().unwrap();
+            frames.iter().filter(|(p, _, _)| *p == player_id).map(|(_, d, b)| (*d, b.clone())).collect()
+        }
+    }
+
+    type Fut<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
+
+    impl ClientResponseSender for Recorder {
+        fn send_to_client(&self, player_id: PlayerId, data: Vec<u8>) -> Fut<'_, Result<(), String>> {
+            self.frames.lock().unwrap().push((player_id, Delivery::Reliable, data));
+            Box::pin(async { Ok(()) })
+        }
+        fn is_connection_active(&self, _: PlayerId) -> Fut<'_, bool> {
+            Box::pin(async { true })
+        }
+        fn get_auth_status(&self, _: PlayerId) -> Fut<'_, Option<AuthenticationStatus>> {
+            Box::pin(async { None })
+        }
+        fn kick(&self, _: PlayerId, _: Option<String>) -> Fut<'_, Result<(), String>> {
+            Box::pin(async { Ok(()) })
+        }
+        fn send_frame(&self, player_id: PlayerId, frame: Outbound) -> Fut<'_, Result<(), String>> {
+            self.frames.lock().unwrap().push((player_id, frame.delivery, frame.bytes.to_vec()));
+            Box::pin(async { Ok(()) })
+        }
+        fn connection_profile(&self, player_id: PlayerId) -> Fut<'_, Option<ListenerProfile>> {
+            let format = self.formats.get(&player_id).copied().unwrap_or_default();
+            Box::pin(async move { Some(ListenerProfile::new(Transport::WebTransport).with_format(format)) })
+        }
+    }
+
+    #[tokio::test]
+    async fn bitcode_recipients_get_unreliable_transforms_then_repeats() {
+        let _streams = STREAMS_LOCK.write().unwrap_or_else(|e| e.into_inner());
+        let (json_player, bitcode_player) = (PlayerId::new(), PlayerId::new());
+        let recorder = Arc::new(Recorder {
+            formats: HashMap::from([(json_player, Format::Json), (bitcode_player, Format::Bitcode)]),
+            ..Default::default()
+        });
+        let gorc = Arc::new(GorcInstanceManager::new());
+        let mut events = EventSystem::new();
+        events.set_gorc_instances(gorc.clone());
+        events.set_client_response_sender(recorder.clone());
+        let events = Arc::new(events);
+
+        let definition = ObjectDefinition::new("lod_test_box".to_string(), json!({"channels": [
+            {"zone": 0, "distance": 50.0, "frequency": 100.0, "properties": ["position", "rotation", "led"]}
+        ]}));
+        let definitions = Arc::new(DashMap::new());
+        definitions.insert("lod_test_box".to_string(), definition.clone());
+        let gorc_id = GorcObjectId::new();
+        let object = crate::genericprops::GenericProps::new(
+            definition,
+            json!({"position": {"x": 0.0, "y": 0.0, "z": 0.0}, "rotation": {"x": 0.0, "y": 0.0, "z": 0.0}, "led": 1}),
+            gorc_id.to_string(),
+        );
+        gorc.register_object_with_uuid(object, Vec3::new(0.0, 0.0, 0.0), Some(gorc_id)).await;
+        gorc.add_player(json_player, Vec3::new(1.0, 0.0, 0.0)).await;
+        gorc.add_player(bitcode_player, Vec3::new(2.0, 0.0, 0.0)).await;
+
+        let position = json!({"position": {"x": 1.0, "y": 0.0, "z": 0.0}, "rotation": {"x": 0.0, "y": 1.0, "z": 0.0}});
+        queue(gorc_id, 0, "lod_test_box", "move", &position);
+        let mut counters = Counters::default();
+        flush(&events, &definitions, &mut counters, Shard::ALL).await;
+
+        let json_frames = recorder.sent_to(json_player);
+        assert_eq!(json_frames.len(), 1);
+        assert_eq!(data_of(&json_frames[0].1), position, "JSON recipients get the envelope as before");
+
+        let bitcode_frames = recorder.sent_to(bitcode_player);
+        assert_eq!(bitcode_frames.len(), 1, "a move without other keys is a transform frame only");
+        assert_eq!(bitcode_frames[0].0, Delivery::Unreliable);
+        let (_, first_seq, _, _) = decode_gorc(&bytes::Bytes::from(bitcode_frames[0].1.clone()));
+
+        // No new version: the transform is repeated at the channel's rate, then the stream settles.
+        for _ in 0..TRANSFORM_REPEATS + 2 {
+            tokio::time::sleep(Duration::from_millis(15)).await;
+            flush(&events, &definitions, &mut counters, Shard::ALL).await;
+        }
+        let bitcode_frames = recorder.sent_to(bitcode_player);
+        assert_eq!(bitcode_frames.len(), 1 + TRANSFORM_REPEATS as usize);
+        assert!(bitcode_frames.iter().all(|(delivery, bytes)| {
+            *delivery == Delivery::Unreliable && decode_gorc(&bytes::Bytes::from(bytes.clone())).1 == first_seq
+        }));
+        assert_eq!(recorder.sent_to(json_player).len(), 1, "JSON recipients get no repeat");
+        assert!(!streams().get(&(gorc_id, 0, "move".to_string())).unwrap().pending);
+
+        // A change of another key is a reliable update, with the new transform.
+        queue(gorc_id, 0, "lod_test_box", "move", &json!({"position": {"x": 2.0, "y": 0.0, "z": 0.0}, "led": 0}));
+        flush(&events, &definitions, &mut counters, Shard::ALL).await;
+        let new_frames: Vec<_> = recorder.sent_to(bitcode_player).into_iter().skip(1 + TRANSFORM_REPEATS as usize).collect();
+        assert_eq!(new_frames.iter().map(|(d, _)| *d).collect::<Vec<_>>(), vec![Delivery::Reliable, Delivery::Unreliable]);
+        // Every repeat went out before the next version: the object had stopped.
+        assert_eq!((counters.repeats, counters.repeats_superseded), (TRANSFORM_REPEATS as u64, 0));
+
+        // A version that comes after one repeat only: that repeat filled a slot of a moving object.
+        tokio::time::sleep(Duration::from_millis(15)).await;
+        flush(&events, &definitions, &mut counters, Shard::ALL).await;
+        queue(gorc_id, 0, "lod_test_box", "move", &json!({"position": {"x": 3.0, "y": 0.0, "z": 0.0}, "led": 0}));
+        tokio::time::sleep(Duration::from_millis(15)).await;
+        flush(&events, &definitions, &mut counters, Shard::ALL).await;
+        assert_eq!((counters.repeats, counters.repeats_superseded), (TRANSFORM_REPEATS as u64 + 1, 1));
+        forget_object(gorc_id);
+    }
+
+    #[tokio::test]
+    async fn stamped_repeats_keep_the_seq_of_their_version() {
+        let _streams = STREAMS_LOCK.write().unwrap_or_else(|e| e.into_inner());
+        let bitcode_player = PlayerId::new();
+        let recorder = Arc::new(Recorder {
+            formats: HashMap::from([(bitcode_player, Format::Bitcode)]),
+            ..Default::default()
+        });
+        let gorc = Arc::new(GorcInstanceManager::new());
+        let mut events = EventSystem::new();
+        events.set_gorc_instances(gorc.clone());
+        events.set_client_response_sender(recorder.clone());
+        let events = Arc::new(events);
+
+        let definition = ObjectDefinition::new("lod_test_stamped".to_string(), json!({"channels": [
+            {"zone": 0, "distance": 50.0, "frequency": 100.0, "properties": ["position", "rotation"]}
+        ]}));
+        let definitions = Arc::new(DashMap::new());
+        definitions.insert("lod_test_stamped".to_string(), definition.clone());
+        let gorc_id = GorcObjectId::new();
+        let object = crate::genericprops::GenericProps::new(
+            definition,
+            json!({"position": {"x": 0.0, "y": 0.0, "z": 0.0}, "rotation": {"x": 0.0, "y": 0.0, "z": 0.0}}),
+            gorc_id.to_string(),
+        );
+        gorc.register_object_with_uuid(object, Vec3::new(0.0, 0.0, 0.0), Some(gorc_id)).await;
+        gorc.add_player(bitcode_player, Vec3::new(2.0, 0.0, 0.0)).await;
+
+        let stamped_move = |x: f64| json!({"position": {"x": x, "y": 0.0, "z": 0.0}, "rotation": {"x": 0.0, "y": 0.0, "z": 0.0},
+            RECEIVED_STAMP_KEY: 10});
+        let transforms = |recorder: &Recorder| -> Vec<(u16, serde_json::Value)> {
+            recorder.sent_to(bitcode_player).iter().map(|(delivery, bytes)| {
+                assert_eq!(*delivery, Delivery::Unreliable);
+                let (_, seq, _, payload) = decode_gorc(&bytes::Bytes::from(bytes.clone()));
+                let transform: ds_protocol::TransformUpdate = bitcode::decode(&payload).unwrap();
+                (seq, transform.extra.to_value().unwrap())
+            }).collect()
+        };
+
+        queue(gorc_id, 0, "lod_test_stamped", "move", &stamped_move(1.0));
+        let mut counters = Counters::default();
+        flush(&events, &definitions, &mut counters, Shard::ALL).await;
+        for _ in 0..TRANSFORM_REPEATS + 2 {
+            tokio::time::sleep(Duration::from_millis(15)).await;
+            flush(&events, &definitions, &mut counters, Shard::ALL).await;
+        }
+        let sent = transforms(&recorder);
+        assert_eq!(sent.len(), 1 + TRANSFORM_REPEATS as usize);
+        let first_seq = sent[0].0;
+        assert!(sent.iter().all(|(seq, _)| *seq == first_seq), "a repeat is the same version: {:?}", sent);
+        assert!(sent.iter().all(|(_, extra)| extra.get(SENT_STAMP_KEY).is_some()), "each send is stamped");
+
+        // The next version is a new position, under a newer seq.
+        queue(gorc_id, 0, "lod_test_stamped", "move", &stamped_move(2.0));
+        flush(&events, &definitions, &mut counters, Shard::ALL).await;
+        let sent = transforms(&recorder);
+        assert_eq!(sent.len(), 2 + TRANSFORM_REPEATS as usize);
+        assert_eq!(sent.last().unwrap().0, first_seq.wrapping_add(1));
+        forget_object(gorc_id);
+    }
+
+    #[test]
+    fn every_object_has_exactly_one_delivery_thread() {
+        let shards: Vec<Shard> = (0..4).map(|index| Shard { index, count: 4 }).collect();
+        let mut per_shard = [0usize; 4];
+        for _ in 0..1000 {
+            let id = GorcObjectId::new();
+            let owners: Vec<usize> = shards.iter().filter(|s| s.owns(id)).map(|s| s.index).collect();
+            assert_eq!(owners.len(), 1);
+            per_shard[owners[0]] += 1;
+            assert!(Shard::ALL.owns(id));
+        }
+        assert!(per_shard.iter().all(|n| *n > 150), "random ids spread over the threads: {:?}", per_shard);
+    }
+
+    #[test]
     fn plain_queue_has_no_sticky_variant() {
+        let _streams = sharing_streams();
         let id = GorcObjectId::new();
         queue(id, 0, "player", "move", &json!({"position": 1, "parent_id": "planet"}));
         queue(id, 0, "player", "move", &json!({"position": 2}));

@@ -28,11 +28,16 @@
 				"head_yaw",
 				"stance",
 				"floating",
+				"thrusting",
 				"seat",
 				"perforating",
 				"carrying",
 				"flashlight",
+				"torch_uv",
+				"datapad",
 				"carry_prompt",
+				"screen_event",
+				"mining_tool",
 				"scenename",
 				"name",
 				"parent_id",
@@ -40,6 +45,14 @@
 				"is_npc",
 				"conversation",
 				"npc_arrived"
+			]
+		},
+		{
+			"zone": 1,
+			"distance": 200.0,
+			"frequency": 1.0,
+			"properties": [
+				"appearance"
 			]
 		}
 	]

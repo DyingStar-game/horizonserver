@@ -1,0 +1,30 @@
+[package]
+name = "ds_godot_net"
+version = "0.1.0"
+edition = "2024"
+description = "GDExtension of the DyingStar Godot client: WebTransport + bitcode link to Horizon"
+publish = false
+
+# Its own workspace, out of the plugins': the plugins and Horizon must link the very same
+# tokio as the host (dylib ABI), this cdylib is loaded by Godot and has no such contract.
+[workspace]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# Godot 4.7, double precision: the project and its export templates are built with
+# precision=double (godotandaddons), a single-precision extension would not load.
+godot = { version = "=0.5.5", features = ["api-custom-json", "double-precision"] }
+horizon_protocol = { path = "../Horizon/crates/horizon_protocol" }
+ds_protocol = { path = "../ds_protocol" }
+serde = "1"
+serde_json = "1"
+tokio = { version = "1.48", features = ["rt-multi-thread", "sync", "time", "macros"] }
+# dangerous-configuration: tls_verify = false, honoured by debug builds only (local Horizon
+# with a self-signed certificate).
+wtransport = { version = "0.6.1", features = ["dangerous-configuration"] }
+
+[profile.release]
+lto = "thin"
+strip = true

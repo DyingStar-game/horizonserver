@@ -13,12 +13,12 @@
 //! `context.tokio_handle()` nor `block_on` (see the notes in lib.rs).
 
 use crate::handlers::initial_objects::{
-    handle_activate_objects, handle_dormant_objects, handle_drop_dormant, handle_freeze_object, handle_initial_object, handle_world_objects,
+    handle_activate_objects, handle_dormant_objects, handle_drop_dormant, handle_freeze_object, handle_initial_object, handle_initial_object_paced, handle_world_objects, Pace,
 };
-use crate::mesh::{plan_split_n, MeshRules, Rule};
+use crate::mesh::{plan_split_n, plan_village_split, MeshRules, VILLAGE_SPLIT_MAX_PLAYERS_SHARE};
 use crate::server::{Server, ServerState};
 
-use ds_common::events::GenericPropsRequest;
+use ds_common::events::{ObjectsSnapshot, SnapshotItem};
 use ds_common::mesh_load::{PoolLoad, ServerLoad};
 use ds_common::world::{ObjectWorld, Point3};
 use ds_common::zone::{is_world_object, zones_contain, zones_label, Zone};
@@ -50,7 +50,7 @@ pub struct ServerInfo {
     pub dormant_spawn: bool,
 }
 
-pub type SnapshotItems = HashMap<String, GenericPropsRequest>;
+pub type SnapshotItems = HashMap<String, SnapshotItem>;
 
 /// Everything the manager loop reacts to.
 #[derive(Debug)]
@@ -64,6 +64,9 @@ pub enum ManagerMessage {
     ServerReconnected { uuid: String, zones: Vec<Zone> },
     /// The transition in flight finished (well or not).
     OpDone(OpResult),
+    /// genericprops cannot get villages spawned fast enough: `server_uuid` owns these
+    /// unspawned villages (their worlds) but already waits for as many as it may spawn.
+    VillagesWanted { server_uuid: String, villages: Vec<ObjectWorld> },
 }
 
 #[derive(Debug, Default, Clone)]
@@ -90,6 +93,9 @@ struct SplitRecord {
     /// Exact zones of the parent before the split, restored on merge.
     parent_zones_before: Vec<Zone>,
     merge_hits: u32,
+    /// A split for villages: not merged back before then, the child starts with no player
+    /// and its villages take a while to spawn (see VILLAGE_SPLIT_HOLD).
+    hold_until: Option<Instant>,
 }
 
 impl SplitRecord {
@@ -100,9 +106,11 @@ impl SplitRecord {
 
 /// A zone transition, run off the manager loop by the `MeshWorker`.
 enum MeshOp {
-    /// `parent` is overloaded: part of its zones go to idle `children` (one, or two
-    /// when it holds several zones: the plan decides how many it actually uses).
-    Split { parent: Server, children: Vec<Server> },
+    /// `parent` is overloaded: part of its zones go to idle `children` (as many as
+    /// `MeshRules::split_children_wanted`: the plan decides how many it actually uses).
+    /// With `villages` (a split for villages): the cut shares out those unspawned villages
+    /// instead of the players, onto one child (see `mesh::plan_village_split`).
+    Split { parent: Server, children: Vec<Server>, villages: Option<Vec<ObjectWorld>> },
     /// The pair of a split is under the merge rule: the child gives its zones back.
     Merge { record: SplitRecord, survivor: Server, released: Server },
     /// Zones nobody simulates (first start, owner gone) go to `server`.
@@ -116,10 +124,11 @@ enum MeshOp {
 impl MeshOp {
     fn label(&self) -> String {
         match self {
-            MeshOp::Split { parent, children } => format!(
-                "split {} -> {}",
+            MeshOp::Split { parent, children, villages } => format!(
+                "split {} -> {}{}",
                 parent.server_name,
-                children.iter().map(|c| c.server_name.as_str()).collect::<Vec<_>>().join(",")
+                children.iter().map(|c| c.server_name.as_str()).collect::<Vec<_>>().join(","),
+                if villages.is_some() { " (villages)" } else { "" }
             ),
             MeshOp::Merge { survivor, released, .. } => format!("merge {} into {}", released.server_name, survivor.server_name),
             MeshOp::Adopt { server, zones } => format!("adopt [{}] on {}", zones_label(zones), server.server_name),
@@ -132,7 +141,7 @@ impl MeshOp {
     /// are not held to the silence timeout while it runs.
     fn servers(&self) -> Vec<String> {
         match self {
-            MeshOp::Split { parent, children } => std::iter::once(parent).chain(children).map(|s| s.uuid.clone()).collect(),
+            MeshOp::Split { parent, children, .. } => std::iter::once(parent).chain(children).map(|s| s.uuid.clone()).collect(),
             MeshOp::Merge { survivor, released, .. } => vec![survivor.uuid.clone(), released.uuid.clone()],
             MeshOp::Adopt { server, .. } | MeshOp::Grant { server, .. } | MeshOp::Reseed { server } => vec![server.uuid.clone()],
         }
@@ -205,6 +214,13 @@ const LOADING_SILENCE_TIMEOUT: Duration = Duration::from_secs(420);
 const SETTLE_AFTER_OP: Duration = Duration::from_secs(15);
 /// A serverinfo older than this (sent once a second) cannot back a merge.
 const MERGE_SAMPLE_MAX_AGE: Duration = Duration::from_secs(3);
+/// A server merged into must run at least this fast: ex absorbed three merges in a row at
+/// tps 20-34 with a player on it, who moved in jerks and fell through the ground
+/// (preprod, 2026-10-17).
+const MERGE_MIN_TPS: u8 = 50;
+/// How fast a merge sends the released zones' objects to the survivor, which keeps
+/// simulating its players meanwhile (see handle_initial_object_paced).
+const MERGE_PACE: Pace = Pace { batch: 250, pause: Duration::from_millis(250) };
 /// Time allowed for the websocket handshake of a reconnection attempt.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// How often the manager wakes up to check for silent servers when idle.
@@ -224,6 +240,11 @@ const ACCEPT_SILENCE: Duration = Duration::from_secs(10);
 const OUTBOX_BACKLOG: usize = 1000;
 /// Port of a Godot server when `GAME_SERVER_HOST` gives only a host.
 const GAME_SERVER_PORT: u16 = 8980;
+/// A pair split for villages is not merged back before this: the child starts with no
+/// player and the merge rule (players:25) would undo it before its villages are spawned.
+const VILLAGE_SPLIT_HOLD: Duration = Duration::from_secs(180);
+/// Idle servers a split for villages leaves to the splits for players.
+const VILLAGE_SPLIT_SPARE_IDLE: usize = 2;
 
 /// The pool read from DNS: `host` resolves to every Godot server (on kubernetes, a
 /// headless service answers with the IP of each ready pod). It is resolved again
@@ -370,8 +391,11 @@ impl ServerManager {
     /// The idle servers a split of `parent` may use: two when it holds several
     /// zones (one of them may carry the crowd and be cut between two children,
     /// see `plan_split_n`), else one.
-    fn split_children(&self, parent: &Server) -> Vec<Server> {
-        let wanted = if parent.zones().len() >= 2 { 2 } else { 1 };
+    /// The idle servers a split of `parent`, holding `players`, hands zones to: as many as
+    /// `MeshRules::split_children_wanted` asks for, or what the pool still has.
+    fn split_children(&self, parent: &Server, players: u32) -> Vec<Server> {
+        let zones = parent.zones().len();
+        let wanted = self.rules.as_ref().map_or(1, |r| r.split_children_wanted(zones, players));
         self.idle_servers(&parent.uuid, wanted)
     }
 
@@ -441,8 +465,8 @@ impl ServerManager {
         }
 
         // Planets already created in Horizon (they arrive from resourcesdynamic
-        // asynchronously, possibly before us).
-        match self.worker().request_snapshot().await {
+        // asynchronously, possibly before us). The world objects only.
+        match self.worker().request_snapshot_in(&[], Vec::new()).await {
             Ok(items) => {
                 self.learn_planets_from(&items);
                 for server in self.servers.iter().filter(|s| s.state() == ServerState::Online) {
@@ -508,7 +532,13 @@ impl ServerManager {
                 }
                 ManagerMessage::ServerOffline(uuid) => self.on_server_offline(uuid, &context),
                 ManagerMessage::ServerReconnected { uuid, zones } => self.on_server_reconnected(uuid, zones, &context),
-                ManagerMessage::OpDone(result) => self.on_op_done(result),
+                ManagerMessage::VillagesWanted { server_uuid, villages } => self.on_villages_wanted(server_uuid, villages),
+                ManagerMessage::OpDone(result) => {
+                    self.on_op_done(result);
+                    // Its servers are no longer busy: the queued arrivals may go now, not
+                    // at the next periodic publication.
+                    self.publish_load(&context);
+                }
             }
         }
         warn!("[mesh] ServerManager channel closed, stopping");
@@ -533,19 +563,52 @@ impl ServerManager {
             error!("[mesh] failed to register props:planet handler: {}", e);
         }
 
-        let pending = Arc::clone(&self.pending_snapshots);
-        let result = events.on_plugin("gameserver", "objects_snapshot", move |event: serde_json::Value| {
-            let request_id = event["request_id"].as_str().unwrap_or_default().to_string();
-            let Some(sender) = pending.lock().unwrap().remove(&request_id) else {
-                warn!("[mesh] objects_snapshot for unknown request {}", request_id);
-                return Ok(());
-            };
-            match serde_json::from_value::<SnapshotItems>(event["items"].clone()) {
-                Ok(items) => {
-                    let _ = sender.send(items);
-                }
-                Err(e) => error!("[mesh] objects_snapshot {} unparsable: {}", request_id, e),
+        // A player's init asked for (or not) the clocks of its moves: kept until it leaves.
+        let result = events.on_plugin("gameserver", "move_clocks", move |event: serde_json::Value| {
+            let player_uuid = event["player_uuid"].as_str().unwrap_or_default();
+            if !player_uuid.is_empty() {
+                crate::handlers::move_clocks::set(player_uuid, event["enabled"].as_bool().unwrap_or(false));
             }
+            Ok(())
+        }).await;
+        if let Err(e) = result {
+            error!("[mesh] failed to register gameserver:move_clocks handler: {}", e);
+        }
+
+        // A player's init brought the realm roles of its verified token: kept until it leaves.
+        let result = events.on_plugin("gameserver", "player_roles", move |event: serde_json::Value| {
+            let player_uuid = event["player_uuid"].as_str().unwrap_or_default();
+            if !player_uuid.is_empty() {
+                let roles: Vec<String> = event["roles"]
+                    .as_array()
+                    .map(|roles| roles.iter().filter_map(|r| r.as_str().map(str::to_string)).collect())
+                    .unwrap_or_default();
+                crate::handlers::player_roles::set(player_uuid, roles);
+            }
+            Ok(())
+        }).await;
+        if let Err(e) = result {
+            error!("[mesh] failed to register gameserver:player_roles handler: {}", e);
+        }
+
+        let tx = self.tx.clone();
+        let result = events.on_plugin("gameserver", "villages_wanted", move |event: serde_json::Value| {
+            let server_uuid = event["server_uuid"].as_str().unwrap_or_default().to_string();
+            let villages: Vec<ObjectWorld> = serde_json::from_value(event["villages"].clone()).unwrap_or_default();
+            if server_uuid.is_empty() || villages.is_empty() {
+                return Ok(());
+            }
+            // Dropped when the loop is busy: genericprops asks again 10 s later.
+            let _ = tx.try_send(ManagerMessage::VillagesWanted { server_uuid, villages });
+            Ok(())
+        }).await;
+        if let Err(e) = result {
+            error!("[mesh] failed to register gameserver:villages_wanted handler: {}", e);
+        }
+
+        let pending = Arc::clone(&self.pending_snapshots);
+        let result = events.on_plugin("gameserver", "objects_snapshot", move |snapshot: ObjectsSnapshot| {
+            deliver_snapshot(&pending, snapshot);
             Ok(())
         }).await;
         if let Err(e) = result {
@@ -706,6 +769,39 @@ impl ServerManager {
 
     // ----------------------------------------------------------- messages
 
+    /// genericprops cannot get villages spawned fast enough (VillagesWanted): split
+    /// `server_uuid` for its villages onto an idle server when it is free to, leaving
+    /// VILLAGE_SPLIT_SPARE_IDLE idle servers to the splits for players.
+    fn on_villages_wanted(&mut self, server_uuid: String, villages: Vec<ObjectWorld>) {
+        if !self.rules.as_ref().is_some_and(|r| r.village_split) {
+            return;
+        }
+        let Some(server) = self.server(&server_uuid).filter(|s| s.is_running()) else { return };
+        let loading = self.samples.get(&server_uuid).is_some_and(|s| s.loading);
+        let queued = self.queue.iter().any(|op| op.servers().contains(&server_uuid));
+        if loading || queued || self.settling(&server_uuid) || self.busy_servers().contains(&server_uuid) {
+            return;
+        }
+        // Over its split rule: the split for players goes first (it hands villages over
+        // too). Split for villages every 10 s, two servers at 95 players and 37-42 tps were
+        // kept settling and never split for their players (preprod, 2026-10-21).
+        let players = |s: &ServerSamples| s.players.max(server.players_count().min(u16::MAX as usize) as u16);
+        let overloaded = self.samples.get(&server_uuid).zip(self.rules.as_ref())
+            .is_some_and(|(s, rules)| rules.split.split_hit(s.tps, players(s)));
+        if overloaded {
+            debug!("[mesh] {} is over its split rule: no split for villages, the one for players goes first", server.server_name);
+            return;
+        }
+        let idle = self.idle_servers(&server_uuid, VILLAGE_SPLIT_SPARE_IDLE + 1);
+        if idle.len() <= VILLAGE_SPLIT_SPARE_IDLE {
+            debug!("[mesh] {} wants its {} villages spawned elsewhere but the pool is short", server.server_name, villages.len());
+            return;
+        }
+        info!("[mesh] {} owns {} villages to spawn and waits for its own: splitting it for villages", server.server_name, villages.len());
+        let children = idle.into_iter().take(1).collect();
+        self.queue.push_back(MeshOp::Split { parent: server, children, villages: Some(villages) });
+    }
+
     fn on_planets_discovered(&mut self, planets: Vec<(String, String)>) {
         let new_zones: Vec<Zone> = planets
             .into_iter()
@@ -747,12 +843,17 @@ impl ServerManager {
         // Godot's count lags (stuck at 68 while 91 players were assigned to it,
         // 2026-10-02): judge the split on the larger of the two counts.
         let players = info.players_number.max(server.players_count().min(u16::MAX as usize) as u16);
-        samples.loading = false;
-
-        let Some(rules) = self.rules.clone() else { return };
+        let was_loading = std::mem::replace(&mut samples.loading, false);
         // While zones move around, every count describes a layout that is about
         // to change: no decision on it, and no run-up of hits either.
         let settling = samples.settle_until.map_or(false, |until| now < until);
+        if was_loading {
+            // Done loading the zones it was handed (end of a split / merge): it may take
+            // the queued arrivals again, tell genericprops now.
+            self.publish_load(context);
+        }
+
+        let Some(rules) = self.rules.clone() else { return };
         if settling || self.busy_servers().contains(&info.uuid) {
             if let Some(samples) = self.samples.get_mut(&info.uuid) {
                 samples.split_hits = 0;
@@ -769,10 +870,10 @@ impl ServerManager {
         }
         if samples.split_hits >= rules.split_after {
             samples.split_hits = 0;
-            let children = self.split_children(&server);
+            let children = self.split_children(&server, players as u32);
             match children.is_empty() {
-                false => self.queue.push_back(MeshOp::Split { parent: server, children }),
-                true => warn!("[mesh] {} is overloaded (rule {:?}) but no idle server is available in the pool", server.server_name, rules.split),
+                false => self.queue.push_back(MeshOp::Split { parent: server, children, villages: None }),
+                true => warn!("[mesh] {} is overloaded (rule {}) but no idle server is available in the pool", server.server_name, rules.split),
             }
             return;
         }
@@ -796,7 +897,7 @@ impl ServerManager {
                     "players_godot": samples.map(|x| x.players),
                     "players_horizon": s.players_count(),
                     "pending": s.pending.load(std::sync::atomic::Ordering::Relaxed),
-                    "outbox": s.outbox_pending.load(std::sync::atomic::Ordering::Relaxed),
+                    "outbox": s.outbox_pending(),
                     "split_hits": samples.map(|x| x.split_hits),
                     "settling": self.settling(&s.uuid),
                     "loading": samples.map_or(false, |x| x.loading),
@@ -817,6 +918,10 @@ impl ServerManager {
     /// Sends the load of the running servers to genericprops, which places the new
     /// players in the villages of the least loaded server that can take them.
     fn publish_load(&self, context: &Arc<dyn ServerContext>) {
+        // A server in a split / merge is about to lose or gain zones, and a child warming
+        // up reports a serverinfo (so "accepting") long before its players are moved: the
+        // arrivals wait for the op, in genericprops' queue.
+        let busy = self.busy_servers();
         let servers: Vec<ServerLoad> = self
             .running_servers()
             .into_iter()
@@ -834,18 +939,25 @@ impl ServerManager {
                     (Some(rules), Some(x)) => rules.placement_full(x.tps, players),
                     _ => false,
                 };
+                let responsive = reporting
+                    && s.outbox_pending() < OUTBOX_BACKLOG;
                 ServerLoad {
                     uuid: s.uuid.clone(),
                     name: s.server_name.clone(),
                     players: players as u32,
-                    accepting: reporting && !loading && !overloaded
-                        && s.outbox_pending.load(std::sync::atomic::Ordering::Relaxed) < OUTBOX_BACKLOG,
+                    accepting: responsive && !loading && !overloaded && !busy.contains(&s.uuid),
+                    tps: samples.map_or(0, |x| x.tps),
+                    loading,
+                    responsive,
+                    busy: busy.contains(&s.uuid),
                     zones: s.zones(),
                 }
             })
             .collect();
         let capacity = self.rules.as_ref().and_then(|r| r.placement_capacity);
-        let load = PoolLoad { servers, capacity };
+        let idle_servers = Some(self.idle_servers("", usize::MAX).len() as u32);
+        let ops_running = (self.in_flight.len() + self.queue.len()) as u32;
+        let load = PoolLoad { servers, capacity, idle_servers, ops_running };
         let events = context.events();
         crate::plugin_rt().spawn(async move {
             if let Err(e) = events.emit_plugin("genericprops", "servers_load", &load).await {
@@ -908,14 +1020,15 @@ impl ServerManager {
                         .map_or(false, |seen| now.duration_since(seen) > OVERLOAD_SILENCE)
                 });
             if let Some(server) = overloaded {
-                let children = self.split_children(&server);
+                let players = server.players_count().min(u32::MAX as usize) as u32;
+                let children = self.split_children(&server, players);
                 match children.is_empty() {
                     false => {
                         warn!(
                             "[mesh] {} sent no serverinfo for {:?}: overloaded, splitting it",
                             server.server_name, OVERLOAD_SILENCE
                         );
-                        self.queue.push_back(MeshOp::Split { parent: server, children });
+                        self.queue.push_back(MeshOp::Split { parent: server, children, villages: None });
                     }
                     true => debug!("[mesh] {} is silent but no idle server is available in the pool", server.server_name),
                 }
@@ -1055,20 +1168,24 @@ impl ServerManager {
                 if server.state() != ServerState::Offline {
                     return;
                 }
-                // connect() blocks (no handshake timeout in the websocket crate): run it
-                // on a blocking thread and give up after a while — a hung Godot accepts
-                // the TCP connection but never answers the handshake.
-                let attempt = server.clone();
-                let connected = tokio::time::timeout(
+                // The handshake blocks (no timeout in the websocket crate): opened on a
+                // blocking thread and given up after a while — a hung Godot accepts the
+                // TCP connection but never answers it. Only a socket opened in time is
+                // installed: one completing later is dropped (closed) with its task, it
+                // must not become a connection nobody reads.
+                let address = server.address.clone();
+                let opened = tokio::time::timeout(
                     CONNECT_TIMEOUT,
-                    crate::plugin_rt().spawn_blocking(move || {
-                        let mut attempt = attempt;
-                        attempt.connect().map_err(|e| format!("{:?}", e))
-                    }),
+                    crate::plugin_rt().spawn_blocking(move || Server::open_socket(&address).map_err(|e| format!("{:?}", e))),
                 )
                 .await;
-                let result = match connected {
-                    Ok(Ok(result)) => result,
+                let result = match opened {
+                    Ok(Ok(Ok(client))) => {
+                        let mut server = server.clone();
+                        server.install(client);
+                        Ok(())
+                    }
+                    Ok(Ok(Err(e))) => Err(e),
                     Ok(Err(e)) => Err(format!("connect task failed: {}", e)),
                     Err(_) => Err(format!("no websocket handshake within {:?}", CONNECT_TIMEOUT)),
                 };
@@ -1092,6 +1209,10 @@ impl ServerManager {
 
     fn evaluate_merge(&mut self, rules: &MeshRules) {
         let busy = self.busy_servers();
+        // One merge at a time: when the NPCs left, four ran at once and one survivor took
+        // three in a row (preprod, 2026-10-17). The pool shrinks slower, its servers stay up.
+        let merging = self.in_flight.iter().any(|op| op.label.starts_with("merge "))
+            || self.queue.iter().any(|op| matches!(op, MeshOp::Merge { .. }));
         let mut to_merge: Option<SplitRecord> = None;
         for idx in 0..self.split_history.len() {
             let record = self.split_history[idx].clone();
@@ -1099,7 +1220,8 @@ impl ServerManager {
                 self.split_history[idx].merge_hits = 0;
                 continue;
             };
-            if !p.is_running() || !c.is_running() || self.settling(&p.uuid) || self.settling(&c.uuid)
+            let held = record.hold_until.is_some_and(|until| Instant::now() < until);
+            if held || !p.is_running() || !c.is_running() || self.settling(&p.uuid) || self.settling(&c.uuid)
                 || busy.contains(&p.uuid) || busy.contains(&c.uuid)
             {
                 self.split_history[idx].merge_hits = 0;
@@ -1127,10 +1249,11 @@ impl ServerManager {
             // reads ~0 right after a split and merged 200+ players back onto one
             // server (preprod, 2026-10-01). Horizon's own count is what was handed over.
             let players = |s: &ServerSamples, server: &Server| s.players.max(server.players_count().min(u16::MAX as usize) as u16);
-            let hit = rules.merge.merge_hit((sp.tps, players(sp, &p)), (sc.tps, players(sc, &c)));
+            let hit = rules.merge.merge_hit((sp.tps, players(sp, &p)), (sc.tps, players(sc, &c)))
+                && sp.tps >= MERGE_MIN_TPS;
             let record = &mut self.split_history[idx];
             record.merge_hits = if hit { record.merge_hits + 1 } else { 0 };
-            if record.merge_hits >= rules.merge_after && to_merge.is_none() {
+            if record.merge_hits >= rules.merge_after && to_merge.is_none() && !merging {
                 record.merge_hits = 0;
                 to_merge = Some(record.clone());
             }
@@ -1145,7 +1268,6 @@ impl ServerManager {
 
     async fn send_servers_info_to_clients(&self, context: &Arc<dyn ServerContext>, serverinfo: &ServerInfo, server: &Server) {
         let events = context.events();
-        let sender = events.get_client_response_sender();
 
         let event = json!({
             "godotserver": {
@@ -1180,14 +1302,15 @@ impl ServerManager {
         crate::plugin_rt().spawn(async move {
             for player_id in player_ids.iter() {
                 client_event["player_id"] = player_id.clone().into();
-                let data = serde_json::to_vec(&client_event).unwrap_or_default();
-                if let Some(sender_arc) = &sender {
-                    let obj_player_id = PlayerId::from_str(player_id.as_str()).unwrap_or_else(|_| PlayerId::new());
-                    if let Err(e) = sender_arc.send_to_client(obj_player_id, data).await {
-                        warn!("Failed to send serverinfo to player {}: {}", player_id, e);
-                    }
-                } else {
-                    warn!("No client response sender available to send event to player {}", player_id);
+                let obj_player_id = PlayerId::from_str(player_id.as_str()).unwrap_or_else(|_| PlayerId::new());
+                // In the player's format: this JSON to a JSON client, a serverinfo event to a bitcode one.
+                if let Err(e) = ds_common::client::send_message(
+                    &events,
+                    obj_player_id,
+                    ds_protocol::messages::server_events::SERVER_INFO,
+                    &client_event,
+                ).await {
+                    warn!("Failed to send serverinfo to player {}: {}", player_id, e);
                 }
             }
         });
@@ -1198,11 +1321,10 @@ impl ServerManager {
 /// player with a `seat`. A player on foot has a parent too (planet frame,
 /// apartment), which must not be held back.
 fn ridden_objects(items: &SnapshotItems) -> HashSet<String> {
-    let text = |i: &GenericPropsRequest, key: &str| i.object_data.get(key).and_then(|v| v.as_str()).unwrap_or("").to_string();
     items
         .values()
-        .filter(|i| i.object_type == "player" && !text(i, "seat").is_empty())
-        .map(|i| text(i, "parent_id"))
+        .filter(|i| i.object_type == "player" && i.seat.as_deref().is_some_and(|seat| !seat.is_empty()))
+        .filter_map(|i| i.parent_id.clone())
         .filter(|parent| !parent.is_empty())
         .collect()
 }
@@ -1227,8 +1349,8 @@ fn log_freeze_coverage(parent: &Server, items: &SnapshotItems, before: &[Zone], 
     let (mut frozen, mut in_lost, mut managed_frozen) = (0usize, 0usize, 0usize);
     let mut missed: Vec<String> = Vec::new();
     for item in items.values().filter(|i| !is_world_object(&i.object_type)) {
-        let Some(world) = ObjectWorld::from_object_data(&item.object_data) else { continue };
-        if zones_contain(keep, &world) {
+        let world = &item.world;
+        if zones_contain(keep, world) {
             continue;
         }
         frozen += 1;
@@ -1236,7 +1358,7 @@ fn log_freeze_coverage(parent: &Server, items: &SnapshotItems, before: &[Zone], 
         if is_managed {
             managed_frozen += 1;
         }
-        if zones_contain(before, &world) {
+        if zones_contain(before, world) {
             in_lost += 1;
             if !is_managed {
                 missed.push(format!("{}:{}", item.object_type, item.object_uuid));
@@ -1250,11 +1372,20 @@ fn log_freeze_coverage(parent: &Server, items: &SnapshotItems, before: &[Zone], 
     );
 }
 
+/// Hands a `gameserver:objects_snapshot` to the op waiting for it (`request_snapshot_with`).
+fn deliver_snapshot(pending: &Mutex<HashMap<String, oneshot::Sender<SnapshotItems>>>, snapshot: ObjectsSnapshot) {
+    let Some(sender) = pending.lock().unwrap().remove(&snapshot.request_id) else {
+        warn!("[mesh] objects_snapshot for unknown request {}", snapshot.request_id);
+        return;
+    };
+    let _ = sender.send(snapshot.items);
+}
+
 fn planets_in(items: &SnapshotItems) -> Vec<(String, String)> {
     items
         .values()
         .filter(|i| i.object_type == "planet")
-        .map(|i| (i.object_uuid.clone(), i.object_data["name"].as_str().unwrap_or_default().to_string()))
+        .map(|i| (i.object_uuid.clone(), i.name.clone().unwrap_or_default()))
         .collect()
 }
 
@@ -1273,13 +1404,14 @@ impl MeshWorker {
     async fn run(self, op: MeshOp) -> OpResult {
         let servers = op.servers();
         match op {
-            MeshOp::Split { parent, children } => self.split(&parent, &children, &servers).await,
+            MeshOp::Split { parent, children, villages } => self.split(&parent, &children, &servers, villages).await,
             MeshOp::Merge { record, survivor, released } => self.merge(record, &survivor, &released, &servers).await,
             MeshOp::Adopt { server, zones } => self.adopt_zones(&server, zones, &servers).await,
             MeshOp::Grant { server, gained } => self.grant_zones(&server, &gained, &servers).await,
             MeshOp::Reseed { server } => {
                 let mut result = OpResult::nothing(&servers);
-                if let Ok(items) = self.request_snapshot().await {
+                // No zone: the world objects only, what it preloads.
+                if let Ok(items) = self.request_snapshot_in(&[], Vec::new()).await {
                     result.planets = planets_in(&items);
                     let _ = handle_world_objects(&items, &server);
                 }
@@ -1288,24 +1420,36 @@ impl MeshWorker {
         }
     }
 
-    /// Asks genericprops for every object (with `_world`) and waits for the answer.
-    async fn request_snapshot(&self) -> Result<SnapshotItems, String> {
-        self.request_snapshot_of(None).await
+    /// Asks genericprops for the objects lying in `zones`, plus the world objects
+    /// (planets, stars) and `also` (what one of the op's servers simulates, wherever
+    /// it lies now), and waits for the answer. Every op used to read the whole world:
+    /// 52k objects took ~5.7 s to build and come back under load, past the 5 s
+    /// timeout, and every split aborted (preprod 2026-11-03).
+    async fn request_snapshot_in(&self, zones: &[Zone], also: Vec<String>) -> Result<SnapshotItems, String> {
+        self.request_snapshot_with(json!({ "zones": zones, "also": also })).await
     }
 
-    /// Same, for the listed objects only (`None`: every object). Building the whole
-    /// world took ~2.5 s under load (20k objects): a hand-over refreshing only its
-    /// players and their vehicles from it spawned them 2-3 s in the past.
-    async fn request_snapshot_of(&self, uuids: Option<Vec<String>>) -> Result<SnapshotItems, String> {
+    /// The listed objects only. A hand-over refreshing its players and their vehicles
+    /// from a whole-world snapshot spawned them 2-3 s in the past.
+    async fn request_snapshot_of(&self, uuids: Vec<String>) -> Result<SnapshotItems, String> {
+        self.request_snapshot_with(json!({ "uuids": uuids })).await
+    }
+
+    /// What `server` simulates: kept in the snapshot of an op on its zones even if it
+    /// already wandered out of them.
+    fn simulated_by(server: &Server) -> Vec<String> {
+        let mut uuids: Vec<String> = server.managed_objects.lock().unwrap().iter().cloned().collect();
+        uuids.extend(server.managed_players.lock().unwrap().iter().cloned());
+        uuids
+    }
+
+    async fn request_snapshot_with(&self, mut request: serde_json::Value) -> Result<SnapshotItems, String> {
         let request_id = uuid::Uuid::new_v4().to_string();
         let (tx, rx) = oneshot::channel::<SnapshotItems>();
         self.pending_snapshots.lock().unwrap().insert(request_id.clone(), tx);
 
         let timeout = self.rules.as_ref().map(|r| r.snapshot_timeout).unwrap_or(Duration::from_secs(5));
-        let request = match uuids {
-            Some(uuids) => json!({ "request_id": request_id, "uuids": uuids }),
-            None => json!({ "request_id": request_id }),
-        };
+        request["request_id"] = json!(request_id);
         if let Err(e) = self.context.events().emit_plugin("genericprops", "get_objects_snapshot", &request).await {
             self.pending_snapshots.lock().unwrap().remove(&request_id);
             return Err(format!("emit get_objects_snapshot failed: {}", e));
@@ -1322,9 +1466,12 @@ impl MeshWorker {
 
     // ------------------------------------------------------ split / merge
 
-    async fn split(&self, parent: &Server, children: &[Server], op_servers: &[String]) -> OpResult {
+    async fn split(&self, parent: &Server, children: &[Server], op_servers: &[String], villages: Option<Vec<ObjectWorld>>) -> OpResult {
         let mut result = OpResult::nothing(op_servers);
-        let items = match self.request_snapshot().await {
+        let parent_zones = parent.zones();
+        // The players, habs and props the plan and the hand-over look at all lie in
+        // the parent's zones; the children's zones are cut from them.
+        let items = match self.request_snapshot_in(&parent_zones, Self::simulated_by(parent)).await {
             Ok(items) => items,
             Err(e) => {
                 error!("[mesh] split of {} aborted: {}", parent.server_name, e);
@@ -1333,19 +1480,44 @@ impl MeshWorker {
         };
         result.planets = planets_in(&items);
 
-        let parent_zones = parent.zones();
         let players: Vec<ObjectWorld> = items
             .values()
             .filter(|i| i.object_type == "player")
-            .filter_map(|i| ObjectWorld::from_object_data(&i.object_data))
+            .map(|i| i.world.clone())
             .collect();
-        let Some(plan) = plan_split_n(&parent_zones, &players, children.len()) else {
-            error!("[mesh] {} has no zones to split", parent.server_name);
-            return result;
+        // The habs of each village (by poi_uuid): the cuts keep clear of them when they can.
+        let mut habs: HashMap<String, Vec<ObjectWorld>> = HashMap::new();
+        for item in items.values().filter(|i| i.object_type == "spawnbuilding") {
+            if let Some(village) = item.poi_uuid.as_deref().filter(|s| !s.is_empty()) {
+                habs.entry(village.to_string()).or_default().push(item.world.clone());
+            }
+        }
+        let spawned: Vec<Vec<ObjectWorld>> = habs.into_values().collect();
+        let for_villages = villages.is_some();
+        let plan = match &villages {
+            // A split for villages: its villages to spawn are shared out, not its players.
+            Some(wanted) => match plan_village_split(&parent_zones, wanted, &players, &spawned) {
+                Some(plan) => plan,
+                None => {
+                    info!(
+                        "[mesh] split of {} for villages skipped: no cut gives a village to spawn without moving over {:.0}% of its players",
+                        parent.server_name, VILLAGE_SPLIT_MAX_PLAYERS_SHARE * 100.0
+                    );
+                    return result;
+                }
+            },
+            None => match plan_split_n(&parent_zones, &players, children.len(), &spawned) {
+                Some(plan) => plan,
+                None => {
+                    error!("[mesh] {} has no zones to split", parent.server_name);
+                    return result;
+                }
+            },
         };
-        // Over the players rule with nobody in its zones to give away: the count
-        // still describes players it already handed over. Nothing to gain here.
-        if plan.give_players() == 0 && matches!(self.rules.as_ref().map(|r| r.split), Some(Rule::Players(_))) {
+        // Nobody in its zones to give away: over the players rule, the count still
+        // describes players it already handed over; under the tps rule, moving only
+        // empty zones would not lighten it. Nothing to gain here.
+        if !for_villages && plan.give_players() == 0 && self.rules.as_ref().is_some_and(|r| r.split.players.is_some()) {
             warn!(
                 "[mesh] split of {} skipped: its zones [{}] hold no player to give away (count not settled yet?)",
                 parent.server_name, zones_label(&parent_zones)
@@ -1388,7 +1560,7 @@ impl MeshWorker {
         // players came from, not the one taken before the warm-up (see hand_over).
         let parent_players = parent.managed_players.lock().unwrap().clone();
         let woken = used.iter().all(|(child, _)| child.dormant_spawn());
-        let fresh = self.hand_over_many(&used, &items, self.warmup(), &parent_players).await;
+        let fresh = self.hand_over_many(&used, &items, self.warmup(), &parent_players, None).await;
         let mut current = overlay(items, fresh);
         // The children woke the players and their vehicles already (asleep path): the
         // parent lets go of them NOW, before its zones change — Godot applies a zone
@@ -1438,6 +1610,7 @@ impl MeshWorker {
                 child_uuid: child.uuid.clone(),
                 parent_zones_before: before.clone(),
                 merge_hits: 0,
+                hold_until: for_villages.then(|| Instant::now() + VILLAGE_SPLIT_HOLD),
             });
             before = plan.keep.iter().cloned().chain(plan.gives[i + 1..].iter().flat_map(|(z, _)| z.clone())).collect();
         }
@@ -1447,7 +1620,9 @@ impl MeshWorker {
 
     async fn merge(&self, record: SplitRecord, survivor: &Server, released: &Server, op_servers: &[String]) -> OpResult {
         let mut result = OpResult::nothing(op_servers);
-        let items = match self.request_snapshot().await {
+        let released_zones = released.zones();
+        // What moves is what lies in the released zones.
+        let items = match self.request_snapshot_in(&released_zones, Self::simulated_by(released)).await {
             Ok(items) => items,
             Err(e) => {
                 error!("[mesh] merge of {} into {} aborted: {}", released.server_name, survivor.server_name, e);
@@ -1457,7 +1632,6 @@ impl MeshWorker {
         };
         result.planets = planets_in(&items);
 
-        let released_zones = released.zones();
         let survivor_zones = record.parent_zones_before.clone();
         info!(
             "[mesh] merge {} into {}: zones=[{}] (taking back [{}])",
@@ -1477,7 +1651,7 @@ impl MeshWorker {
         let to_move: SnapshotItems = items
             .iter()
             .filter(|(_, i)| !is_world_object(&i.object_type))
-            .filter(|(_, i)| ObjectWorld::from_object_data(&i.object_data).map_or(false, |w| zones_contain(&released_zones, &w)))
+            .filter(|(_, i)| zones_contain(&released_zones, &i.world))
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
         let to_spawn: SnapshotItems = to_move
@@ -1490,11 +1664,11 @@ impl MeshWorker {
         // survivor's players were spawned from) still places in its zones: a player
         // who arrived there during the warm-up must leave with the others.
         let released_players = released.managed_players.lock().unwrap().clone();
-        let fresh = self.hand_over(survivor, &to_spawn, &survivor_zones, self.warmup(), &released_players).await;
+        let fresh = self.hand_over(survivor, &to_spawn, &survivor_zones, self.warmup(), &released_players, Some(MERGE_PACE)).await;
         let to_freeze: SnapshotItems = overlay(to_move, fresh)
             .into_iter()
             .filter(|(_, i)| !is_world_object(&i.object_type))
-            .filter(|(_, i)| ObjectWorld::from_object_data(&i.object_data).map_or(false, |w| zones_contain(&released_zones, &w)))
+            .filter(|(_, i)| zones_contain(&released_zones, &i.world))
             .collect();
         if let Err(e) = handle_freeze_object(&to_freeze, released, &[]) {
             error!("[mesh] freeze on {} failed: {}", released.server_name, e);
@@ -1515,11 +1689,11 @@ impl MeshWorker {
             error!("[mesh] could not start {} on the orphaned zones", server.server_name);
             return result;
         }
-        match self.request_snapshot().await {
+        match self.request_snapshot_in(&zones, Vec::new()).await {
             Ok(items) => {
                 result.planets = planets_in(&items);
                 // Nobody simulates these players any more: no point waiting.
-                self.hand_over(server, &items, &zones, Duration::ZERO, &[]).await;
+                self.hand_over(server, &items, &zones, Duration::ZERO, &[], None).await;
             }
             Err(e) => error!("[mesh] {} started on [{}] but the snapshot failed: {}", server.server_name, zones_label(&zones), e),
         }
@@ -1540,7 +1714,7 @@ impl MeshWorker {
         if !server.update_zones(zones.clone()) {
             return result;
         }
-        let items = match self.request_snapshot().await {
+        let items = match self.request_snapshot_in(gained, Vec::new()).await {
             Ok(items) => items,
             Err(e) => {
                 error!("[mesh] {} gained zones [{}] but the snapshot failed: {}", server.server_name, zones_label(gained), e);
@@ -1553,13 +1727,13 @@ impl MeshWorker {
         let to_spawn: SnapshotItems = items
             .into_iter()
             .filter(|(uuid, i)| !is_world_object(&i.object_type) && !managed.contains(uuid) && !players.contains(uuid))
-            .filter(|(_, i)| ObjectWorld::from_object_data(&i.object_data).map_or(false, |w| zones_contain(gained, &w)))
+            .filter(|(_, i)| zones_contain(gained, &i.world))
             .collect();
         if to_spawn.is_empty() {
             return result;
         }
         info!("[mesh] {} gained [{}]: sending {} objects it did not have", server.server_name, zones_label(gained), to_spawn.len());
-        self.hand_over(server, &to_spawn, &zones, Duration::ZERO, &[]).await;
+        self.hand_over(server, &to_spawn, &zones, Duration::ZERO, &[], None).await;
         result
     }
 
@@ -1577,9 +1751,9 @@ impl MeshWorker {
     /// snapshot and inside it in the fresh one; freezing from the first one erases
     /// them on the parent while the child, working from the fresh one, does not
     /// spawn them — nobody simulates them any more (preprod, 2026-09-20).
-    async fn hand_over(&self, server: &Server, items: &SnapshotItems, zones: &[Zone], warmup: Duration, also_players: &[String]) -> Option<SnapshotItems> {
+    async fn hand_over(&self, server: &Server, items: &SnapshotItems, zones: &[Zone], warmup: Duration, also_players: &[String], pace: Option<Pace>) -> Option<SnapshotItems> {
         let zones = zones.to_vec();
-        self.hand_over_many(&[(server, &zones)], items, warmup, also_players).await
+        self.hand_over_many(&[(server, &zones)], items, warmup, also_players, pace).await
     }
 
     /// `hand_over` to several servers at once, each for its own zones: the props
@@ -1590,7 +1764,9 @@ impl MeshWorker {
     /// The fresh snapshot holds the players and what they ride only: the players
     /// of `items`, `also_players` (those the releasing server simulates now, who
     /// may have arrived during the warm-up) and the objects seated players ride.
-    async fn hand_over_many(&self, targets: &[(&Server, &Vec<Zone>)], items: &SnapshotItems, warmup: Duration, also_players: &[String]) -> Option<SnapshotItems> {
+    ///
+    /// `pace` spreads the props over time (a merge: the survivor simulates players all along).
+    async fn hand_over_many(&self, targets: &[(&Server, &Vec<Zone>)], items: &SnapshotItems, warmup: Duration, also_players: &[String], pace: Option<Pace>) -> Option<SnapshotItems> {
         let (players, mut props): (SnapshotItems, SnapshotItems) =
             items.iter().map(|(k, v)| (k.clone(), v.clone())).partition(|(_, i)| i.object_type == "player");
         // A vehicle someone sits in moves with them: sent with the props, it would
@@ -1608,7 +1784,11 @@ impl MeshWorker {
         // Per target: the players sent to it asleep, when it can take them that way.
         let mut ready: Vec<(&Server, &Vec<Zone>, Option<HashSet<String>>)> = Vec::new();
         for (server, zones) in targets {
-            if let Err(e) = handle_initial_object(&props, server, zones) {
+            let sent = match pace {
+                Some(pace) => handle_initial_object_paced(&props, server, zones, pace).await,
+                None => handle_initial_object(&props, server, zones),
+            };
+            if let Err(e) = sent {
                 error!("[mesh] initial props to {} failed: {}", server.server_name, e);
                 continue;
             }
@@ -1638,7 +1818,7 @@ impl MeshWorker {
             let mut wanted: HashSet<String> = players.keys().cloned().collect();
             wanted.extend(also_players.iter().cloned());
             wanted.extend(ridden.iter().cloned());
-            match self.request_snapshot_of(Some(wanted.into_iter().collect())).await {
+            match self.request_snapshot_of(wanted.into_iter().collect()).await {
                 Ok(fresh) => {
                     fresh_players = Some(fresh.iter().filter(|(_, i)| i.object_type == "player").map(|(k, v)| (k.clone(), v.clone())).collect::<SnapshotItems>());
                     fresh_snapshot = Some(fresh);
@@ -1676,7 +1856,7 @@ impl MeshWorker {
                 source
                     .iter()
                     .filter(|(uuid, _)| !already_players.contains(*uuid))
-                    .filter(|(_, i)| ObjectWorld::from_object_data(&i.object_data).map_or(false, |w| zones_contain(zones, &w)))
+                    .filter(|(_, i)| zones_contain(zones, &i.world))
                     .map(|(k, v)| (k.clone(), v.clone()))
                     .collect()
             } else {
@@ -1714,8 +1894,8 @@ impl MeshWorker {
     async fn prewarm_players(&self, server: &Server, items: &SnapshotItems, zones: &[Zone]) {
         let mut by_planet: HashMap<String, Vec<Point3>> = HashMap::new();
         for item in items.values().filter(|i| i.object_type == "player") {
-            let Some(world) = ObjectWorld::from_object_data(&item.object_data) else { continue };
-            if !zones_contain(zones, &world) {
+            let world = &item.world;
+            if !zones_contain(zones, world) {
                 continue;
             }
             if let Some(planet) = &world.planet_uuid {
@@ -1789,5 +1969,78 @@ mod discovery_tests {
         let addresses = d.resolve().await.unwrap();
         assert!(!addresses.is_empty());
         assert!(addresses.iter().all(|a| a.starts_with("ws://") && a.ends_with(":8980")), "{:?}", addresses);
+    }
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+    use horizon_event_system::EventSystem;
+
+    fn item(uuid: &str) -> SnapshotItem {
+        SnapshotItem {
+            object_type: "box".into(),
+            object_uuid: uuid.into(),
+            world: ObjectWorld::space_at(Point3::new(1.0, 2.0, 3.0)),
+            parent_id: Some("hab".into()),
+            seat: None,
+            poi_uuid: None,
+            name: None,
+            object_data: serde_json::value::to_raw_value(&json!({"parent_id": "hab", "weight": 12.5})).unwrap(),
+        }
+    }
+
+    /// Only a seated player's parent is ridden: on foot, the parent is a planet or a building.
+    #[test]
+    fn ridden_objects_are_the_parents_of_seated_players() {
+        let player = |uuid: &str, parent: &str, seat: Option<&str>| {
+            let mut player = item(uuid);
+            player.object_type = "player".into();
+            player.parent_id = Some(parent.into());
+            player.seat = seat.map(str::to_string);
+            (uuid.to_string(), player)
+        };
+        let items: SnapshotItems = HashMap::from([
+            player("driver", "truck", Some("SeatDriver")),
+            player("walker", "planet", None),
+            player("left-the-seat", "building", Some("")),
+            player("no-parent", "", Some("SeatDriver")),
+            // A box "seated" in something is not a player.
+            ("box".to_string(), SnapshotItem { seat: Some("x".into()), parent_id: Some("shelf".into()), ..item("box") }),
+        ]);
+        assert_eq!(ridden_objects(&items), HashSet::from(["truck".to_string()]));
+    }
+
+    /// genericprops emits `ObjectsSnapshot` and the manager reads it back typed, through
+    /// the EventSystem as between the two plugins: the waiting op gets the items.
+    #[tokio::test]
+    async fn a_snapshot_reaches_the_op_waiting_for_it() {
+        let events = Arc::new(EventSystem::new());
+        let pending: Arc<Mutex<HashMap<String, oneshot::Sender<SnapshotItems>>>> = Arc::new(Mutex::new(HashMap::new()));
+        let handler_pending = Arc::clone(&pending);
+        events
+            .on_plugin("gameserver", "objects_snapshot", move |snapshot: ObjectsSnapshot| {
+                deliver_snapshot(&handler_pending, snapshot);
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let (tx, rx) = oneshot::channel();
+        pending.lock().unwrap().insert("wanted".to_string(), tx);
+
+        // Unknown request first: ignored, the waiting one stays pending.
+        let stray = ObjectsSnapshot { request_id: "stray".into(), items: HashMap::from([("x".to_string(), item("x"))]) };
+        events.emit_plugin("gameserver", "objects_snapshot", &stray).await.unwrap();
+        assert!(pending.lock().unwrap().contains_key("wanted"));
+
+        let items: SnapshotItems = ["a", "b"].iter().map(|u| (u.to_string(), item(u))).collect();
+        let answer = ObjectsSnapshot { request_id: "wanted".into(), items };
+        events.emit_plugin("gameserver", "objects_snapshot", &answer).await.unwrap();
+
+        let got = rx.await.expect("the op gets its snapshot");
+        assert_eq!(got.len(), 2);
+        assert_eq!(got["a"].world.local_position, Point3::new(1.0, 2.0, 3.0));
+        assert_eq!(got["a"].object_data.get(), r#"{"parent_id":"hab","weight":12.5}"#, "the properties arrive as they left");
+        assert!(pending.lock().unwrap().is_empty());
     }
 }

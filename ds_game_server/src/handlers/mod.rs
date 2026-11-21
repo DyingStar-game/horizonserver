@@ -4,6 +4,8 @@ pub mod player_movement;
 pub mod player_action;
 pub mod initial_objects;
 pub mod update_prop;
+pub mod move_clocks;
+pub mod player_roles;
 
 use horizon_event_system::EventError;
 use serde_json::Value;
@@ -25,10 +27,12 @@ pub struct Outbox {
 }
 
 impl Outbox {
-    /// Starts the writer thread of a new connection. `pending` counts the messages
-    /// queued and not written yet.
-    pub fn spawn(mut writer: Writer<TcpStream>, name: &str, pending: Arc<AtomicUsize>) -> Outbox {
-        pending.store(0, Ordering::Relaxed);
+    /// Starts the writer thread of a new connection, with its own count of the messages
+    /// queued and not written yet. Shared with the previous connection, the count was reset
+    /// here while the old writer still drained its queue and decremented it: it wrapped
+    /// around, and the server looked frozen (`outbox` >= OUTBOX_BACKLOG) for good.
+    pub fn spawn(mut writer: Writer<TcpStream>, name: &str) -> Outbox {
+        let pending = Arc::new(AtomicUsize::new(0));
         let (tx, rx) = std::sync::mpsc::channel::<OwnedMessage>();
         let counter = Arc::clone(&pending);
         let thread_name = format!("ws-out-{}", name);
@@ -48,6 +52,11 @@ impl Outbox {
         }
         Outbox { tx, pending }
     }
+
+    /// Messages queued and not written yet.
+    pub fn pending(&self) -> usize {
+        self.pending.load(Ordering::Relaxed)
+    }
 }
 
 /// The websocket writer to one Godot server, shared by every handler of that server.
@@ -56,6 +65,11 @@ pub type WsWriter = Arc<Mutex<Option<Outbox>>>;
 /// Queues one JSON message for the Godot server; never blocks. Fails when the
 /// connection is gone (no writer, or its thread stopped on a write error).
 pub fn send_ws(websocket: &WsWriter, tag: &str, message: &Value) -> Result<(), EventError> {
+    send_ws_text(websocket, tag, message.to_string())
+}
+
+/// `send_ws` of a message already written to JSON.
+pub fn send_ws_text(websocket: &WsWriter, tag: &str, message: String) -> Result<(), EventError> {
     let ws_guard = websocket.lock().map_err(|e| {
         error!("[{}] websocket lock error: {}", tag, e);
         EventError::HandlerExecution(format!("websocket lock error: {}", e))
@@ -65,7 +79,7 @@ pub fn send_ws(websocket: &WsWriter, tag: &str, message: &Value) -> Result<(), E
         return Err(EventError::HandlerExecution("No websocket writer available".to_string()));
     };
     outbox.pending.fetch_add(1, Ordering::Relaxed);
-    if outbox.tx.send(OwnedMessage::Text(message.to_string())).is_err() {
+    if outbox.tx.send(OwnedMessage::Text(message)).is_err() {
         outbox.pending.fetch_sub(1, Ordering::Relaxed);
         error!("[{}] websocket writer of the game server stopped", tag);
         return Err(EventError::HandlerExecution("Message blocked: writer stopped".to_string()));

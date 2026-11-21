@@ -22,4 +22,11 @@ pub struct PlayerMoveRequest {
     pub rotation: Vec3,
     pub out_of_zone: Option<String>,
     pub parent_id: Option<String>,
+    /// Simulation time (ms) of the game server when it produced this position,
+    /// forwarded to the clients so they measure speeds against it.
+    #[serde(default)]
+    pub servergodot_ms: Option<f64>,
+    /// When ds_game_server read this update from the game server (unix ms).
+    #[serde(default)]
+    pub horizon_received_ms: Option<u64>,
 }

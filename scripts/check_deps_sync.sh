@@ -6,6 +6,13 @@
 # at runtime instead — a tokio mismatch means a runtime handle made by the host
 # is invalid inside a plugin dylib.
 #
+# Requirements agreeing is not enough either: each workspace resolves its own versions.
+# The server builds with the plugins' Cargo.lock (.docker/Dockerfile.server), so the
+# second check resolves it that way and compares the versions actually linked. A crate
+# whose types cross the dylib boundary must be the very same version on both sides:
+# with bytes 1.12.1 in the server and 1.11.1 in the plugins, Horizon built fine and
+# segfaulted on its first WebTransport client (bytes::Bytes in Outbound).
+#
 # Run this after every submodule bump. See docs/horizon-fork.md.
 
 set -euo pipefail
@@ -17,7 +24,7 @@ if [ ! -f Horizon/Cargo.toml ]; then
     exit 1
 fi
 
-exec python3 - Cargo.toml Horizon/Cargo.toml <<'PY'
+python3 - Cargo.toml Horizon/Cargo.toml <<'PY'
 import sys, tomllib
 
 def deps(path):
@@ -69,4 +76,43 @@ if errors:
     sys.exit(1)
 
 print(f"\nOK: {len(shared)} shared dependencies agree.")
+PY
+
+# Resolved versions: the server's lock as its build makes it (the plugins' lock, plus
+# the crates only the server uses), compared with the plugins'.
+cp Cargo.lock Horizon/Cargo.lock
+cargo metadata --format-version 1 --manifest-path Horizon/Cargo.toml > /dev/null
+
+python3 - Cargo.lock Horizon/Cargo.lock <<'PY'
+import sys, tomllib
+
+def versions(path):
+    """name -> {compatibility line -> version}, registry and git crates only."""
+    out = {}
+    with open(path, "rb") as fh:
+        for pkg in tomllib.load(fh).get("package", []):
+            if "source" not in pkg:
+                continue                 # workspace members and path crates
+            major, minor, patch = (pkg["version"].split("+")[0].split("-")[0].split(".") + ["0", "0"])[:3]
+            line = major if major != "0" else (f"0.{minor}" if minor != "0" else f"0.0.{patch}")
+            out.setdefault(pkg["name"], {})[line] = pkg["version"]
+    return out
+
+plugins_path, server_path = sys.argv[1], sys.argv[2]
+plugins, server = versions(plugins_path), versions(server_path)
+errors = []
+for name in sorted(set(plugins) & set(server)):
+    for line in sorted(set(plugins[name]) & set(server[name])):
+        if plugins[name][line] != server[name][line]:
+            errors.append(f"  {name}: plugins {plugins[name][line]}, server {server[name][line]}")
+
+if errors:
+    print(f"\nThe server resolves other versions than the plugins ({len(errors)}):")
+    print("\n".join(errors))
+    print("\nThe server needs a newer version than the plugins' lock holds: run")
+    print("`cargo update -p <crate>` in this workspace, commit Cargo.lock, rebuild both.")
+    sys.exit(1)
+
+shared = sum(len(set(plugins[n]) & set(server.get(n, {}))) for n in plugins)
+print(f"OK: the server links the plugins' version of all {shared} shared crates.")
 PY

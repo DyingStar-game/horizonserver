@@ -95,21 +95,7 @@ impl SimplePlugin for DyingstarBridgePlugin {
         // logs emitted during handler registration and spawned WS tasks are
         // captured. The bridge .so has its own tracing global; calling
         // try_init() in on_init would be too late.
-        {
-            use tracing::Level;
-            use tracing_subscriber::FmtSubscriber;
-            let level = match cfg.log_level.as_str() {
-                "trace" => Level::TRACE,
-                "debug" => Level::DEBUG,
-                "warn" => Level::WARN,
-                "error" => Level::ERROR,
-                _ => Level::INFO,
-            };
-            FmtSubscriber::builder()
-                .with_max_level(level)
-                .try_init()
-                .ok();
-        }
+        ds_common::logging::init(&cfg.log_level);
 
         for service in &cfg.services {
             info!(

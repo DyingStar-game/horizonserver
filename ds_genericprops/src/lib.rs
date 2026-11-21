@@ -25,6 +25,8 @@ pub mod events;
 pub mod objectdefinition;
 pub mod lod;
 pub mod children;
+pub mod frame;
+pub mod memtrim;
 // Internal imports
 mod handlers;
 use handlers::*;
@@ -35,6 +37,9 @@ use std::collections::HashMap;
 use ds_common::events::GenericPropsRequest;
 use serde_json::{json, Value};
 
+/// Worker threads of the plugin's runtime (see `GenericPropsPlugin::runtime`).
+const TASK_THREADS: usize = 16;
+
 pub struct GenericPropsPlugin {
     name: String,
 	props: Arc<DashMap<String, GorcObjectId>>,
@@ -43,6 +48,13 @@ pub struct GenericPropsPlugin {
 	/// Used to prune ghost subscribers off every newly registered GORC object — see
 	/// the comment in `handlers::create::handle_object_create`.
 	live_players: Arc<DashSet<PlayerId>>,
+	/// Where the plugin's own tasks run (creates, updates, deletes, moves, snapshots).
+	/// Luminal re-queues a pending task at once instead of waiting for its waker
+	/// (luminal_rt 0.4 `WorkerThread::run_task`): every task waiting on a lock or a
+	/// reply was polled in a loop by its 26 workers. Its CPU followed the number of
+	/// waiting tasks, not the work: 34-41 cores while the world loaded, ~13 at rest
+	/// with 120 events/min (preprod 2026-11-03, gdb: WorkerThread::run / Injector::push).
+	runtime: Arc<tokio::runtime::Runtime>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -83,6 +95,14 @@ impl GenericPropsPlugin {
             props: Arc::new(DashMap::with_capacity_and_shard_amount(64, 32)),
             definitions: Arc::new(DashMap::with_capacity_and_shard_amount(64, 32)),
             live_players: Arc::new(DashSet::new()),
+            runtime: Arc::new(
+                tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(TASK_THREADS)
+                    .thread_name("gp-rt")
+                    .enable_all()
+                    .build()
+                    .expect("failed to build the genericprops runtime"),
+            ),
         }
     }
 	pub fn new_definition(&mut self, name: String, definition_data: serde_json::Value) {
@@ -113,16 +133,26 @@ impl SimplePlugin for GenericPropsPlugin {
         context: Arc<dyn ServerContext>
     ) -> Result<(), PluginError> {
         debug!("🎮 GenericPropsPlugin: Registering comprehensive GORC event handlers...");
+        // Short ids for bitcode clients, frozen at the first connection: the GORC
+        // events of props, and the messages every plugin sends (ds_common::client).
+        for event in ["move", "update_property", "gorc_info"] {
+            ds_common::client::declare_events(&events, &[event, &ds_protocol::transform_event(event)]);
+        }
+        ds_common::client::declare_events(&events, &["gorc_zone_enter", "gorc_zone_exit"]);
+        ds_common::client::declare_events(&events, ds_protocol::messages::server_events::ALL);
         context.log(
             LogLevel::Info,
             "🎮 GenericPropsPlugin: Initializing multi-channel player management system..."
         );
 
+        // The core's GORC client handlers still want its luminal handle; every task of
+        // this plugin runs on its own runtime.
         let luminal_handle = context.luminal_handle();
+        let tasks = self.runtime.handle().clone();
 		//Register core server event handlers for player lifecycle management
         self.register_plugin_handlers(
             Arc::clone(&events),
-            luminal_handle.clone(),
+            tasks,
             context.clone(),
         ).await?;
 		
@@ -146,15 +176,6 @@ impl SimplePlugin for GenericPropsPlugin {
             .and_then(|v| v.as_str())
             .unwrap_or("info");
        
-        // Set up tracing subscriber with the configured level
-        let filter_level = match log_level {
-            "error" => tracing::Level::ERROR,
-            "warn" => tracing::Level::WARN,
-            "info" => tracing::Level::INFO,
-            "debug" => tracing::Level::DEBUG,
-            "trace" => tracing::Level::TRACE,
-            _ => tracing::Level::INFO,
-        };
 
         let defaults = new_player::VillageConfig::default();
         new_player::set_village_config(new_player::VillageConfig {
@@ -164,11 +185,35 @@ impl SimplePlugin for GenericPropsPlugin {
             free_reserve: config.get_value("village_free_reserve")
                 .and_then(|v| v.as_integer())
                 .map_or(defaults.free_reserve, |v| v.max(0) as usize),
+            admit_per_server: config.get_value("queue_admit_per_server")
+                .and_then(|v| v.as_integer())
+                .map_or(defaults.admit_per_server, |v| v.max(0) as usize),
+            reserve_per_server: config.get_value("village_reserve_per_server")
+                .and_then(|v| v.as_integer())
+                .map_or(defaults.reserve_per_server, |v| v.max(0) as usize),
+            village_radius: config.get_value("village_radius")
+                .and_then(|v| v.as_float().or_else(|| v.as_integer().map(|i| i as f64)))
+                .map_or(defaults.village_radius, |v| v.max(0.0)),
+            prespawn_villages: config.get_value("prespawn_villages")
+                .and_then(|v| v.as_integer())
+                .map_or(defaults.prespawn_villages, |v| v.max(0) as usize),
         });
-        tracing_subscriber::fmt()
-            .with_max_level(filter_level)
-            .try_init()
-            .ok(); // Ignore errors if already initialized
+        if config.get_value("queue_max_secs").is_some() {
+            warn!("plugin genericprops: queue_max_secs is ignored: a queued player waits for its server however long it takes");
+        }
+        let player_save_interval = std::time::Duration::from_secs(
+            config.get_value("player_save_interval_secs")
+                .and_then(|v| v.as_integer())
+                .unwrap_or(60)
+                .max(0) as u64,
+        );
+        player_state::start_periodic(
+            context.events(),
+            Arc::clone(&self.props),
+            Arc::clone(&self.live_players),
+            player_save_interval,
+        );
+        ds_common::logging::init(log_level);
 
         let props_path = if fs::metadata("props").is_ok() {
             "props/"
@@ -240,16 +285,16 @@ impl GenericPropsPlugin {
 	async fn register_plugin_handlers(
         &self,
         events: Arc<EventSystem>,
-        luminal_handle: luminal::Handle,
+        tasks: tokio::runtime::Handle,
         context: Arc<dyn ServerContext>,
     ) -> Result<(), PluginError> {
         println!("🎮 GenericPropsPlugin: Registering GORC handler");
 		
-        let queue_objects_create: Arc<RwLock<HashMap<String, serde_json::Value>>> = Arc::new(RwLock::new(HashMap::new()));
+        let queue_objects_create: handlers::create::PendingChildren = Arc::new(RwLock::new(HashMap::new()));
 
         // Clone for first handler
         let update_events1 = events.clone();
-        let handle1 = luminal_handle.clone();
+        let handle1 = tasks.clone();
         let definitions1 = Arc::clone(&self.definitions);
         let props1 = Arc::clone(&self.props);
 
@@ -273,7 +318,7 @@ impl GenericPropsPlugin {
         let definitions1a = Arc::clone(&self.definitions);
         let props1a = Arc::clone(&self.props);
         let update_events1a = events.clone();
-        let handle1a = luminal_handle.clone();
+        let handle1a = tasks.clone();
         events.on_plugin("genericprops", "update_object_from_external", move |event: serde_json::Value| {
             debug!("plugin genericprops (update from external): Receive object message {:?}", event);
             if let Err(e) = update::handle_object_update(
@@ -295,7 +340,7 @@ impl GenericPropsPlugin {
 
         // Clone for second handler
         let update_events2 = events.clone();
-        let handle2 = luminal_handle.clone();
+        let handle2 = tasks.clone();
         let definitions2 = Arc::clone(&self.definitions);
         let props2 = Arc::clone(&self.props);
         let queue_objects_create2 = Arc::clone(&queue_objects_create);
@@ -303,6 +348,15 @@ impl GenericPropsPlugin {
         
         events.on_plugin("genericprops", "create_object", move |event: serde_json::Value| {
             debug!("plugin genericprops (create): Receive object message {:?}", event);
+            // A player is created once the placement thread let it through (new players, and
+            // the ones persistence sends back from an earlier session): the others wait there
+            // for their apartment and for the server owning it to take players.
+            if event["object_type"].as_str() == Some("player")
+                && !new_player::take_admitted(event["object_uuid"].as_str().unwrap_or_default())
+            {
+                new_player::enqueue_returning(&event);
+                return Ok(());
+            }
             if let Err(e) = create::handle_object_create(
                                 definitions2.clone(),
                                 props2.clone(),
@@ -321,7 +375,7 @@ impl GenericPropsPlugin {
         .map_err(|e| PluginError::ExecutionError(e.to_string()))?;
 
         let update_events3 = events.clone();
-        let handle3 = luminal_handle.clone();
+        let handle3 = tasks.clone();
         let definitions3 = Arc::clone(&self.definitions);
         let props3 = Arc::clone(&self.props);
         let queue_objects_create3 = Arc::clone(&queue_objects_create);
@@ -347,7 +401,7 @@ impl GenericPropsPlugin {
         .map_err(|e| PluginError::ExecutionError(e.to_string()))?;
 
         let delete_events = events.clone();
-        let handle_delete = luminal_handle.clone();
+        let handle_delete = tasks.clone();
         let definitions_delete = Arc::clone(&self.definitions);
         let props_delete = Arc::clone(&self.props);
 
@@ -369,31 +423,48 @@ impl GenericPropsPlugin {
 
         let props = Arc::clone(&self.props);
         let gorc_instances = context.events().get_gorc_instances().unwrap();
-        let handle_snapshot = luminal_handle.clone();
+        let handle_snapshot = tasks.clone();
         let snapshot_events = Arc::clone(&events);
 
-        // Snapshot of every object, with its flattened properties, `_global_position`
-        // and `_world` (space / planet + local position). Request/response pair used
+        // Snapshot of every object: its flattened properties as JSON text, its world
+        // (space / planet + local position) and the fields a mesh op reads
+        // (ds_common::events::SnapshotItem). Request/response pair used
         // by ds_game_server's ServerManager to plan a split or a merge: it emits
         // `genericprops:get_objects_snapshot {request_id}` and awaits
         // `gameserver:objects_snapshot {request_id, items}`. With `uuids`, only those
         // objects (the players and vehicles of a hand-over, refreshed after its
-        // warm-up: the whole world took ~2.5 s under load).
+        // warm-up: the whole world took ~2.5 s under load). With `zones`, only the
+        // objects lying there, the world objects and the uuids of `also` (what one
+        // server simulates): see world::snapshot.
         events.on_plugin("genericprops", "get_objects_snapshot", move |event: serde_json::Value| {
             let request_id = event.get("request_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let only: Option<Vec<String>> = event.get("uuids").and_then(|v| v.as_array()).map(|uuids| {
-                uuids.iter().filter_map(|u| u.as_str().map(str::to_string)).collect()
-            });
-            info!("plugin genericprops (get_objects_snapshot): request {} for {} props", request_id,
-                only.as_ref().map_or(props.len(), |u| u.len()));
+            let strings = |key: &str| -> Option<Vec<String>> {
+                event.get(key).and_then(|v| v.as_array()).map(|values| {
+                    values.iter().filter_map(|u| u.as_str().map(str::to_string)).collect()
+                })
+            };
+            let only = strings("uuids");
+            let scope = match event.get("zones").map(|zones| serde_json::from_value::<Vec<ds_common::zone::Zone>>(zones.clone())) {
+                Some(Ok(zones)) => Some(world::SnapshotScope {
+                    zones,
+                    also: strings("also").unwrap_or_default().into_iter().collect(),
+                }),
+                Some(Err(e)) => {
+                    error!("plugin genericprops (get_objects_snapshot): request {} has unreadable zones ({}): whole world", request_id, e);
+                    None
+                }
+                None => None,
+            };
+            info!("plugin genericprops (get_objects_snapshot): request {} for {} props{}", request_id,
+                only.as_ref().map_or(props.len(), |u| u.len()),
+                scope.as_ref().map_or(String::new(), |s| format!(" in [{}]", ds_common::zone::zones_label(&s.zones))));
 
             let props = Arc::clone(&props);
             let gorc_instances = Arc::clone(&gorc_instances);
             let events = Arc::clone(&snapshot_events);
 
             handle_snapshot.spawn(async move {
-                let mut items: HashMap<String, GenericPropsRequest> = HashMap::new();
-
+                let started = std::time::Instant::now();
                 // Keys first: iterating the DashMap holds a shard read lock, and the
                 // loop awaits on GORC — any insert/remove of a prop on that shard
                 // (a create, a player joining) would block its thread until then.
@@ -401,49 +472,12 @@ impl GenericPropsPlugin {
                     Some(only) => only.into_iter().filter(|uuid| props.contains_key(uuid)).collect(),
                     None => props.iter().map(|entry| entry.key().clone()).collect(),
                 };
-                for prop_uuid in uuids {
-                    let Ok(gorc_id) = GorcObjectId::from_str(&prop_uuid) else { continue };
-                    // Snapshot the instance data under the lock, resolve the world after
-                    // (resolve_world awaits on GORC for every ancestor).
-                    let snapshot = gorc_instances
-                        .with_object_mut(gorc_id, |instance| {
-                            instance.get_object::<GenericProps>().map(|gp| (
-                                gp.object_def.name.clone(),
-                                world::flatten_props(gp),
-                                gp.global_position,
-                                world::read_own_local_and_parent(gp),
-                            ))
-                        })
-                        .await
-                        .flatten();
-                    let Some((object_type, prop_properties, global_position, (own_local, parent_id))) = snapshot else {
-                        debug!("plugin genericprops (get_objects_snapshot): {} not in GORC, skipped", prop_uuid);
-                        continue;
-                    };
-                    let object_world = world::resolve_world(&gorc_instances, own_local, parent_id).await;
-                    let mut object_data = Value::Object(prop_properties);
-                    world::inject_global_position(&mut object_data, global_position);
-                    world::inject_world(&mut object_data, &object_world);
-                    items.insert(
-                        prop_uuid.clone(),
-                        GenericPropsRequest {
-                            object_type,
-                            object_uuid: prop_uuid,
-                            object_data,
-                            broadcast_only: None,
-                        }
-                    );
-                }
+                let items = world::snapshot(&gorc_instances, uuids, scope.as_ref()).await;
 
-                info!("plugin genericprops (get_objects_snapshot): request {} answered with {} items", request_id, items.len());
-                if let Err(e) = events.emit_plugin(
-                    "gameserver",
-                    "objects_snapshot",
-                    &json!({
-                        "request_id": request_id,
-                        "items": items
-                    }),
-                ).await {
+                info!("plugin genericprops (get_objects_snapshot): request {} answered with {} items in {:?}",
+                    request_id, items.len(), started.elapsed());
+                let answer = ds_common::events::ObjectsSnapshot { request_id, items };
+                if let Err(e) = events.emit_plugin("gameserver", "objects_snapshot", &answer).await {
                     error!("plugin genericprops (get_objects_snapshot): failed to emit objects_snapshot: {}", e);
                 }
             });
@@ -456,7 +490,7 @@ impl GenericPropsPlugin {
     
         let events_player_move = Arc::clone(&events);
         let props_player_move = Arc::clone(&self.props);
-        let handle_player_move = luminal_handle.clone();
+        let handle_player_move = tasks.clone();
         // events
         //     .on_gorc_instance(
         //         // "GorcPlayer",
@@ -505,7 +539,7 @@ impl GenericPropsPlugin {
         .map_err(|e| PluginError::ExecutionError(e.to_string()))?;
 
         let props_player_remove = Arc::clone(&self.props);
-        let handle_player_remove = luminal_handle.clone();
+        let handle_player_remove = tasks.clone();
         let events_core = Arc::clone(&events);
         let live_players_remove = Arc::clone(&self.live_players);
         events.on_core("player_disconnected", move |event: PlayerDisconnectedEvent| {
@@ -535,12 +569,14 @@ impl GenericPropsPlugin {
                         return Ok(());
                     }
                 };
-                if let Err(e) = events_core.emit_gorc_instance(
+                if let Err(e) = events_core.emit_gorc_instance_packed(
                     gorc_id,
                     0, // Channel 0 for critical info
                     "gorc_zone_exit",
-                    &serde_json::json!({}),
-                    horizon_event_system::Dest::Client
+                    // DynValue: the JSON object for JSON clients, carried as is by bitcode.
+                    &ds_protocol::DynValue::from(&serde_json::json!({})),
+                    horizon_event_system::Dest::Client,
+                    None,
                 ).await {
                     error!("🎮 GORC: ❌ Failed to send GORC info to client: {}", e);
                 } else {
@@ -552,6 +588,9 @@ impl GenericPropsPlugin {
                     error!("🎮 GORC: ❌ No GORC instances manager available for diconnect player");
                     return Ok(()); // Not a fatal error, just log and continue
                 };
+
+                // Where it was, for persistence, before its instance is gone.
+                player_state::save(&events_core, &gorc_instances, &event.player_id.to_string(), gorc_id).await;
 
                 gorc_instances.remove_player(event.player_id).await;
                 gorc_instances.unregister_object(gorc_id).await;
@@ -585,7 +624,7 @@ impl GenericPropsPlugin {
         }).await
         .map_err(|e| PluginError::ExecutionError(e.to_string()))?;
 
-        let handle_items_chunk = luminal_handle.clone();
+        let handle_items_chunk = tasks.clone();
         let definitions_items_chunk = Arc::clone(&self.definitions);
         let props_items_chunk = Arc::clone(&self.props);
         let queue_objects_create_items_chunk = Arc::clone(&queue_objects_create);
@@ -626,7 +665,7 @@ impl GenericPropsPlugin {
         }).await
         .map_err(|e| PluginError::ExecutionError(e.to_string()))?;
 
-        let handle_items_end = luminal_handle.clone();
+        let handle_items_end = tasks.clone();
         let events_items_end = Arc::clone(&events);
         let gorc_instances_items_end = context.events().get_gorc_instances().unwrap();
         let definitions_items_end = Arc::clone(&self.definitions);
@@ -671,7 +710,7 @@ impl GenericPropsPlugin {
                 }) {
                     if let Some(uuid_str) = first_with_uuid["object_uuid"].as_str() {
                         if let Ok(gorc_id) = GorcObjectId::from_str(uuid_str) {
-                            if gorc_instances.get_object(gorc_id).await.is_some() {
+                            if gorc_instances.get_object_type(gorc_id).await.is_some() {
                                 debug!(
                                     "plugin genericprops (items_end): startup items already imported (found UUID {}), skipping",
                                     uuid_str
@@ -757,30 +796,28 @@ impl GenericPropsPlugin {
         // Load of the Godot servers, from ds_game_server every 5 s: where new players go.
         events.on_plugin("genericprops", "servers_load", move |event: serde_json::Value| {
             match serde_json::from_value::<ds_common::mesh_load::PoolLoad>(event) {
-                Ok(load) => handlers::mesh_load::set(load),
+                Ok(load) => {
+                    handlers::mesh_load::set(load);
+                    new_player::load_updated();
+                }
                 Err(e) => warn!("plugin genericprops (servers_load): unreadable load: {}", e),
             }
             Ok(())
         }).await
         .map_err(|e| PluginError::ExecutionError(e.to_string()))?;
 
-        let events_new_player = Arc::clone(&events);
-        let handle_new_player = luminal_handle.clone();
+        // Queued for the placement thread (new_player::start_placement): a player waiting for its
+        // apartment is no luminal task re-polled forever.
+        new_player::start_placement(Arc::clone(&events));
         events.on_plugin("genericprops", "new_player", move |event: serde_json::Value| {
             debug!("plugin genericprops (new_player): Receive new player message {:?}", event);
-            let events = Arc::clone(&events_new_player);
-            handle_new_player.spawn(async move {
-                if let Err(e) = new_player::handle_new_player(event, events).await {
-                    error!("plugin genericprops (new_player): handler error: {}", e);
-                }
-                Ok::<(), PluginError>(())
-            });
+            new_player::enqueue_new_player(&event);
             Ok(())
         }).await
         .map_err(|e| PluginError::ExecutionError(e.to_string()))?;
 
         // let gorc_instances = context.events().get_gorc_instances().unwrap();
-        // let handle_out_of_zone = luminal_handle.clone();
+        // let handle_out_of_zone = tasks.clone();
         // let events_out_of_zone = Arc::clone(&events);
         // events.on_plugin("genericprops", "player_out_of_zone", move |event: serde_json::Value| {
         //     info!("plugin genericprops (player_out_of_zone): Receive object message {:?}", event);
@@ -837,7 +874,13 @@ impl GenericPropsPlugin {
         // Channel payloads are queued rather than emitted, and delivered from
         // here at the rate each recipient's distance earns it. Started last so
         // the loop only comes up once every handler that feeds it is live.
-        lod::start(Arc::clone(&events), Arc::clone(&self.definitions));
+        let lod_workers = ds_common::config::Config::new("ds_genericprops")
+            .get_value("lod_workers")
+            .and_then(|v| v.as_integer())
+            .map_or(lod::DEFAULT_WORKERS, |v| v.max(1) as usize);
+        lod::start(Arc::clone(&events), Arc::clone(&self.definitions), lod_workers);
+        // Free memory back to the system: glibc keeps it otherwise (see memtrim).
+        memtrim::start();
 
         debug!("🎮 GenericPropsPlugin: handler registered");
         Ok(())

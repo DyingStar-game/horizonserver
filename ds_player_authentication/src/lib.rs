@@ -25,6 +25,9 @@ pub struct PlayerSession {
 pub struct DsPlayerAuthenticationPlugin {
     name: String,
     server_state_ok: Arc<AtomicBool>,
+    // How player tokens are checked: VERIFY_JWT_SIGNATURE / OIDC_ISSUER / OIDC_JWKS_URL,
+    // read once (see handlers::jwt).
+    token_check: Arc<handlers::jwt::TokenCheck>,
     // Plugin-owned runtime. Event handlers fire in a context with NO ambient tokio runtime
     // (the host dispatches events inside a spawn_blocking BlockingTask), so tokio::spawn
     // panics "no reactor" and context.tokio_handle() is a dead handle. Spawning on this
@@ -49,6 +52,7 @@ impl DsPlayerAuthenticationPlugin {
         Self {
             name: "ds_player_authentication".to_string(),
             server_state_ok: Arc::new(AtomicBool::new(false)),
+            token_check: Arc::new(handlers::jwt::TokenCheck::from_env()),
             runtime,
             // event_system: Arc<EventSystem>,
             // auth_service: ExternalAuthService{base_url: "https://toto".to_string(), api_key: "xxxx".to_string(), client: reqwest::Client::new()},
@@ -81,13 +85,16 @@ impl SimplePlugin for DsPlayerAuthenticationPlugin {
         let rt_handle = self.runtime.handle().clone();
         let server_state_ok_init = Arc::clone(&self.server_state_ok);
         let server_state_ok_ready = Arc::clone(&self.server_state_ok);
+        let token_check = Arc::clone(&self.token_check);
 
-        events.on_client("player", "init", move |event: authentication::PlayerInit, player_id: PlayerId, connection: ClientConnectionRef| {
+        // Typed: decoded from JSON or bitcode, whichever the client's listener speaks.
+        events.on_client_packed("player", "init", move |event: authentication::PlayerInit, player_id: PlayerId, connection: ClientConnectionRef| {
             debug!("plugin auth: Receive player init message {:?}", event);
 
             let events = events_system.clone();
             let event = event.clone();
             let server_state_ok = Arc::clone(&server_state_ok_init);
+            let token_check = Arc::clone(&token_check);
 
             let jh = rt_handle.spawn(async move {
                 let _ = authentication::handle_player_init(
@@ -96,6 +103,7 @@ impl SimplePlugin for DsPlayerAuthenticationPlugin {
                     connection,
                     events,
                     server_state_ok,
+                    token_check,
                 ).await;
             });
             // Watchdog: surface a panic in the init task instead of losing it silently.
@@ -128,19 +136,8 @@ impl SimplePlugin for DsPlayerAuthenticationPlugin {
             .and_then(|v| v.as_str())
             .unwrap_or("info");
        
-        // Set up tracing subscriber with the configured level
-        let filter_level = match log_level {
-            "error" => tracing::Level::ERROR,
-            "warn" => tracing::Level::WARN,
-            "info" => tracing::Level::INFO,
-            "debug" => tracing::Level::DEBUG,
-            "trace" => tracing::Level::TRACE,
-            _ => tracing::Level::INFO,
-        };
-        tracing_subscriber::fmt()
-            .with_max_level(filter_level)
-            .try_init()
-            .ok(); // Ignore errors if already initialized
+        ds_common::logging::init(log_level);
+        self.token_check.log_startup();
 
         info!("🔧 DsPlayerAuthenticationPlugin: ✅ Initialization complete!");
         Ok(())

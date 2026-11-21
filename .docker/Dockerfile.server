@@ -8,6 +8,10 @@ WORKDIR /build
 
 # Copy the Horizon workspace (server + internal crates)
 COPY Horizon/ Horizon/
+# The plugins' lock: the server must link the very crate versions the plugins were
+# built with (types such as bytes::Bytes cross the dylib boundary). Cargo keeps every
+# version it finds in it and only adds the crates the server alone uses.
+COPY Cargo.lock Horizon/Cargo.lock
 
 # Build the server binary with BuildKit cache for fast incremental rebuilds
 RUN --mount=type=cache,target=/build/Horizon/target \

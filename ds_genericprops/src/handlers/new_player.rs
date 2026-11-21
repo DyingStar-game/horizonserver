@@ -1,23 +1,18 @@
-use std::collections::HashMap;
+use ds_protocol::messages::server_events;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
+use futures::executor::block_on;
 use horizon_event_system::{EventSystem, GorcInstanceManager, GorcObjectId, PlayerId, Vec3};
 use tokio::sync::Mutex;
 use tracing::{debug, error, warn, info};
 
 use crate::genericprops::{distance_squared, GenericProps};
 use crate::handlers::mesh_load::{self, LoadView};
-use crate::handlers::world::{read_own_local_and_parent, resolve_world};
+use crate::handlers::world::{read_own_local_and_parent, resolve_player_world, resolve_world};
+use ds_common::mesh_load::ServerLoad;
 use ds_common::world::ObjectWorld;
-
-/// Global lock to serialize apartment assignment across concurrent player-init calls.
-/// Held from the start of the free-slot search until the building object has been
-/// updated, so the next player always sees the freshly-committed occupancy list.
-static APARTMENT_ASSIGN_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-
-fn apartment_lock() -> &'static Mutex<()> {
-    APARTMENT_ASSIGN_LOCK.get_or_init(|| Mutex::new(()))
-}
 
 /// How new players are spread over the mining villages (`[ds_genericprops]` in plugins.toml).
 #[derive(Debug, Clone, Copy)]
@@ -29,11 +24,35 @@ pub struct VillageConfig {
     /// Godot needs from ~15 s to minutes (during a mesh hand-over) to create a village's
     /// habs; every player arriving meanwhile with no room gets no apartment.
     pub free_reserve: usize,
+    /// Players a server is given at most per ADMIT_WINDOW: 49 queued players let in at
+    /// once took a server from 61 to 14 tps (minikube, 2026-10-20). Zero: no limit.
+    pub admit_per_server: usize,
+    /// Villages (of max_players_per_village places) kept ahead on top of `free_reserve`
+    /// for each server taking players that owns villages: a village takes Godot 16-20 s
+    /// to spawn while a server is given admit_per_server players every 2 s, so a reserve
+    /// sized for one server ran dry once the splits had spread the arrivals over 30.
+    pub reserve_per_server: usize,
+    /// Metres around a village's centre its habs stand in: a village whose disc crosses a
+    /// zone border is asked for only when no other is left (its habs would be split
+    /// between two servers). The mining village layout spans ~165 m.
+    pub village_radius: f64,
+    /// Villages kept spawned ahead even with nobody arriving, from the start: a village
+    /// takes Godot 16-20 s to spawn and at most 2 wait per server, so spawning them only on
+    /// arrivals kept 600 players queued 110 s (preprod, 2026-10-21). Spawned villages are
+    /// persisted: the cost comes back only after a persistence reset. Needs the pool load.
+    pub prespawn_villages: usize,
 }
 
 impl Default for VillageConfig {
     fn default() -> Self {
-        Self { max_players_per_village: 50, free_reserve: 100 }
+        Self {
+            max_players_per_village: 50,
+            free_reserve: 100,
+            admit_per_server: 10,
+            reserve_per_server: 1,
+            village_radius: 200.0,
+            prespawn_villages: 15,
+        }
     }
 }
 
@@ -73,7 +92,18 @@ struct VillageState {
     occupancy: usize,
     /// Physical free apartments left in its buildings.
     free: usize,
-    buildings: Vec<GorcObjectId>,
+    buildings: Vec<Building>,
+}
+
+/// A spawnbuilding (hab) of a village.
+#[derive(Debug, Clone)]
+struct Building {
+    gorc_id: GorcObjectId,
+    /// Its own planet-local position: a village's habs each have their own coordinates, so
+    /// a zone border can leave some of them on another server than the village's centre.
+    world: Option<ObjectWorld>,
+    /// Free apartments left in it.
+    free: usize,
 }
 
 impl VillageState {
@@ -146,25 +176,47 @@ fn slot_position(building: &GenericProps, (floor, row, col): (i64, i64, i64)) ->
     let spawn_point_axis = |axis: &str| spawn_point.and_then(|s| s.get(axis)).and_then(|v| v.as_f64()).unwrap_or(0.0);
     let (spawn_point_x, spawn_point_y, spawn_point_z) = (spawn_point_axis("x"), spawn_point_axis("y"), spawn_point_axis("z"));
 
-    let x = if col == 0 { spawn_point_x } else { x_spacing - spawn_point_x };
-    let z = if col == 0 { spawn_point_z } else { z_spacing - spawn_point_z };
-    Vec3::new(
-        x + (row as f64 * x_spacing),
-        spawn_point_y + (floor as f64 * y_spacing),
-        z + (col as f64 * z_spacing),
-    )
+    let (x, y, z) = slot_offset(
+        (x_spacing, y_spacing, z_spacing),
+        (spawn_point_x, spawn_point_y, spawn_point_z),
+        (floor, row, col),
+    );
+    Vec3::new(x, y, z)
 }
 
-/// The village a player gets an apartment in, or None when every village is at its cap.
-/// Solo players fill the fullest village still under the cap first (ties by name), so the
+/// Where the spawn point of apartment 0-0-0 lands in apartment (floor, row, col), local to the
+/// building. The second row is the first one turned half round (SpawnBuilding._create_apartments:
+/// rotated 180 degrees about up at x = 2 x_spacing, z = (col + 1) z_spacing), so its point is the
+/// first row's mirrored through the apartment's middle -- the ROW decides it, not the column. With
+/// the column, every apartment past the first of a row put its player in the mirrored spot: unseen
+/// while the point was the container's middle (its own mirror), inside the shower once it was not.
+fn slot_offset(
+    (x_spacing, y_spacing, z_spacing): (f64, f64, f64),
+    (spawn_x, spawn_y, spawn_z): (f64, f64, f64),
+    (floor, row, col): (i64, i64, i64),
+) -> (f64, f64, f64) {
+    let turned = row != 0;
+    let x = if turned { x_spacing - spawn_x } else { spawn_x };
+    let z = if turned { z_spacing - spawn_z } else { spawn_z };
+    (x + row as f64 * x_spacing, spawn_y + floor as f64 * y_spacing, z + col as f64 * z_spacing)
+}
+
+/// The village a player gets an apartment in, or None when no village has room under its
+/// cap. Solo players fill the fullest village still under the cap first (ties by name), so the
 /// villages fill one after the other, starting with mining_village_01. With the pool load
 /// known, that happens within the zones of the least loaded server that takes players:
-/// filling the villages in line put every arrival on the server owning the next one.
+/// filling the villages in line put every arrival on the server owning the next one. The cap
+/// is that server's (see `server_cap`), and a village under `max` on any server taking
+/// players goes before every village above it: ranked on the load first, the least loaded
+/// server raised its only village to 130 players while others had villages under 50
+/// (preprod, 2026-10-20 — after the splits in pieces a server often owns one village).
+/// Without `overflow` (room can still come, see room_can_come) no village goes over `max`.
 fn select_village<'a>(
     villages: &'a [VillageState],
     request: &AssignRequest,
     max: usize,
     load: Option<&LoadView>,
+    overflow: bool,
 ) -> Option<&'a VillageState> {
     if let Some(preferred) = &request.preferred_village {
         let preferred = villages.iter().find(|v| &v.uuid == preferred).filter(|v| {
@@ -174,11 +226,21 @@ fn select_village<'a>(
             return preferred;
         }
     }
-    let with_room = villages.iter().filter(|v| v.has_room_under_cap(max));
+    let caps = caps_by_server(villages, max, load, overflow);
+    let cap_of = |v: &VillageState| caps.get(&owner_key(v, load)).copied().unwrap_or(max);
+    // Never on a frozen server, even as the last resort: better wait for habs elsewhere.
+    let with_room = villages
+        .iter()
+        .filter(|v| !load.is_some_and(|l| l.owner_unresponsive(v.world.as_ref())))
+        .filter(|v| v.has_room_under_cap(cap_of(v)));
     match load {
         Some(load) => with_room.min_by(|a, b| {
-            load.rank(a.world.as_ref())
-                .cmp(&load.rank(b.world.as_ref()))
+            let (rank_a, rank_b) = (load.rank(a.world.as_ref()), load.rank(b.world.as_ref()));
+            rank_a.refused
+                .cmp(&rank_b.refused)
+                .then_with(|| (a.occupancy >= max).cmp(&(b.occupancy >= max)))
+                .then_with(|| rank_a.cmp(&rank_b))
+                .then_with(|| (cap_of(a) > max).cmp(&(cap_of(b) > max)))
                 .then_with(|| b.occupancy.cmp(&a.occupancy))
                 .then_with(|| a.name.cmp(&b.name))
         }),
@@ -186,10 +248,97 @@ fn select_village<'a>(
     }
 }
 
+/// How much a server's cap of solo players per village rises once its villages hold it.
+const CAP_STEP: usize = 10;
+
+/// The server owning the village's zone, which its cap is computed per (`None`: no load
+/// to tell, every village counts as one server).
+fn owner_key(village: &VillageState, load: Option<&LoadView>) -> Option<String> {
+    load.and_then(|l| village.world.as_ref().and_then(|w| l.owner_of(w)).map(|s| s.uuid.clone()))
+}
+
+/// The cap of solo players per village on one server, from its villages: `base`
+/// (max_players_per_village) while one of them has room below it or still waits for its habs,
+/// else the first `base + k * CAP_STEP` one of them has room below. No ceiling: what bounds
+/// a village is its server, which refuses players at its placement capacity until a split
+/// gives the village's players more servers. Per server, so the players
+/// per server stay even: with every village at 50, a server holding 2 villages (100 players)
+/// goes to 60 while one holding 3 (150) stays at 50, the least loaded server taking the
+/// arrivals (see select_village). A single cap for the world sent the next 100 players to
+/// the server that already had the most; and before any cap rose, a full world spawned the
+/// arrivals at the origin with apartments still free (preprod NPC tests, 2026-10-16).
+fn server_cap(villages: &[&VillageState], base: usize) -> usize {
+    if base == 0 || villages.iter().any(|v| v.is_spawn_pending()) || !villages.iter().any(|v| v.free > 0) {
+        return base;
+    }
+    let mut cap = base;
+    while !villages.iter().any(|v| v.has_room_under_cap(cap)) {
+        cap += CAP_STEP;
+    }
+    cap
+}
+
+/// `server_cap` of every server owning villages. A frozen server takes no players: left out.
+/// Whether a place under `max` can still come for the waiting players, so no village goes
+/// over it: a village under it with room on a server that takes players (refused only by
+/// the throttle, `load` being the load as published), habs on their way, a village its
+/// server can be asked for, a split or merge running or due. The caps rose by steps of 10
+/// while 25 servers were idle: the throttle refused the servers with villages under 50 for
+/// 2 s, and a village over 50 on another one went first (preprod, 2026-10-20). Without the
+/// load: habs on their way or a village left to ask for.
+fn room_can_come(villages: &[VillageState], max: usize, load: Option<&LoadView>) -> bool {
+    let takes_players = |v: &VillageState| load.map_or(true, |l| {
+        v.world.as_ref().and_then(|w| l.owner_of(w)).is_some_and(|s| l.accepts(s))
+    });
+    let responsive = |v: &VillageState| !load.is_some_and(|l| l.owner_unresponsive(v.world.as_ref()));
+    villages.iter().any(|v| v.has_room_under_cap(max) && takes_players(v))
+        || villages.iter().any(|v| v.is_spawn_pending() && responsive(v))
+        || villages.iter().any(|v| !v.is_spawn_pending_or_done() && load.map_or(true, |l| l.owner_takes_habs(v.world.as_ref())))
+        || load.is_some_and(LoadView::split_coming)
+}
+
+/// A player waiting for village habs is let into a village over `max_players_per_village`
+/// after this long even when room can still come: it would otherwise reach HABS_WAIT and be
+/// disconnected. Only the habs wait counts: players queued 55 s for a full server, then
+/// split, were sent over the cap the moment they got out (preprod, 2026-10-21).
+const OVERFLOW_AFTER: Duration = Duration::from_secs(30);
+
+/// Without `overflow`, `base` for every server.
+fn caps_by_server(villages: &[VillageState], base: usize, load: Option<&LoadView>, overflow: bool) -> HashMap<Option<String>, usize> {
+    let mut by_server: HashMap<Option<String>, Vec<&VillageState>> = HashMap::new();
+    for village in villages.iter().filter(|v| !load.is_some_and(|l| l.owner_unresponsive(v.world.as_ref()))) {
+        by_server.entry(owner_key(village, load)).or_default().push(village);
+    }
+    by_server
+        .into_iter()
+        .map(|(server, villages)| (server, if overflow { server_cap(&villages, base) } else { base }))
+        .collect()
+}
+
+/// The cap `village` was just given an apartment under.
+fn village_cap(villages: &[VillageState], village: &VillageState, base: usize, load: Option<&LoadView>, overflow: bool) -> usize {
+    caps_by_server(villages, base, load, overflow).get(&owner_key(village, load)).copied().unwrap_or(base)
+}
+
+/// Log a server's cap when it changes.
+fn note_cap(village: &VillageState, cap: usize, base: usize, load: Option<&LoadView>) {
+    static LAST: std::sync::Mutex<Option<HashMap<Option<String>, usize>>> = std::sync::Mutex::new(None);
+    let mut last = LAST.lock().unwrap();
+    let previous = last.get_or_insert_with(HashMap::new).insert(owner_key(village, load), cap).unwrap_or(base);
+    if previous != cap {
+        info!(
+            "plugin genericprops (new_player): villages of {} now take up to {} players (was {})",
+            owner_label(village, load), cap, previous
+        );
+    }
+}
+
 /// At most this many villages requested and not spawned yet per server: Godot freezes
 /// 16-20 s per village it spawns, and one frozen server was sent 40+ requests in a row
 /// (minikube, 2026-10-02) which kept it frozen for good.
 const MAX_PENDING_VILLAGES_PER_SERVER: usize = 2;
+/// On a server that takes no new player but has the tps for it (see HABS_MIN_TPS).
+const MAX_PENDING_VILLAGES_ON_REFUSING: usize = 1;
 
 fn in_accepting_zone(village: &VillageState, load: &LoadView) -> bool {
     village.world.as_ref().and_then(|w| load.owner_of(w)).map_or(false, |s| load.accepts(s))
@@ -224,23 +373,39 @@ fn last_full_village(villages: &[VillageState]) -> Option<&VillageState> {
 /// SPAWN_TIMEOUT_MS (45 s from init_ack, client.gd), or the client gives up first with
 /// "player never spawned".
 const HABS_WAIT: Duration = Duration::from_secs(40);
-/// How often the waiting player looks for the habs.
-const HABS_POLL: Duration = Duration::from_secs(1);
-
-/// Sleep without a tokio timer: luminal tasks have no tokio runtime.
-async fn wait(duration: Duration) {
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    std::thread::spawn(move || {
-        std::thread::sleep(duration);
-        let _ = tx.send(());
-    });
-    let _ = rx.await;
-}
-
+/// How often the waiting players look for an apartment again when nothing arrived
+/// meanwhile; habs or a new player arriving trigger a pass at once.
+const HABS_RETRY: Duration = Duration::from_secs(2);
+/// Arrivals within this window are placed in one pass: a village's habs come as ~10
+/// spawnbuildings within milliseconds, the players in waves.
+const COALESCE: Duration = Duration::from_millis(100);
+/// Between the `server not ready` error and the close frame: the error goes through the
+/// connection's outgoing queue, the close frame does not.
+const KICK_DELAY: Duration = Duration::from_millis(500);
+/// The `no unspawned poi_village left` warning, at most this often (once per player and
+/// per second before: 7000 lines per 30 s on preprod, 2026-10-16).
+const RESERVE_WARN_EVERY: Duration = Duration::from_secs(10);
 /// What the client gets when no apartment could be prepared in time (same error as
 /// player_init on a server not ready yet: the client shows it and closes the connection).
 const NOT_READY_CODE: i64 = 1338;
 const NOT_READY_MESSAGE: &str = "Server not ready";
+/// What a waiting player gets when no server can give it a place, now or soon (no server
+/// takes players and the pool cannot grow, or no village has an apartment left at all): the
+/// client shows the message and closes the connection.
+const FULL_CODE: i64 = 1339;
+const FULL_MESSAGE: &str = "All servers are full";
+/// How long it must stay that way before a waiting player is told so: the load comes every
+/// 5 s, a split queued meanwhile does not show in it yet.
+const FULL_GRACE: Duration = Duration::from_secs(15);
+/// The window of `admit_per_server`: as long as the retry of the waiting players, so the
+/// next pass finds the window empty again.
+const ADMIT_WINDOW: Duration = HABS_RETRY;
+/// A waiting player whose place did not move is told it is still queued this often: each
+/// `queued` message gives the client's SPAWN_TIMEOUT_MS (45 s, client.gd) a fresh start.
+const QUEUED_NOTIFY: Duration = Duration::from_secs(10);
+/// A waiting player is told its new place as soon as it moves, but not more often than
+/// this: only every 10 s, a player went from 40 to 30 and then straight to spawning.
+const QUEUED_MIN_GAP: Duration = Duration::from_secs(1);
 
 fn player_id(player_uuid: &str) -> Option<PlayerId> {
     PlayerId::from_str(player_uuid).ok()
@@ -254,21 +419,47 @@ async fn player_connected(events: &EventSystem, player_uuid: &str) -> bool {
     }
 }
 
-/// Send the `server not ready` error to the player, then close their connection.
-async fn reject_not_ready(events: &EventSystem, player_uuid: &str) {
-    let (Some(sender), Some(player_id)) = (events.get_client_response_sender(), player_id(player_uuid)) else {
-        error!("plugin genericprops (new_player): cannot reach player {} to tell the server is not ready", player_uuid);
+/// Send an error to the player (`server not ready`, `all servers are full`); `kick` closes the
+/// connection KICK_DELAY later. False when the player cannot be reached.
+async fn send_error(events: &EventSystem, player_uuid: &str, code: i64, message: &str) -> bool {
+    let (Some(_), Some(player_id)) = (events.get_client_response_sender(), player_id(player_uuid)) else {
+        error!("plugin genericprops (new_player): cannot reach player {} to tell it `{}`", player_uuid, message);
+        return false;
+    };
+    let payload = serde_json::json!({ "type": "error", "code": code, "message": message });
+    if let Err(e) = ds_common::client::send_message(events, player_id, server_events::ERROR, &payload).await {
+        warn!("plugin genericprops (new_player): failed to send `{}` to player {}: {}", message, player_uuid, e);
+    }
+    true
+}
+
+/// Tell a waiting player no server can take it and close its connection (see FULL_GRACE).
+async fn disconnect_full(events: &EventSystem, kicks: &mut Vec<(Instant, String, &'static str)>, arrival: Arrival) {
+    warn!(
+        "plugin genericprops (new_player): no server can take player {} (waited {:?}), disconnected: {}",
+        arrival.player_uuid, arrival.since.elapsed(), FULL_MESSAGE
+    );
+    if send_error(events, &arrival.player_uuid, FULL_CODE, FULL_MESSAGE).await {
+        kicks.push((Instant::now() + KICK_DELAY, arrival.player_uuid, FULL_MESSAGE));
+    }
+}
+
+/// Tell the waiting player it is queued, `position` (from 1) among the waiting players.
+async fn send_queued(events: &EventSystem, player_uuid: &str, wait: Wait, position: usize) {
+    let Some(player_id) = player_id(player_uuid) else {
         return;
     };
-    let payload = serde_json::json!({ "type": "error", "code": NOT_READY_CODE, "message": NOT_READY_MESSAGE });
-    if let Err(e) = sender.send_to_client(player_id, payload.to_string().into_bytes()).await {
-        warn!("plugin genericprops (new_player): failed to send server-not-ready to player {}: {}", player_uuid, e);
+    let payload = serde_json::json!({ "type": "queued", "reason": wait.reason(), "position": position });
+    if let Err(e) = ds_common::client::send_message(events, player_id, server_events::QUEUED, &payload).await {
+        debug!("plugin genericprops (new_player): failed to send queued to player {}: {}", player_uuid, e);
     }
-    // The error goes through the connection's outgoing queue, the close frame does not:
-    // give the error the time to leave first.
-    wait(Duration::from_millis(500)).await;
-    if let Err(e) = sender.kick(player_id, Some(NOT_READY_MESSAGE.to_string())).await {
-        debug!("plugin genericprops (new_player): kick of player {}: {}", player_uuid, e);
+}
+
+async fn kick(events: &EventSystem, player_uuid: &str, message: &str) {
+    if let (Some(sender), Some(player_id)) = (events.get_client_response_sender(), player_id(player_uuid)) {
+        if let Err(e) = sender.kick(player_id, Some(message.to_string())).await {
+            debug!("plugin genericprops (new_player): kick of player {}: {}", player_uuid, e);
+        }
     }
 }
 
@@ -286,11 +477,14 @@ fn first_village(villages: &[VillageState]) -> Option<&VillageState> {
 
 /// Places solo players can still get: the room under the cap of the villages with habs,
 /// plus a full cap for each village whose habs were requested and have not arrived yet.
+/// Nothing on a frozen server: its habs come back only with it, the reserve is kept elsewhere.
 fn free_reserve(villages: &[VillageState], max: usize, load: Option<&LoadView>) -> usize {
+    let frozen = |v: &VillageState| load.is_some_and(|l| l.owner_unresponsive(v.world.as_ref()));
     let load = arrival_load(villages, load);
     villages
         .iter()
         .filter(|v| counts_for_arrivals(v, load))
+        .filter(|v| !frozen(v))
         .map(|v| {
             if !v.buildings.is_empty() {
                 v.free.min(max.saturating_sub(v.occupancy))
@@ -303,31 +497,76 @@ fn free_reserve(villages: &[VillageState], max: usize, load: Option<&LoadView>) 
         .sum()
 }
 
+/// The reserve to keep: `free_reserve`, plus `reserve_per_server` villages for each server
+/// that owns villages and takes players (`load` as published: one refused only by the
+/// throttle takes players again 2 s later), and never under `prespawn_villages` villages.
+fn reserve_target(villages: &[VillageState], config: &VillageConfig, load: Option<&LoadView>) -> usize {
+    let Some(load) = load else { return config.free_reserve };
+    let prespawn = config.prespawn_villages * config.max_players_per_village;
+    let servers: HashSet<&str> = villages
+        .iter()
+        .filter_map(|v| v.world.as_ref().and_then(|w| load.owner_of(w)))
+        .filter(|s| load.accepts(s))
+        .map(|s| s.uuid.as_str())
+        .collect();
+    (config.free_reserve + config.reserve_per_server * config.max_players_per_village * servers.len()).max(prespawn)
+}
+
+/// Whether the disc of `radius` metres around the village's centre lies in the zones of
+/// one server: its habs would all spawn there. True without the load.
+fn inside_one_zone(village: &VillageState, radius: f64, load: Option<&LoadView>) -> bool {
+    let (Some(load), Some(world)) = (load, village.world.as_ref()) else { return true };
+    let owner = |w: &ObjectWorld| load.owner_of(w).map(|s| s.uuid.clone());
+    let centre = owner(world);
+    let p = world.local_position;
+    [(radius, 0.0, 0.0), (-radius, 0.0, 0.0), (0.0, radius, 0.0), (0.0, -radius, 0.0), (0.0, 0.0, radius), (0.0, 0.0, -radius)]
+        .iter()
+        .all(|(dx, dy, dz)| {
+            let mut edge = world.clone();
+            edge.local_position.x = p.x + dx;
+            edge.local_position.y = p.y + dy;
+            edge.local_position.z = p.z + dz;
+            owner(&edge) == centre
+        })
+}
+
 /// The unspawned villages to request so the reserve gets back to `target`: in the zones
 /// of the least loaded server taking players when the load is known, then closest to
 /// `reference`. Several can be requested at once: a wave of arrivals outruns one
-/// village at a time (preprod, 2026-10-01: 16 players without apartment in 14 s).
+/// village at a time (preprod, 2026-10-01: 16 players without apartment in 14 s). Among
+/// the servers taking players, a village whose `radius` disc lies in one zone goes first.
 fn villages_to_request<'a>(
     villages: &'a [VillageState],
     reference: &VillageState,
     max: usize,
     target: usize,
+    radius: f64,
     load: Option<&LoadView>,
 ) -> Vec<&'a VillageState> {
     let mut reserve = free_reserve(villages, max, load);
     if reserve >= target || max == 0 {
         return Vec::new();
     }
+    // Not on a server frozen or loading the zones it was just handed: a split gave unde
+    // its zone and a village to spawn in the same second, and it froze 2 min with them
+    // (preprod, 2026-10-16). Asked again once it reports, on a later arrival.
     let mut candidates: Vec<&VillageState> = villages
         .iter()
         .filter(|v| v.uuid != reference.uuid && !v.is_spawn_pending_or_done())
+        .filter(|v| load.map_or(true, |l| l.owner_takes_habs(v.world.as_ref())))
         .collect();
     candidates.sort_by(|a, b| {
         let rank = |v: &VillageState| load.map(|l| l.rank(v.world.as_ref()));
-        rank(a).cmp(&rank(b)).then_with(|| {
-            distance_squared(a.position, reference.position)
-                .total_cmp(&distance_squared(b.position, reference.position))
-        })
+        let refused = |v: &VillageState| rank(v).map(|r| r.refused);
+        let crosses = |v: &VillageState| !inside_one_zone(v, radius, load);
+        refused(a)
+            .cmp(&refused(b))
+            .then_with(|| crosses(a).cmp(&crosses(b)))
+            .then_with(|| rank(a).cmp(&rank(b)))
+            .then_with(|| {
+                distance_squared(a.position, reference.position)
+                    .total_cmp(&distance_squared(b.position, reference.position))
+            })
     });
     // With the load known, no more than MAX_PENDING_VILLAGES_PER_SERVER waiting per server.
     let owner = |v: &VillageState| -> Option<String> {
@@ -344,9 +583,15 @@ fn villages_to_request<'a>(
         if reserve >= target {
             break;
         }
-        if load.is_some() {
+        if let Some(load) = load {
+            // One at a time on a server refusing players: a spawn costs more on a loaded one.
+            let limit = if load.owner_accepts(village.world.as_ref()) || !load.any_accepting() {
+                MAX_PENDING_VILLAGES_PER_SERVER
+            } else {
+                MAX_PENDING_VILLAGES_ON_REFUSING
+            };
             let waiting = pending.entry(owner(village)).or_default();
-            if *waiting >= MAX_PENDING_VILLAGES_PER_SERVER {
+            if *waiting >= limit {
                 continue;
             }
             *waiting += 1;
@@ -356,6 +601,112 @@ fn villages_to_request<'a>(
     }
     chosen
 }
+
+/// A spawn costs more on a server with players: at most one village every HABS_LOADED_EVERY
+/// on one taking players, every HABS_REFUSING_EVERY on one refusing them (`load` as
+/// published), none on a server without players (the startup prespawn, a fresh child).
+/// Spawned in under a second, a village is hardly ever pending, so the pending limits alone
+/// let 29 villages through in 30 s onto a refusing server down to 7 tps, and 4 in one second
+/// onto one with 49 players, down to 39 tps (preprod, 2026-10-21). `last`: when each server
+/// was last asked.
+fn pace_spawns<'a>(
+    targets: Vec<&'a VillageState>,
+    load: Option<&LoadView>,
+    last: &mut HashMap<String, Instant>,
+    now: Instant,
+) -> Vec<&'a VillageState> {
+    let Some(load) = load else { return targets };
+    targets
+        .into_iter()
+        .filter(|v| {
+            let Some(server) = v.world.as_ref().and_then(|w| load.owner_of(w)) else { return true };
+            if load.players(server) == 0 {
+                return true;
+            }
+            let every = if load.accepts(server) { HABS_LOADED_EVERY } else { HABS_REFUSING_EVERY };
+            if last.get(&server.uuid).is_some_and(|at| now.duration_since(*at) < every) {
+                return false;
+            }
+            last.insert(server.uuid.clone(), now);
+            true
+        })
+        .collect()
+}
+
+/// See pace_spawns.
+const HABS_LOADED_EVERY: Duration = Duration::from_secs(10);
+const HABS_REFUSING_EVERY: Duration = Duration::from_secs(30);
+
+/// The servers whose unspawned villages cannot be asked for while the reserve stays under
+/// `target` once `chosen` are requested: held back by MAX_PENDING_VILLAGES_PER_SERVER, or
+/// refusing players (full, too slow) — habs are never asked of a refusing server. Each
+/// with its unspawned villages (2 at least), for the ServerManager to give part of them to
+/// an idle server (`gameserver:villages_wanted`). With every accepting server at 50 players
+/// and no village left in its zones, the villages to spawn sat in the zones of full servers
+/// and 380 players waited (preprod, 2026-10-21). `load` as published: a server refused by the
+/// throttle only takes players again 2 s later. Only with the load.
+fn villages_wanted<'a>(
+    villages: &'a [VillageState],
+    chosen: &[&VillageState],
+    max: usize,
+    target: usize,
+    load: Option<&LoadView>,
+) -> Vec<(String, Vec<&'a VillageState>)> {
+    let Some(load) = load else { return Vec::new() };
+    if free_reserve(villages, max, Some(load)) + max * chosen.len() >= target {
+        return Vec::new();
+    }
+    let owner = |v: &VillageState| v.world.as_ref().and_then(|w| load.owner_of(w)).map(|s| s.uuid.clone());
+    let mut pending: HashMap<String, usize> = HashMap::new();
+    for v in villages.iter().filter(|v| v.is_spawn_pending()).chain(chosen.iter().copied()) {
+        if let Some(uuid) = owner(v) {
+            *pending.entry(uuid).or_default() += 1;
+        }
+    }
+    let mut held: Vec<(String, Vec<&VillageState>)> = Vec::new();
+    for v in villages.iter().filter(|v| !v.is_spawn_pending_or_done() && !chosen.iter().any(|c| c.uuid == v.uuid)) {
+        let Some(uuid) = owner(v) else { continue };
+        let at_max = pending.get(&uuid).copied().unwrap_or(0) >= MAX_PENDING_VILLAGES_PER_SERVER
+            && load.owner_takes_habs(v.world.as_ref());
+        if !at_max && !load.owner_refusing(v.world.as_ref()) {
+            continue;
+        }
+        match held.iter_mut().find(|(u, _)| *u == uuid) {
+            Some((_, list)) => list.push(v),
+            None => held.push((uuid, vec![v])),
+        }
+    }
+    held.retain(|(_, list)| list.len() >= 2);
+    held
+}
+
+/// Ask the ServerManager to split the servers `villages_wanted` returns, at most every
+/// VILLAGES_WANTED_EVERY per server.
+async fn send_villages_wanted(events: &EventSystem, wanted: Vec<(String, Vec<&VillageState>)>) {
+    static LAST: std::sync::Mutex<Option<HashMap<String, Instant>>> = std::sync::Mutex::new(None);
+    for (server_uuid, list) in wanted {
+        {
+            let mut last = LAST.lock().unwrap();
+            let last = last.get_or_insert_with(HashMap::new);
+            if last.get(&server_uuid).is_some_and(|at| at.elapsed() < VILLAGES_WANTED_EVERY) {
+                continue;
+            }
+            last.insert(server_uuid.clone(), Instant::now());
+        }
+        let worlds: Vec<&ObjectWorld> = list.iter().filter_map(|v| v.world.as_ref()).collect();
+        info!(
+            "plugin genericprops (new_player): server {} waits for its villages, {} more to spawn there: asking for a split",
+            server_uuid, worlds.len()
+        );
+        let payload = serde_json::json!({ "server_uuid": server_uuid, "villages": worlds });
+        if let Err(e) = events.emit_plugin("gameserver", "villages_wanted", &payload).await {
+            error!("plugin genericprops (new_player): failed to emit villages_wanted: {}", e);
+        }
+    }
+}
+
+/// How often one server is asked for a split for villages.
+const VILLAGES_WANTED_EVERY: Duration = Duration::from_secs(10);
 
 /// Every poi_village that houses players (see houses_players), with the occupancy of the
 /// spawnbuildings linked to it by `poi_uuid`.
@@ -394,17 +745,8 @@ async fn collect_villages(gorc_instances: &Arc<GorcInstanceManager>) -> Vec<Vill
         }
     }
 
-    // Villages never move: their world is resolved once.
     for (i, own_local, parent_id) in anchors {
-        let cached = village_worlds().lock().await.get(&villages[i].uuid).cloned();
-        let world = match cached {
-            Some(world) => world,
-            None => {
-                let world = resolve_world(gorc_instances, own_local, parent_id).await;
-                village_worlds().lock().await.insert(villages[i].uuid.clone(), world.clone());
-                world
-            }
-        };
+        let world = world_of(gorc_instances, &villages[i].uuid, own_local, parent_id).await;
         villages[i].world = Some(world);
     }
 
@@ -416,21 +758,21 @@ async fn collect_villages(gorc_instances: &Arc<GorcInstanceManager>) -> Vec<Vill
                 instance.get_object::<GenericProps>().map(|b| {
                     let poi_uuid = prop_value(b, "poi_uuid").and_then(|p| p.as_str()).unwrap_or_default().to_string();
                     let occupancy = prop_value(b, "apartments").and_then(|a| a.as_array()).map_or(0, |a| a.len());
-                    (poi_uuid, occupancy, prop_i64(b, "available", 0).max(0) as usize)
+                    (poi_uuid, b.uuid.clone(), occupancy, prop_i64(b, "available", 0).max(0) as usize, read_own_local_and_parent(b))
                 })
             })
             .await
             .flatten();
-        let Some((poi_uuid, occupancy, available)) = building else { continue };
-        match index.get(&poi_uuid) {
-            Some(&i) => {
-                let village = &mut villages[i];
-                village.occupancy += occupancy;
-                village.free += available;
-                village.buildings.push(gorc_id);
-            }
-            None => orphans += 1,
-        }
+        let Some((poi_uuid, uuid, occupancy, available, (own_local, parent_id))) = building else { continue };
+        let Some(&i) = index.get(&poi_uuid) else {
+            orphans += 1;
+            continue;
+        };
+        let world = world_of(gorc_instances, &uuid, own_local, parent_id).await;
+        let village = &mut villages[i];
+        village.occupancy += occupancy;
+        village.free += available;
+        village.buildings.push(Building { gorc_id, world: Some(world), free: available });
     }
     if orphans > 0 {
         warn!("plugin genericprops (new_player): {} spawnbuilding(s) not linked to a known poi_village (poi_uuid), never used for new players", orphans);
@@ -438,14 +780,65 @@ async fn collect_villages(gorc_instances: &Arc<GorcInstanceManager>) -> Vec<Vill
     villages
 }
 
-fn village_worlds() -> &'static Mutex<HashMap<String, ObjectWorld>> {
-    static WORLDS: OnceLock<Mutex<HashMap<String, ObjectWorld>>> = OnceLock::new();
+/// One entry per server holding some of a village's habs, with those habs, their free
+/// apartments and a world in that server's zones: a new player lands on the server owning
+/// its apartment, so that server is the one to admit, throttle and cap it. Admitted on the
+/// server owning the village's centre, 119 players were sent to a server that never had their
+/// hab, its village raised to 120 while that server held 163 players (preprod, 2026-10-20).
+/// The occupancy stays the whole village's: the cap is about players in one place.
+fn by_hab_owner(villages: Vec<VillageState>, load: Option<&LoadView>) -> Vec<VillageState> {
+    let Some(load) = load else { return villages };
+    let mut parts = Vec::with_capacity(villages.len());
+    for village in villages {
+        if village.buildings.is_empty() {
+            parts.push(village);
+            continue;
+        }
+        let mut by_owner: Vec<(Option<String>, Vec<Building>)> = Vec::new();
+        for building in &village.buildings {
+            let owner = building.world.as_ref().or(village.world.as_ref())
+                .and_then(|w| load.owner_of(w))
+                .map(|s| s.uuid.clone());
+            match by_owner.iter_mut().find(|(o, _)| *o == owner) {
+                Some((_, buildings)) => buildings.push(building.clone()),
+                None => by_owner.push((owner, vec![building.clone()])),
+            }
+        }
+        for (_, buildings) in by_owner {
+            let mut part = village.clone();
+            part.world = buildings.iter().find_map(|b| b.world.clone()).or_else(|| village.world.clone());
+            part.free = buildings.iter().map(|b| b.free).sum();
+            part.buildings = buildings;
+            parts.push(part);
+        }
+    }
+    parts
+}
+
+/// The world of a village or a hab, resolved again only when its own position moved. A
+/// village is stood on its ground by Godot before it spawns its habs (radially, possibly by
+/// kilometres: startup_items.json does not know the terrain), and a hab settles on its
+/// terrain pad: a world cached from the first position put a village on the wrong server.
+async fn world_of(gorc_instances: &Arc<GorcInstanceManager>, uuid: &str, own_local: Vec3, parent_id: Option<String>) -> ObjectWorld {
+    if let Some((at, world)) = village_worlds().lock().await.get(uuid) {
+        if *at == own_local {
+            return world.clone();
+        }
+    }
+    let world = resolve_world(gorc_instances, own_local, parent_id).await;
+    village_worlds().lock().await.insert(uuid.to_string(), (own_local, world.clone()));
+    world
+}
+
+/// Worlds of the villages and of their habs, by uuid, with the own position they come from.
+fn village_worlds() -> &'static Mutex<HashMap<String, (Vec3, ObjectWorld)>> {
+    static WORLDS: OnceLock<Mutex<HashMap<String, (Vec3, ObjectWorld)>>> = OnceLock::new();
     WORLDS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Keep `free_reserve` places ahead of the arrivals: mark the closest unspawned villages to
-/// `reference` as `spawn_requested`. Godot (the server owning each zone) then spawns their
-/// habs, which come back as spawnbuildings with the village's poi_uuid.
+/// Keep the reserve of places (reserve_target) ahead of the arrivals: mark the closest
+/// unspawned villages to `reference` as `spawn_requested`. Godot (the server owning each
+/// zone) then spawns their habs, which come back as spawnbuildings with the village's poi_uuid.
 async fn request_villages(
     gorc_instances: &GorcInstanceManager,
     events: &EventSystem,
@@ -454,31 +847,51 @@ async fn request_villages(
     load: Option<&LoadView>,
 ) {
     let config = village_config();
-    let targets = villages_to_request(villages, reference, config.max_players_per_village, config.free_reserve, load);
+    let target = reserve_target(villages, &config, mesh_load::view().as_ref());
+    let targets = villages_to_request(villages, reference, config.max_players_per_village, target, config.village_radius, load);
+    let targets = {
+        static LAST: std::sync::Mutex<Option<HashMap<String, Instant>>> = std::sync::Mutex::new(None);
+        let mut last = LAST.lock().unwrap();
+        pace_spawns(targets, mesh_load::view().as_ref(), last.get_or_insert_with(HashMap::new), Instant::now())
+    };
+    let wanted = villages_wanted(villages, &targets, config.max_players_per_village, target, mesh_load::view().as_ref());
+    send_villages_wanted(events, wanted).await;
     if targets.is_empty() {
         let reserve = free_reserve(villages, config.max_players_per_village, load);
-        if reserve < config.free_reserve {
+        if reserve < target && reserve_warning_due() {
             warn!(
                 "plugin genericprops (new_player): no unspawned poi_village left to request near {} ({} free places, reserve {})",
-                reference.name, reserve, config.free_reserve
+                reference.name, reserve, target
             );
         }
         return;
     }
-    for target in targets {
+    for village in targets {
         info!(
-            "plugin genericprops (new_player): requesting the habs of village {} ({}) near {} on {} (free places: {}, reserve: {})",
-            target.name, target.uuid, reference.name, owner_label(target, load),
-            free_reserve(villages, config.max_players_per_village, load), config.free_reserve
+            "plugin genericprops (new_player): requesting the habs of village {} ({}) near {} on {} (free places: {}, reserve: {}{})",
+            village.name, village.uuid, reference.name, owner_label(village, load),
+            free_reserve(villages, config.max_players_per_village, load), target,
+            if inside_one_zone(village, config.village_radius, load) { "" } else { ", across a zone border" }
         );
-        request_village(gorc_instances, events, target).await;
+        request_village(gorc_instances, events, village).await;
     }
+}
+
+/// Whether the `no unspawned poi_village left` warning may be logged again (RESERVE_WARN_EVERY).
+fn reserve_warning_due() -> bool {
+    static LAST: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+    let mut last = LAST.lock().unwrap();
+    let due = last.map_or(true, |at| at.elapsed() >= RESERVE_WARN_EVERY);
+    if due {
+        *last = Some(Instant::now());
+    }
+    due
 }
 
 /// Mark `target` as `spawn_requested`, for Godot to spawn its habs.
 async fn request_village(gorc_instances: &GorcInstanceManager, events: &EventSystem, target: &VillageState) {
-    // In-memory first, still under the assignment lock: the next player sees the request
-    // and does not send it again.
+    // In-memory first, on the placement thread: the next pass sees the request and does
+    // not send it again.
     if let Some(gorc_id) = target.gorc_id {
         gorc_instances
             .with_object_mut(gorc_id, |instance| {
@@ -606,213 +1019,778 @@ async fn try_assign_in_building(
     Ok(Some(commit_data))
 }
 
-pub async fn handle_new_player(
-    event: serde_json::Value,
-    events: Arc<EventSystem>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let player_uuid = event["object_uuid"].as_str().unwrap_or_default().to_string();
-    let player_name = event["object_data"]["name"].as_str().unwrap_or_default().to_string();
-    let is_npc = event["object_data"]["is_npc"].as_bool().unwrap_or(false);
+// ---- placement thread
+
+/// Why a player is still in the placement queue, for the client and the logs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Wait {
+    /// No village has room: the requested habs have not arrived yet.
+    Habs,
+    /// Its village's server takes no new player now (full, under placement_min_tps, in a
+    /// split or merge, loading, frozen).
+    ServerFull,
+    /// Startup: the prespawned villages are not all ready yet (see prespawn_ready). Never
+    /// disconnected for it, unlike Habs.
+    Prespawn,
+}
+
+impl Wait {
+    fn reason(self) -> &'static str {
+        match self {
+            // The client knows these two: the startup is a wait for habs to it.
+            Wait::Habs | Wait::Prespawn => "habs",
+            Wait::ServerFull => "server_full",
+        }
+    }
+}
+
+/// The apartment a returning player already has, waiting for its server to take it.
+#[derive(Debug, Clone)]
+struct Home {
+    /// Local to the building.
+    position: Vec3,
+    building_uuid: String,
+    world: ObjectWorld,
+}
+
+/// A player waiting for an apartment, or for the server owning it, on the placement thread.
+struct Arrival {
+    player_uuid: String,
+    player_name: String,
+    is_npc: bool,
+    since: Instant,
+    /// Looked for an apartment given in an earlier session already.
+    home_checked: bool,
+    /// `waits for the requested village habs` logged already.
+    waiting_logged: bool,
+    /// A returning player: its `object_data` from persistence (everything it carries
+    /// survives), spawned in its apartment instead of where it was last seen.
+    stored: Option<serde_json::Value>,
+    home: Option<Home>,
+    wait: Option<Wait>,
+    notified_at: Option<Instant>,
+    /// The place it was last told, from 1.
+    notified_place: Option<usize>,
+    /// Since when no server can give it a place (see FULL_GRACE).
+    full_since: Option<Instant>,
+    /// Since when it waits for village habs (see HABS_WAIT, OVERFLOW_AFTER): the time it
+    /// was queued for a full server before does not count.
+    habs_since: Option<Instant>,
+}
+
+impl Arrival {
+    fn new(event: &serde_json::Value, stored: Option<serde_json::Value>) -> Arrival {
+        Arrival {
+            player_uuid: event["object_uuid"].as_str().unwrap_or_default().to_string(),
+            player_name: event["object_data"]["name"].as_str().unwrap_or_default().to_string(),
+            is_npc: event["object_data"]["is_npc"].as_bool().unwrap_or(false),
+            since: Instant::now(),
+            home_checked: false,
+            waiting_logged: false,
+            stored,
+            home: None,
+            wait: None,
+            notified_at: None,
+            notified_place: None,
+            full_since: None,
+            habs_since: None,
+        }
+    }
+
+    /// Queued for `wait`: logged once per reason.
+    fn queue(&mut self, wait: Wait, why: impl FnOnce() -> String) {
+        if self.wait != Some(wait) && wait != Wait::Habs {
+            info!("plugin genericprops (new_player): player {} queued: {}", self.player_uuid, why());
+        }
+        match wait {
+            Wait::Habs => { self.habs_since.get_or_insert_with(Instant::now); }
+            Wait::ServerFull | Wait::Prespawn => self.habs_since = None,
+        }
+        self.wait = Some(wait);
+    }
+
+    /// How long it has been waiting for village habs.
+    fn habs_waited(&self) -> Duration {
+        self.habs_since.map_or(Duration::ZERO, |at| at.elapsed())
+    }
+
+    /// Whether no server could give it a place (`full` now) for FULL_GRACE in a row.
+    fn full_for_too_long(&mut self, full: bool, now: Instant) -> bool {
+        if !full {
+            self.full_since = None;
+            return false;
+        }
+        now.duration_since(*self.full_since.get_or_insert(now)) >= FULL_GRACE
+    }
+
+    /// Leaves the queue to be spawned.
+    fn log_admitted(&self) {
+        if matches!(self.wait, Some(Wait::ServerFull | Wait::Prespawn)) {
+            info!("plugin genericprops (new_player): player {} leaves the queue after {:?}", self.player_uuid, self.since.elapsed());
+        }
+    }
+}
+
+enum Placement {
+    Arrival(Arrival),
+    /// Spawnbuildings were registered: the waiting players may get an apartment now.
+    HabsArrived,
+    /// A new pool load: a server may take players again.
+    LoadUpdated,
+}
+
+static PLACEMENT: OnceLock<Sender<Placement>> = OnceLock::new();
+
+/// Players the placement thread let through to `create_object`: their next one is created,
+/// any other is queued (see `enqueue_returning`).
+fn admitted() -> &'static std::sync::Mutex<HashSet<String>> {
+    static ADMITTED: OnceLock<std::sync::Mutex<HashSet<String>>> = OnceLock::new();
+    ADMITTED.get_or_init(|| std::sync::Mutex::new(HashSet::new()))
+}
+
+/// True once per admission: the `create_object` of this player may create it.
+pub fn take_admitted(player_uuid: &str) -> bool {
+    admitted().lock().unwrap().remove(player_uuid)
+}
+
+/// Whether a player may be spawned in `world` now: its server takes players. However long
+/// the player waited: a server that refuses is never given a player (forced in after 120 s,
+/// returning NPCs held one server at 238 players and 20 tps, preprod 2026-10-20); the split
+/// or the tps coming back lets the queue go. No load known, or no server owning the place:
+/// nothing to protect.
+fn admits(load: Option<&LoadView>, world: Option<&ObjectWorld>) -> bool {
+    refusing_owner(load, world).is_none()
+}
+
+/// The server owning `world` when it takes no new player now.
+fn refusing_owner<'a>(load: Option<&'a LoadView>, world: Option<&ObjectWorld>) -> Option<&'a ServerLoad> {
+    let load = load?;
+    let server = world.and_then(|w| load.owner_of(w))?;
+    (!load.accepts(server)).then_some(server)
+}
+
+/// The players given to each server over the last ADMIT_WINDOW, against `admit_per_server`.
+#[derive(Debug, Default)]
+struct Throttle {
+    limit: usize,
+    by_server: HashMap<String, VecDeque<Instant>>,
+}
+
+impl Throttle {
+    fn prune(&mut self, now: Instant) {
+        for admitted in self.by_server.values_mut() {
+            while admitted.front().is_some_and(|at| now.duration_since(*at) >= ADMIT_WINDOW) {
+                admitted.pop_front();
+            }
+        }
+        self.by_server.retain(|_, admitted| !admitted.is_empty());
+    }
+
+    fn allows(&self, server_uuid: &str) -> bool {
+        self.limit == 0 || self.by_server.get(server_uuid).map_or(0, VecDeque::len) < self.limit
+    }
+
+    fn record(&mut self, server_uuid: &str, now: Instant) {
+        if self.limit > 0 {
+            self.by_server.entry(server_uuid.to_string()).or_default().push_back(now);
+        }
+    }
+
+    /// The pool load, the servers that had their share of arrivals refusing in it: the
+    /// placement prefers the others, the queue holds the rest.
+    fn view(&self) -> Option<LoadView> {
+        mesh_load::view().map(|mut load| {
+            for server in self.by_server.keys().filter(|s| !self.allows(s)) {
+                load.refuse(server);
+            }
+            load
+        })
+    }
+}
+
+/// Whether a waiting player at `place` is told so now: never told yet, its place moved
+/// (at most every QUEUED_MIN_GAP), or still there for QUEUED_NOTIFY.
+fn queued_notice_due(notified_at: Option<Instant>, notified_place: Option<usize>, place: usize, now: Instant) -> bool {
+    let Some(at) = notified_at else { return true };
+    let since = now.duration_since(at);
+    since >= QUEUED_NOTIFY || (notified_place != Some(place) && since >= QUEUED_MIN_GAP)
+}
+
+/// Why a server takes no player now, for the queue log.
+fn refusal(server: String, throttled: bool) -> String {
+    if throttled {
+        format!("{} had its share of arrivals for now (queue_admit_per_server)", server)
+    } else {
+        format!("{} takes no player now", server)
+    }
+}
+
+/// `name (players, tps)` of a server, for the logs.
+fn server_label(load: &LoadView, server: &ServerLoad) -> String {
+    format!("{} ({} players, {} tps)", server.name, load.players(server), server.tps)
+}
+
+/// Start the placement thread. Call once, at plugin startup.
+///
+/// Every new player used to look for an apartment in its own luminal task, and to poll
+/// every second under one global lock while the habs it waited for were not there.
+/// Luminal re-polls a pending task at once (it never parks one), so 400-600 players
+/// waiting for village habs kept 22-25 cores busy, Horizon CPU-throttled, with one OS
+/// thread spawned per poll (preprod NPC test, 2026-10-16). Here the waiting players are a
+/// queue owned by one thread, placed in one pass whenever players or habs arrive, and the
+/// `new_player` handler returns at once. Assignments are serialized by the thread itself.
+///
+/// No tokio runtime on this thread (futures' executor), as on luminal: the plugin
+/// handlers it emits to run the way they do from there.
+pub fn start_placement(events: Arc<EventSystem>) {
+    let (tx, rx) = mpsc::channel();
+    if PLACEMENT.set(tx).is_err() {
+        warn!("plugin genericprops (new_player): placement thread already started");
+        return;
+    }
+    let spawned = std::thread::Builder::new()
+        .name("genericprops-placement".to_string())
+        .spawn(move || run(events, rx));
+    match spawned {
+        Ok(_) => info!("plugin genericprops (new_player): placement thread started"),
+        Err(e) => error!("plugin genericprops (new_player): ❌ failed to start the placement thread: {} - new players will never spawn", e),
+    }
+}
+
+/// The `new_player` event: queue the player for an apartment, return at once.
+pub fn enqueue_new_player(event: &serde_json::Value) {
+    let arrival = Arrival::new(event, None);
     info!(
         "plugin genericprops (new_player): received new_player event for player_uuid={} player_name={}",
-        player_uuid, player_name
+        arrival.player_uuid, arrival.player_name
     );
+    send_arrival(arrival);
+}
 
+/// The `create_object` of a player persistence knows (back from an earlier session): it
+/// goes through the queue too, and spawns in its apartment.
+pub fn enqueue_returning(event: &serde_json::Value) {
+    let arrival = Arrival::new(event, Some(event["object_data"].clone()));
+    info!(
+        "plugin genericprops (new_player): returning player player_uuid={} player_name={} queued for its apartment",
+        arrival.player_uuid, arrival.player_name
+    );
+    send_arrival(arrival);
+}
+
+fn send_arrival(arrival: Arrival) {
+    let player_uuid = arrival.player_uuid.clone();
+    match PLACEMENT.get() {
+        Some(tx) => {
+            if tx.send(Placement::Arrival(arrival)).is_err() {
+                error!("plugin genericprops (new_player): placement thread is gone, player {} never spawns", player_uuid);
+            }
+        }
+        None => error!("plugin genericprops (new_player): placement thread not started, player {} never spawns", player_uuid),
+    }
+}
+
+/// A spawnbuilding was registered: the players waiting for habs look again.
+pub fn habs_arrived() {
+    if let Some(tx) = PLACEMENT.get() {
+        let _ = tx.send(Placement::HabsArrived);
+    }
+}
+
+/// A new `servers_load`: the players waiting for their server look again.
+pub fn load_updated() {
+    if let Some(tx) = PLACEMENT.get() {
+        let _ = tx.send(Placement::LoadUpdated);
+    }
+}
+
+fn run(events: Arc<EventSystem>, rx: Receiver<Placement>) {
+    let mut waiting: VecDeque<Arrival> = VecDeque::new();
+    let mut kicks: Vec<(Instant, String, &'static str)> = Vec::new();
+    let mut retry_at: Option<Instant> = None;
+    let mut throttle = Throttle::default();
+    loop {
+        let next = [retry_at, kicks.iter().map(|(at, _, _)| *at).min()].into_iter().flatten().min();
+        let first = match next {
+            Some(at) => rx.recv_timeout(at.saturating_duration_since(Instant::now())),
+            None => rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
+        };
+        let mut pass = false;
+        match first {
+            Ok(message) => {
+                // Take the whole burst it starts in the same pass.
+                let until = Instant::now() + COALESCE;
+                let mut message = Some(message);
+                while let Some(m) = message.take() {
+                    if let Placement::Arrival(arrival) = m {
+                        // Reconnected while still queued: the new session replaces the old.
+                        waiting.retain(|a| a.player_uuid != arrival.player_uuid);
+                        waiting.push_back(arrival);
+                    }
+                    pass = true;
+                    message = rx.recv_timeout(until.saturating_duration_since(Instant::now())).ok();
+                }
+            }
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => return,
+        }
+
+        let now = Instant::now();
+        let (due, later): (Vec<_>, Vec<_>) = kicks.drain(..).partition(|(at, _, _)| *at <= now);
+        kicks = later;
+        for (_, player_uuid, message) in due {
+            block_on(kick(&events, &player_uuid, message));
+        }
+
+        if retry_at.is_some_and(|at| now >= at) {
+            pass = true;
+        }
+        if pass && !waiting.is_empty() {
+            block_on(place_waiting(&events, &mut waiting, &mut kicks, &mut throttle));
+            retry_at = None;
+        } else if pass {
+            block_on(keep_reserve_ahead(&events, &throttle));
+        }
+        if waiting.is_empty() {
+            retry_at = None;
+        } else if retry_at.is_none() {
+            retry_at = Some(Instant::now() + HABS_RETRY);
+        }
+    }
+}
+
+/// One pass over the waiting players: their apartment from an earlier session, else a new
+/// one; the rest wait for habs, are rejected past HABS_WAIT, or spawn at the origin when no
+/// habs are coming at all. A player whose village is on a server taking no player now
+/// (split under way, tps too low, full) waits for it, however long it takes.
+async fn place_waiting(
+    events: &Arc<EventSystem>,
+    waiting: &mut VecDeque<Arrival>,
+    kicks: &mut Vec<(Instant, String, &'static str)>,
+    throttle: &mut Throttle,
+) {
     let Some(gorc_instances) = events.get_gorc_instances() else {
-        error!("🎮 GORC: ❌ No GORC instances manager available");
-        return Ok(());
+        error!("🎮 GORC: ❌ No GORC instances manager available, {} new player(s) dropped", waiting.len());
+        waiting.clear();
+        return;
     };
+    let config = village_config();
+    throttle.limit = config.admit_per_server;
+    throttle.prune(Instant::now());
+    let mut load = throttle.view();
+    // Read on the load itself: a server that only had its share of arrivals is not full.
+    let pool_full = mesh_load::view().is_some_and(|l| l.all_full());
+    let now = Instant::now();
+    // Waiting for their server, in arrival order with the others at the end of the pass.
+    let mut queued: Vec<Arrival> = Vec::new();
 
-    let mut spawn_position = Vec3::zero();
-    let mut found = false;
-    let mut building_uuid = String::new();
+    // Back from an earlier session: the apartment they already have.
+    let unchecked: HashSet<String> = waiting.iter().filter(|a| !a.home_checked).map(|a| a.player_uuid.clone()).collect();
+    let homes = if unchecked.is_empty() { HashMap::new() } else { existing_apartments(&gorc_instances, &unchecked).await };
+    let mut homeless: VecDeque<Arrival> = VecDeque::new();
+    for mut arrival in waiting.drain(..) {
+        if !arrival.home_checked {
+            arrival.home_checked = true;
+            if let Some((slot, position, uuid)) = homes.get(&arrival.player_uuid) {
+                info!(
+                    "plugin genericprops (new_player): player {} already has apartment {:?} in building {} → position {:?}",
+                    arrival.player_uuid, slot, uuid, position
+                );
+                let world = resolve_player_world(&gorc_instances, *position, Some(uuid.clone())).await;
+                arrival.home = Some(Home { position: *position, building_uuid: uuid.clone(), world });
+            }
+        }
+        let Some(home) = arrival.home.clone() else {
+            homeless.push_back(arrival);
+            continue;
+        };
+        if arrival.wait.is_some() && !player_connected(events, &arrival.player_uuid).await {
+            info!("plugin genericprops (new_player): player {} left while queued", arrival.player_uuid);
+            continue;
+        }
+        let owner = load.as_ref().and_then(|l| l.owner_of(&home.world)).map(|s| s.uuid.clone());
+        let throttled = owner.as_ref().is_some_and(|uuid| !throttle.allows(uuid));
+        if throttled || !admits(load.as_ref(), Some(&home.world)) {
+            if arrival.full_for_too_long(pool_full, now) {
+                disconnect_full(events, kicks, arrival).await;
+                continue;
+            }
+            let why = refusing_owner(load.as_ref(), Some(&home.world)).zip(load.as_ref()).map(|(s, l)| server_label(l, s));
+            arrival.queue(Wait::ServerFull, || refusal(why.unwrap_or_default(), throttled));
+            queued.push(arrival);
+            continue;
+        }
+        if let Some(uuid) = owner {
+            mesh_load::note_placed(&uuid);
+            throttle.record(&uuid, Instant::now());
+            load = throttle.view();
+        }
+        arrival.log_admitted();
+        spawn_player(events, &arrival, home.position, &home.building_uuid, false).await;
+    }
 
-    // Pass 1 (no lock): check whether this player already has an apartment.
-    // This is purely read-only — no concurrent modification risk.
+    let max = village_config().max_players_per_village;
+    let mut villages = if homeless.is_empty() { Vec::new() } else { by_hab_owner(collect_villages(&gorc_instances).await, load.as_ref()) };
+    // Startup: nobody new is placed before the prespawned villages are all ready, the
+    // first ones would otherwise take every arrival (and their server) while the others
+    // spawn. They wait in the queue, never disconnected for it.
+    if !homeless.is_empty() && !prespawn_ready(&villages, &config, mesh_load::view().as_ref()) {
+        for mut arrival in homeless.drain(..) {
+            if !player_connected(events, &arrival.player_uuid).await {
+                info!("plugin genericprops (new_player): player {} left while the villages were spawning", arrival.player_uuid);
+                continue;
+            }
+            arrival.queue(Wait::Prespawn, || "the prespawned villages are not all ready yet".to_string());
+            queued.push(arrival);
+        }
+    }
+    // On the load as published: a server refused by the throttle takes players again in 2 s.
+    let room_coming = room_can_come(&villages, max, mesh_load::view().as_ref());
+    let mut last_village: Option<usize> = None;
+    let mut placed: Vec<(Arrival, Vec3, String)> = Vec::new();
+    let mut unplaced: VecDeque<Arrival> = VecDeque::new();
+    while let Some(mut arrival) = homeless.pop_front() {
+        if !player_connected(events, &arrival.player_uuid).await {
+            info!("plugin genericprops (new_player): player {} left before getting an apartment", arrival.player_uuid);
+            continue;
+        }
+        let overflow = !room_coming || arrival.habs_waited() >= OVERFLOW_AFTER;
+        // By identity: a village across a zone border has one entry per server (by_hab_owner).
+        let selected = select_village(&villages, &AssignRequest::default(), max, load.as_ref(), overflow)
+            .and_then(|chosen| villages.iter().position(|v| std::ptr::eq(v, chosen)));
+        let Some(index) = selected else {
+            // No room under the caps anywhere: none for the next ones either.
+            unplaced.push_back(arrival);
+            unplaced.extend(homeless.drain(..));
+            break;
+        };
+        // The best village is on a server that takes no player now (the accepting ones
+        // come first): wait for it rather than overload it. Its apartment is given only
+        // then, so a village or a server freed meanwhile takes the player instead.
+        let owner = load.as_ref().zip(villages[index].world.as_ref()).and_then(|(l, w)| l.owner_of(w)).map(|s| s.uuid.clone());
+        let throttled = owner.as_ref().is_some_and(|uuid| !throttle.allows(uuid));
+        if let Some(server) = refusing_owner(load.as_ref(), villages[index].world.as_ref()) {
+            if arrival.full_for_too_long(pool_full, now) {
+                disconnect_full(events, kicks, arrival).await;
+                continue;
+            }
+            let label = server_label(load.as_ref().unwrap(), server);
+            arrival.queue(Wait::ServerFull, || refusal(label, throttled));
+            queued.push(arrival);
+            continue;
+        }
+        let cap = village_cap(&villages, &villages[index], max, load.as_ref(), overflow);
+        note_cap(&villages[index], cap, max, load.as_ref());
+        let mut home = None;
+        let buildings: Vec<GorcObjectId> = villages[index].buildings.iter().map(|b| b.gorc_id).collect();
+        for gorc_id in buildings {
+            match try_assign_in_building(&gorc_instances, events, gorc_id, &arrival.player_uuid, &arrival.player_name).await {
+                Ok(Some(found)) => {
+                    home = Some(found);
+                    break;
+                }
+                Ok(None) => {}
+                Err(e) => error!("plugin genericprops (new_player): apartment in building {} for player {}: {}", gorc_id, arrival.player_uuid, e),
+            }
+        }
+        match home {
+            Some((position, uuid)) => {
+                let village = &villages[index];
+                info!(
+                    "plugin genericprops (new_player): player {} gets an apartment in village {} ({}/{} players) on {}",
+                    arrival.player_uuid, village.name, village.occupancy + 1, cap, owner_label(village, load.as_ref())
+                );
+                if let Some(uuid) = &owner {
+                    mesh_load::note_placed(uuid);
+                    throttle.record(uuid, Instant::now());
+                    // The next player of this pass sees it, as the next waiter used to.
+                    load = throttle.view();
+                }
+                let village_uuid = village.uuid.clone();
+                for part in villages.iter_mut().filter(|v| v.uuid == village_uuid) {
+                    part.occupancy += 1;
+                }
+                let village = &mut villages[index];
+                village.free = village.free.saturating_sub(1);
+                last_village = Some(index);
+                placed.push((arrival, position, uuid));
+            }
+            None => {
+                // Its buildings are full after all: `free` came from a stale `available`.
+                villages[index].free = 0;
+                homeless.push_front(arrival);
+            }
+        }
+    }
+
+    // Keep the reserve of places ahead of the next arrivals, counting the apartments just given.
+    if !villages.is_empty() {
+        keep_reserve(&gorc_instances, events, &villages, last_village.map(|i| &villages[i]), load.as_ref()).await;
+    }
+
+    if !unplaced.is_empty() {
+        // Habs requested and not arrived yet (Godot still loading their planet, spawning
+        // them): wait for them rather than spawning the players at the origin.
+        let villages_now = collect_villages(&gorc_instances).await;
+        let habs_coming = villages_now.iter().any(VillageState::is_spawn_pending);
+        // Every village spawned and its buildings full: nowhere to put anyone.
+        let no_room_at_all = villages_now.iter().all(|v| v.free == 0 && v.is_spawn_pending_or_done());
+        for mut arrival in unplaced {
+            if !habs_coming && villages_now.is_empty() {
+                // No village in this universe at all: nothing to wait for.
+                warn!("plugin genericprops (new_player): no poi_village, player {} spawning at origin", arrival.player_uuid);
+                spawn_player(events, &arrival, Vec3::zero(), "", false).await;
+            } else if !habs_coming && arrival.full_for_too_long(no_room_at_all, now) {
+                disconnect_full(events, kicks, arrival).await;
+            } else if !habs_coming {
+                // Room only on a frozen server, or villages its owner cannot be asked for yet,
+                // or every apartment taken for less than FULL_GRACE: wait, never at the origin.
+                arrival.queue(Wait::ServerFull, || "no village has an apartment it can be given now".to_string());
+                waiting.push_back(arrival);
+            } else if arrival.habs_waited() >= HABS_WAIT {
+                warn!(
+                    "plugin genericprops (new_player): the village habs did not arrive within {:?}, player {} disconnected (server not ready)",
+                    HABS_WAIT, arrival.player_uuid
+                );
+                if send_error(events, &arrival.player_uuid, NOT_READY_CODE, NOT_READY_MESSAGE).await {
+                    kicks.push((Instant::now() + KICK_DELAY, arrival.player_uuid, NOT_READY_MESSAGE));
+                }
+            } else if !player_connected(events, &arrival.player_uuid).await {
+                info!("plugin genericprops (new_player): player {} left while waiting for the village habs", arrival.player_uuid);
+            } else {
+                if !arrival.waiting_logged {
+                    info!(
+                        "plugin genericprops (new_player): player {} waits for the requested village habs (up to {:?})",
+                        arrival.player_uuid, HABS_WAIT
+                    );
+                    arrival.waiting_logged = true;
+                }
+                arrival.queue(Wait::Habs, String::new);
+                waiting.push_back(arrival);
+            }
+        }
+    }
+
+    for (arrival, position, building_uuid) in placed {
+        arrival.log_admitted();
+        spawn_player(events, &arrival, position, &building_uuid, true).await;
+    }
+
+    // Everyone still waiting, first arrived first: told where they stand.
+    waiting.extend(queued);
+    waiting.make_contiguous().sort_by_key(|a| a.since);
+    let now = Instant::now();
+    for (index, arrival) in waiting.iter_mut().enumerate() {
+        let Some(wait) = arrival.wait else { continue };
+        let place = index + 1;
+        if queued_notice_due(arrival.notified_at, arrival.notified_place, place, now) {
+            send_queued(events, &arrival.player_uuid, wait, place).await;
+            arrival.notified_at = Some(now);
+            arrival.notified_place = Some(place);
+        }
+    }
+}
+
+/// Whether the startup is over: `prespawn_villages` villages (or every one there is) have
+/// their habs. Latched: once over, it never holds anyone again. Without the load (no prespawn
+/// then) or with `prespawn_villages` 0 there is no startup to wait for.
+fn prespawn_ready(villages: &[VillageState], config: &VillageConfig, load: Option<&LoadView>) -> bool {
+    static READY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if READY.load(std::sync::atomic::Ordering::Relaxed) {
+        return true;
+    }
+    let ready = prespawn_done(villages, config.prespawn_villages, load.is_some());
+    if ready {
+        READY.store(true, std::sync::atomic::Ordering::Relaxed);
+        info!("plugin genericprops (new_player): the prespawned villages are ready, new players are placed");
+    } else if reserve_warning_due() {
+        let spawned: HashSet<&str> = villages.iter().filter(|v| !v.buildings.is_empty()).map(|v| v.uuid.as_str()).collect();
+        info!(
+            "plugin genericprops (new_player): new players wait for the prespawned villages ({}/{} ready)",
+            spawned.len(), config.prespawn_villages
+        );
+    }
+    ready
+}
+
+/// `prespawn_ready` without the latch: `prespawn` villages with habs (a village split
+/// between servers counts once), or all of them when there are fewer.
+fn prespawn_done(villages: &[VillageState], prespawn: usize, with_load: bool) -> bool {
+    if !with_load || prespawn == 0 {
+        return true;
+    }
+    let all: HashSet<&str> = villages.iter().map(|v| v.uuid.as_str()).collect();
+    let spawned: HashSet<&str> = villages.iter().filter(|v| !v.buildings.is_empty()).map(|v| v.uuid.as_str()).collect();
+    !all.is_empty() && spawned.len() >= prespawn.min(all.len())
+}
+
+/// With nobody waiting (a new load every 5 s, habs arriving): keep the reserve anyway, so
+/// the villages are spawned before the players come (see prespawn_villages). Only with the
+/// pool load: without it nothing bounds the villages spawning at once on one server.
+async fn keep_reserve_ahead(events: &Arc<EventSystem>, throttle: &Throttle) {
+    let load = throttle.view();
+    let (Some(load), Some(gorc_instances)) = (load, events.get_gorc_instances()) else { return };
+    let villages = by_hab_owner(collect_villages(&gorc_instances).await, Some(&load));
+    // Before the startup items are imported there is nothing to ask for.
+    if villages.is_empty() {
+        return;
+    }
+    keep_reserve(&gorc_instances, events, &villages, None, Some(&load)).await;
+}
+
+/// Request habs so the reserve of places stays ahead of the arrivals, around `last` (the
+/// village players were just sent to), else the last full one, else the first village.
+async fn keep_reserve(
+    gorc_instances: &GorcInstanceManager,
+    events: &EventSystem,
+    villages: &[VillageState],
+    last: Option<&VillageState>,
+    load: Option<&LoadView>,
+) {
+    if let Some(reference) = last.or_else(|| last_full_village(villages)) {
+        request_villages(gorc_instances, events, villages, reference, load).await;
+        return;
+    }
+    // No habs anywhere yet: start with the first village, in case its startup request was
+    // lost (startup items imported before it existed).
+    let Some(first) = first_village(villages) else {
+        warn!("plugin genericprops (new_player): no poi_village to spawn players in");
+        return;
+    };
+    let mut after = villages.to_vec();
+    if !first.is_spawn_pending_or_done() {
+        info!(
+            "plugin genericprops (new_player): no village has habs yet, requesting the first one {} ({})",
+            first.name, first.uuid
+        );
+        request_village(gorc_instances, events, first).await;
+        if let Some(v) = after.iter_mut().find(|v| v.uuid == first.uuid) {
+            v.spawn_requested = true;
+        }
+    }
+    request_villages(gorc_instances, events, &after, first, load).await;
+}
+
+/// The apartment each of `players` was given in an earlier session: slot, position local to
+/// the building and building uuid, by player uuid. One scan of the buildings per pass.
+async fn existing_apartments(
+    gorc_instances: &GorcInstanceManager,
+    players: &HashSet<String>,
+) -> HashMap<String, ((i64, i64, i64), Vec3, String)> {
+    let mut homes = HashMap::new();
     for gorc_id in gorc_instances.get_objects_by_type("spawnbuilding").await {
-        let existing = gorc_instances
+        let found = gorc_instances
             .with_object_mut(gorc_id, |instance| {
                 let building = instance.get_object::<GenericProps>()?;
-                let slot = apartments(building)
+                let found: Vec<_> = apartments(building)
                     .iter()
-                    .find(|entry| entry.get("player_uuid").and_then(|v| v.as_str()) == Some(player_uuid.as_str()))
-                    .and_then(apartment_slot)?;
-                Some((slot, slot_position(building, slot), building.uuid.clone()))
+                    .filter_map(|entry| {
+                        let uuid = entry.get("player_uuid").and_then(|v| v.as_str()).filter(|u| players.contains(*u))?;
+                        let slot = apartment_slot(entry)?;
+                        Some((uuid.to_string(), (slot, slot_position(building, slot), building.uuid.clone())))
+                    })
+                    .collect();
+                Some(found)
             })
             .await
-            .flatten();
-        if let Some((slot, position, uuid)) = existing {
-            info!(
-                "plugin genericprops (new_player): player {} already has apartment {:?} in building {} → position {:?}",
-                player_uuid, slot, uuid, position
-            );
-            spawn_position = position;
-            building_uuid = uuid;
-            found = true;
+            .flatten()
+            .unwrap_or_default();
+        for (uuid, home) in found {
+            homes.entry(uuid).or_insert(home);
+        }
+        if homes.len() == players.len() {
             break;
         }
     }
+    homes
+}
 
-    // Pass 2 (locked): only reached when the player has no existing apartment.
-    // The lock serializes concurrent assignments so two players can never claim the same slot.
-    if !found {
-        let waiting_since = std::time::Instant::now();
-        let mut waiting_logged = false;
-        loop {
-            let mut habs_coming = false;
-            let apartment_guard = apartment_lock().lock().await;
-            let config = village_config();
-            let max = config.max_players_per_village;
-            let villages = collect_villages(&gorc_instances).await;
-            let load = mesh_load::view();
-
-            match select_village(&villages, &AssignRequest::default(), max, load.as_ref()) {
-                Some(village) => {
-                    for gorc_id in village.buildings.iter().copied() {
-                        if let Some((position, uuid)) =
-                            try_assign_in_building(&gorc_instances, &events, gorc_id, &player_uuid, &player_name).await?
-                        {
-                            info!(
-                                "plugin genericprops (new_player): player {} gets an apartment in village {} ({}/{} players) on {}",
-                                player_uuid, village.name, village.occupancy + 1, max, owner_label(village, load.as_ref())
-                            );
-                            if let Some(server) = load.as_ref().zip(village.world.as_ref()).and_then(|(l, w)| l.owner_of(w)) {
-                                mesh_load::note_placed(&server.uuid);
-                            }
-                            spawn_position = position;
-                            building_uuid = uuid;
-                            found = true;
-                            break;
-                        }
-                    }
-
-                    // Keep the reserve of places ahead of the next arrivals, counting the
-                    // apartment just given.
-                    let mut after = villages.clone();
-                    if found {
-                        if let Some(v) = after.iter_mut().find(|v| v.uuid == village.uuid) {
-                            v.occupancy += 1;
-                            v.free = v.free.saturating_sub(1);
-                        }
-                    }
-                    request_villages(&gorc_instances, &events, &after, village, load.as_ref()).await;
-                }
-                None => {
-                    // Solo players never go past the cap: the room left in the buildings is
-                    // kept for players joining their friends / group.
-                    match last_full_village(&villages) {
-                        Some(reference) => request_villages(&gorc_instances, &events, &villages, reference, load.as_ref()).await,
-                        // No habs anywhere yet: start with the first village, in case its startup
-                        // request was lost (startup items imported before it existed).
-                        None => match first_village(&villages) {
-                            Some(first) => {
-                                let mut after = villages.clone();
-                                if !first.is_spawn_pending_or_done() {
-                                    info!(
-                                        "plugin genericprops (new_player): no village has habs yet, requesting the first one {} ({})",
-                                        first.name, first.uuid
-                                    );
-                                    request_village(&gorc_instances, &events, first).await;
-                                    if let Some(v) = after.iter_mut().find(|v| v.uuid == first.uuid) {
-                                        v.spawn_requested = true;
-                                    }
-                                }
-                                request_villages(&gorc_instances, &events, &after, first, load.as_ref()).await;
-                            }
-                            None => warn!("plugin genericprops (new_player): no poi_village to spawn players in"),
-                        },
-                    }
-                    // Habs requested and not arrived yet (Godot still loading their planet,
-                    // spawning them): wait for them rather than spawning the player at the origin.
-                    habs_coming = collect_villages(&gorc_instances).await.iter().any(VillageState::is_spawn_pending);
-                    if !habs_coming {
-                        warn!(
-                            "plugin genericprops (new_player): every village is at its cap of {} players, player {} gets no apartment (raise village_free_reserve?)",
-                            max, player_uuid
-                        );
-                    }
-                }
-            }
-
-            // Release the lock before broadcasting. The GORC object is fully
-            // committed, so concurrent players waiting on the lock will see the
-            // updated occupancy list.
-            drop(apartment_guard);
-
-            if found || !habs_coming {
-                break;
-            }
-            if waiting_since.elapsed() >= HABS_WAIT {
-                warn!(
-                    "plugin genericprops (new_player): the village habs did not arrive within {:?}, player {} disconnected (server not ready)",
-                    HABS_WAIT, player_uuid
-                );
-                reject_not_ready(&events, &player_uuid).await;
-                return Ok(());
-            }
-            if !player_connected(&events, &player_uuid).await {
-                info!("plugin genericprops (new_player): player {} left while waiting for the village habs", player_uuid);
-                return Ok(());
-            }
-            if !waiting_logged {
-                info!(
-                    "plugin genericprops (new_player): player {} waits for the requested village habs (up to {:?})",
-                    player_uuid, HABS_WAIT
-                );
-                waiting_logged = true;
-            }
-            wait(HABS_POLL).await;
-        }
-
-        if found {
-            // Broadcast the current (authoritative) building state to nearby clients.
-            // broadcast_only=true tells handle_object_update to read the fresh GORC
-            // state and send it to clients WITHOUT calling update_object again —
-            // that would overwrite our committed data with a stale snapshot.
-            if let Err(e) = events.emit_plugin(
-                "genericprops",
-                "update_object_from_external",
-                &serde_json::json!({
-                    "object_type": "spawnbuilding",
-                    "object_uuid": building_uuid,
-                    "object_data": {},
-                    "broadcast_only": true,
-                }),
-            ).await {
-                error!("plugin genericprops (new_player): failed to broadcast building update: {}", e);
-            }
+/// Create the player object in GORC, in its apartment (`broadcast`: a new one, whose
+/// building state goes to the nearby clients first).
+async fn spawn_player(events: &EventSystem, arrival: &Arrival, spawn_position: Vec3, building_uuid: &str, broadcast: bool) {
+    if broadcast {
+        // Broadcast the current (authoritative) building state to nearby clients.
+        // broadcast_only=true tells handle_object_update to read the fresh GORC
+        // state and send it to clients WITHOUT calling update_object again —
+        // that would overwrite our committed data with a stale snapshot.
+        if let Err(e) = events.emit_plugin(
+            "genericprops",
+            "update_object_from_external",
+            &serde_json::json!({
+                "object_type": "spawnbuilding",
+                "object_uuid": building_uuid,
+                "object_data": {},
+                "broadcast_only": true,
+            }),
+        ).await {
+            error!("plugin genericprops (new_player): failed to broadcast building update: {}", e);
         }
     }
-
-    if !found {
-        warn!("plugin genericprops (new_player): no free spawnbuilding slot found for player {}, spawning at origin", player_uuid);
-    }
-    // Create the player object in the GORC system.
+    let object_data = player_object_data(arrival, spawn_position, building_uuid, broadcast);
+    admitted().lock().unwrap().insert(arrival.player_uuid.clone());
     if let Err(e) = events.emit_plugin(
         "genericprops",
         "create_object",
         &serde_json::json!({
             "object_type": "player",
-            "object_uuid": player_uuid,
-            "object_data": {
-                "name": player_name,
-                "position": { "x": spawn_position.x, "y": spawn_position.y, "z": spawn_position.z },
-                "rotation": { "x": 0.0, "y": 1.708, "z": 0.0 },
-                "parent_id": building_uuid,
-                "spawn_appartment_id": building_uuid,
-                "is_npc": is_npc,
-            }
+            "object_uuid": arrival.player_uuid,
+            "object_data": object_data,
         }),
     ).await {
+        admitted().lock().unwrap().remove(&arrival.player_uuid);
         error!("plugin genericprops (new_player): failed to emit create_object: {}", e);
     }
-
-    Ok(())
 }
 
+/// The player's `object_data`, in its apartment. A returning player keeps everything
+/// persistence stored but where it was last seen: it wakes up at home. Its apartment is
+/// its own and never changes, so its `spawn_appartment_id` stays, unless it had none or
+/// was just given one (`new_home`: no apartment of its own was found).
+fn player_object_data(arrival: &Arrival, spawn_position: Vec3, building_uuid: &str, new_home: bool) -> serde_json::Value {
+    let mut data = arrival
+        .stored
+        .as_ref()
+        .and_then(|stored| stored.as_object())
+        .cloned()
+        .unwrap_or_default();
+    let has_home = data.get("spawn_appartment_id").and_then(|v| v.as_str()).is_some_and(|s| !s.is_empty());
+    data.insert("name".into(), serde_json::json!(arrival.player_name));
+    data.insert("position".into(), serde_json::json!({ "x": spawn_position.x, "y": spawn_position.y, "z": spawn_position.z }));
+    data.insert("rotation".into(), serde_json::json!({ "x": 0.0, "y": 1.708, "z": 0.0 }));
+    data.insert("parent_id".into(), serde_json::json!(building_uuid));
+    if new_home || !has_home {
+        data.insert("spawn_appartment_id".into(), serde_json::json!(building_uuid));
+    }
+    data.insert("is_npc".into(), serde_json::json!(arrival.is_npc));
+    serde_json::Value::Object(data)
+}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const CONTAINER: (f64, f64, f64) = (-6.1, 2.6, 2.6);
+    const BESIDE_THE_BED: (f64, f64, f64) = (-4.75, 0.15, 0.85);
+
+    fn close(a: (f64, f64, f64), b: (f64, f64, f64)) -> bool {
+        (a.0 - b.0).abs() < 1e-9 && (a.1 - b.1).abs() < 1e-9 && (a.2 - b.2).abs() < 1e-9
+    }
+
+    #[test]
+    fn the_first_row_keeps_the_spawn_point_in_every_column() {
+        assert!(close(slot_offset(CONTAINER, BESIDE_THE_BED, (0, 0, 0)), (-4.75, 0.15, 0.85)));
+        assert!(close(slot_offset(CONTAINER, BESIDE_THE_BED, (0, 0, 3)), (-4.75, 0.15, 0.85 + 3.0 * 2.6)),
+            "the same spot beside the bed, three containers along");
+        assert!(close(slot_offset(CONTAINER, BESIDE_THE_BED, (2, 0, 1)), (-4.75, 0.15 + 5.2, 0.85 + 2.6)),
+            "two storeys up");
+    }
+
+    #[test]
+    fn the_second_row_mirrors_it_as_its_containers_are_turned() {
+        // Row 1, column 0: the container turned half round at x = 2 x_spacing, z = z_spacing; the point
+        // (px, pz) of 0-0-0 lands at (2 x_spacing - px, z_spacing - pz).
+        assert!(close(slot_offset(CONTAINER, BESIDE_THE_BED, (0, 1, 0)), (2.0 * -6.1 + 4.75, 0.15, 2.6 - 0.85)));
+        assert!(close(slot_offset(CONTAINER, BESIDE_THE_BED, (0, 1, 2)), (2.0 * -6.1 + 4.75, 0.15, 3.0 * 2.6 - 0.85)));
+    }
 
     fn village(name: &str, occupancy: usize, free: usize, x: f64) -> VillageState {
         VillageState {
@@ -825,7 +1803,7 @@ mod tests {
             spawn_requested: false,
             occupancy,
             free,
-            buildings: if free > 0 || occupancy > 0 { vec![GorcObjectId::new()] } else { Vec::new() },
+            buildings: if free > 0 || occupancy > 0 { vec![Building { gorc_id: GorcObjectId::new(), world: None, free }] } else { Vec::new() },
         }
     }
 
@@ -852,32 +1830,34 @@ mod tests {
     #[test]
     fn starts_with_first_village_by_name() {
         let villages = [village("mining_village_02", 0, 100, 10.0), village("mining_village_01", 0, 100, 0.0)];
-        let chosen = select_village(&villages, &AssignRequest::default(), 50, None).unwrap();
+        let chosen = select_village(&villages, &AssignRequest::default(), 50, None, true).unwrap();
         assert_eq!(chosen.name, "mining_village_01");
     }
 
     #[test]
     fn fills_fullest_village_under_cap_first() {
         let villages = [village("mining_village_01", 10, 100, 0.0), village("mining_village_02", 30, 100, 10.0)];
-        let chosen = select_village(&villages, &AssignRequest::default(), 50, None).unwrap();
+        let chosen = select_village(&villages, &AssignRequest::default(), 50, None, true).unwrap();
         assert_eq!(chosen.name, "mining_village_02");
     }
 
     #[test]
-    fn solo_player_never_goes_past_cap() {
-        // Plenty of physical room, but the village holds its 50 players.
+    fn a_village_at_the_cap_takes_more_only_with_room() {
+        // Every village holds its 50 players: the cap rises while the buildings have room.
         let villages = [village("mining_village_01", 50, 400, 0.0)];
-        assert!(select_village(&villages, &AssignRequest::default(), 50, None).is_none());
+        assert_eq!(select_village(&villages, &AssignRequest::default(), 50, None, true).unwrap().name, "mining_village_01");
+        let villages = [village("mining_village_01", 50, 0, 0.0)];
+        assert!(select_village(&villages, &AssignRequest::default(), 50, None, true).is_none());
     }
 
     #[test]
     fn preferred_village_over_cap_within_physical_room() {
         let villages = [village("mining_village_01", 50, 1, 0.0), village("mining_village_02", 0, 100, 10.0)];
         let request = AssignRequest { preferred_village: Some("uuid-mining_village_01".into()), allow_over_cap: true };
-        assert_eq!(select_village(&villages, &request, 50, None).unwrap().name, "mining_village_01");
+        assert_eq!(select_village(&villages, &request, 50, None, true).unwrap().name, "mining_village_01");
 
         let full = [village("mining_village_01", 51, 0, 0.0), village("mining_village_02", 0, 100, 10.0)];
-        assert_eq!(select_village(&full, &request, 50, None).unwrap().name, "mining_village_02");
+        assert_eq!(select_village(&full, &request, 50, None, true).unwrap().name, "mining_village_02");
     }
 
     #[test]
@@ -892,10 +1872,10 @@ mod tests {
         assert_eq!(reference.name, "mining_village_01");
         assert_eq!(free_reserve(&villages, 50, None), 5);
         // 5 free places, 100 wanted: two villages at once, closest first.
-        let names: Vec<&str> = villages_to_request(&villages, reference, 50, 100, None).iter().map(|v| v.name.as_str()).collect();
+        let names: Vec<&str> = villages_to_request(&villages, reference, 50, 100, 0.0, None).iter().map(|v| v.name.as_str()).collect();
         assert_eq!(names, ["mining_village_02", "mining_village_04"]);
         // Reserve already met: nothing.
-        assert!(villages_to_request(&villages, reference, 50, 5, None).is_empty());
+        assert!(villages_to_request(&villages, reference, 50, 5, 0.0, None).is_empty());
     }
 
     #[test]
@@ -911,9 +1891,9 @@ mod tests {
         assert_eq!(free_reserve(&villages, 50, None), 55);
         let reference = &villages[0];
         // 55 < 100: one more, never the one already requested.
-        let names: Vec<&str> = villages_to_request(&villages, reference, 50, 100, None).iter().map(|v| v.name.as_str()).collect();
+        let names: Vec<&str> = villages_to_request(&villages, reference, 50, 100, 0.0, None).iter().map(|v| v.name.as_str()).collect();
         assert_eq!(names, ["mining_village_04"]);
-        assert!(villages_to_request(&villages, reference, 50, 50, None).is_empty());
+        assert!(villages_to_request(&villages, reference, 50, 50, 0.0, None).is_empty());
     }
 
     // ---- placement by pool load (servers_load)
@@ -929,7 +1909,9 @@ mod tests {
             min_x, max_x, min_y: -Bounds::UNBOUNDED, max_y: Bounds::UNBOUNDED, min_z: -Bounds::UNBOUNDED, max_z: Bounds::UNBOUNDED,
         });
         let server = |name: &str, players, accepting, zone: Zone| ServerLoad {
-            uuid: format!("uuid-{name}"), name: name.into(), players, accepting, zones: vec![zone],
+            // A refusing server here is an overloaded one: under HABS_MIN_TPS.
+            uuid: format!("uuid-{name}"), name: name.into(), players, accepting, tps: if accepting { 60 } else { 40 }, loading: false,
+            responsive: true, busy: false, zones: vec![zone],
         };
         PoolLoad {
             servers: vec![
@@ -937,6 +1919,8 @@ mod tests {
                 server("east", east_players, true, half(100.0, Bounds::UNBOUNDED)),
             ],
             capacity: Some(75),
+            idle_servers: None,
+            ops_running: 0,
         }
     }
 
@@ -958,9 +1942,9 @@ mod tests {
             on_sandbox(village("mining_village_09", 5, 45, 200.0)),  // east
         ];
         let load = mesh_load::view_of(sandbox_load(60, true, 10));
-        assert_eq!(select_village(&villages, &AssignRequest::default(), 50, Some(&load)).unwrap().name, "mining_village_09");
+        assert_eq!(select_village(&villages, &AssignRequest::default(), 50, Some(&load), true).unwrap().name, "mining_village_09");
         // Without the load: the fullest village, as before.
-        assert_eq!(select_village(&villages, &AssignRequest::default(), 50, None).unwrap().name, "mining_village_01");
+        assert_eq!(select_village(&villages, &AssignRequest::default(), 50, None, true).unwrap().name, "mining_village_01");
     }
 
     #[test]
@@ -970,11 +1954,14 @@ mod tests {
             on_sandbox(village("mining_village_09", 45, 5, 200.0)),  // east: busier but reporting
         ];
         let load = mesh_load::view_of(sandbox_load(10, false, 70));
-        assert_eq!(select_village(&villages, &AssignRequest::default(), 50, Some(&load)).unwrap().name, "mining_village_09");
+        assert_eq!(select_village(&villages, &AssignRequest::default(), 50, Some(&load), true).unwrap().name, "mining_village_09");
 
-        // East full under the cap: the refusing one is better than no apartment.
+        // East at the cap with room left: its cap rises before a refusing server gets any.
         let villages = [on_sandbox(village("mining_village_01", 10, 40, 0.0)), on_sandbox(village("mining_village_09", 50, 5, 200.0))];
-        assert_eq!(select_village(&villages, &AssignRequest::default(), 50, Some(&load)).unwrap().name, "mining_village_01");
+        assert_eq!(select_village(&villages, &AssignRequest::default(), 50, Some(&load), true).unwrap().name, "mining_village_09");
+        // East's buildings full: the refusing one is better than no apartment.
+        let villages = [on_sandbox(village("mining_village_01", 10, 40, 0.0)), on_sandbox(village("mining_village_09", 50, 0, 200.0))];
+        assert_eq!(select_village(&villages, &AssignRequest::default(), 50, Some(&load), true).unwrap().name, "mining_village_01");
     }
 
     #[test]
@@ -985,7 +1972,178 @@ mod tests {
         ];
         // East has fewer players but is at the split rule (75): west takes them.
         let load = mesh_load::view_of(sandbox_load(74, true, 75));
-        assert_eq!(select_village(&villages, &AssignRequest::default(), 50, Some(&load)).unwrap().name, "mining_village_01");
+        assert_eq!(select_village(&villages, &AssignRequest::default(), 50, Some(&load), true).unwrap().name, "mining_village_01");
+    }
+
+    fn hab_at(x: f64, free: usize) -> Building {
+        let world = on_sandbox(village("hab", 0, 0, x)).world;
+        Building { gorc_id: GorcObjectId::new(), world, free }
+    }
+
+    #[test]
+    fn a_village_across_a_zone_border_counts_on_the_server_of_each_hab() {
+        // Centre in west (x = 90), one hab on each side of the border at x = 100.
+        let mut across = on_sandbox(village("mining_village_01", 30, 0, 90.0));
+        across.buildings = vec![hab_at(95.0, 0), hab_at(105.0, 20)];
+        across.free = 20;
+        let load = mesh_load::view_of(sandbox_load(60, false, 10));
+        let parts = by_hab_owner(vec![across.clone()], Some(&load));
+        assert_eq!(parts.len(), 2);
+        let east = parts.iter().find(|p| load.owner_of(p.world.as_ref().unwrap()).unwrap().name == "east").unwrap();
+        assert_eq!((east.free, east.occupancy, east.buildings.len()), (20, 30, 1), "its own room, the whole village's occupancy");
+        // West refuses, but the free apartments are in east: the player is placed there.
+        let chosen = select_village(&parts, &AssignRequest::default(), 50, Some(&load), true).unwrap();
+        assert!(std::ptr::eq(chosen, east));
+        // Without the load nothing is cut.
+        assert_eq!(by_hab_owner(vec![across], None).len(), 1);
+    }
+
+    #[test]
+    fn no_village_goes_over_the_cap_while_room_can_come() {
+        // West has room under 50 but had its share of arrivals (throttle); east's village
+        // holds 50 with apartments left.
+        let villages = [
+            on_sandbox(village("mining_village_01", 30, 20, 0.0)),
+            on_sandbox(village("mining_village_09", 50, 30, 200.0)),
+        ];
+        let published = mesh_load::view_of(sandbox_load(30, true, 50));
+        let mut throttled = published.clone();
+        throttled.refuse("uuid-west");
+        assert!(room_can_come(&villages, 50, Some(&published)), "west takes players again in 2 s");
+        // The player waits for west (its server refuses now, the caller queues it)...
+        assert_eq!(select_village(&villages, &AssignRequest::default(), 50, Some(&throttled), false).unwrap().name, "mining_village_01");
+        assert_eq!(village_cap(&villages, &villages[1], 50, Some(&throttled), false), 50);
+        // ...where the overflow sent it over 50 in east.
+        assert_eq!(select_village(&villages, &AssignRequest::default(), 50, Some(&throttled), true).unwrap().name, "mining_village_09");
+    }
+
+    #[test]
+    fn room_comes_from_habs_villages_to_ask_for_or_a_split() {
+        let full = |name: &str, x: f64| on_sandbox(village(name, 50, 30, x));
+        let mut pool = sandbox_load(50, true, 50);
+        pool.idle_servers = Some(0);
+        let load = mesh_load::view_of(pool.clone());
+        let villages = vec![full("mining_village_01", 0.0), full("mining_village_09", 200.0)];
+        assert!(!room_can_come(&villages, 50, Some(&load)), "every village at the cap, nothing coming");
+
+        let mut pending = on_sandbox(village("mining_village_02", 0, 0, 10.0));
+        pending.spawn_requested = true;
+        assert!(room_can_come(&[villages.clone(), vec![pending]].concat(), 50, Some(&load)), "habs on their way");
+
+        let unspawned = on_sandbox(village("mining_village_03", 0, 0, 20.0));
+        assert!(room_can_come(&[villages.clone(), vec![unspawned.clone()]].concat(), 50, Some(&load)), "a village to ask for");
+        let mut frozen = pool.clone();
+        frozen.servers[0].responsive = false;
+        assert!(!room_can_come(&[villages.clone(), vec![unspawned]].concat(), 50, Some(&mesh_load::view_of(frozen))),
+            "not on a frozen server");
+
+        // East over its split rule with an idle server left: a split comes.
+        let mut splitting = pool.clone();
+        splitting.idle_servers = Some(3);
+        splitting.servers[1].accepting = false;
+        assert!(room_can_come(&villages, 50, Some(&mesh_load::view_of(splitting.clone()))));
+        splitting.idle_servers = Some(0);
+        assert!(!room_can_come(&villages, 50, Some(&mesh_load::view_of(splitting.clone()))), "the pool is empty");
+        splitting.ops_running = 1;
+        assert!(room_can_come(&villages, 50, Some(&mesh_load::view_of(splitting))), "a split running");
+    }
+
+    #[test]
+    fn the_reserve_grows_with_the_servers_taking_players() {
+        let config = VillageConfig { prespawn_villages: 0, ..VillageConfig::default() }; // 100 + 1 village of 50 per server
+        let villages = [on_sandbox(village("mining_village_01", 10, 40, 0.0)), on_sandbox(village("mining_village_09", 10, 40, 200.0))];
+        assert_eq!(reserve_target(&villages, &config, None), 100);
+        assert_eq!(reserve_target(&villages, &config, Some(&mesh_load::view_of(sandbox_load(10, true, 10)))), 200);
+        // West refuses: one server takes players.
+        assert_eq!(reserve_target(&villages, &config, Some(&mesh_load::view_of(sandbox_load(10, false, 10)))), 150);
+        // East owns no village: it does not count.
+        let west_only = [on_sandbox(village("mining_village_01", 10, 40, 0.0))];
+        assert_eq!(reserve_target(&west_only, &config, Some(&mesh_load::view_of(sandbox_load(10, true, 10)))), 150);
+        // prespawn_villages is a floor, with the load only.
+        let config = VillageConfig { prespawn_villages: 15, ..config };
+        assert_eq!(reserve_target(&villages, &config, Some(&mesh_load::view_of(sandbox_load(10, true, 10)))), 750);
+        assert_eq!(reserve_target(&villages, &config, None), 100);
+    }
+
+    #[test]
+    fn a_village_inside_one_zone_is_asked_for_first() {
+        let load = mesh_load::view_of(sandbox_load(10, true, 10));
+        let near_border = on_sandbox(village("mining_village_02", 0, 0, 90.0)); // 10 m from x = 100
+        let inside = on_sandbox(village("mining_village_03", 0, 0, -300.0));
+        assert!(!inside_one_zone(&near_border, 200.0, Some(&load)));
+        assert!(inside_one_zone(&inside, 200.0, Some(&load)));
+        assert!(inside_one_zone(&near_border, 200.0, None));
+        let reference = on_sandbox(village("mining_village_01", 50, 0, 80.0));
+        let villages = [reference.clone(), near_border, inside];
+        let names: Vec<&str> = villages_to_request(&villages, &reference, 50, 50, 200.0, Some(&load)).iter().map(|v| v.name.as_str()).collect();
+        assert_eq!(names, ["mining_village_03"], "farther, but its habs all land on west");
+    }
+
+    #[test]
+    fn a_server_held_back_by_its_pending_villages_asks_for_a_split() {
+        let pending = |name: &str, x: f64| {
+            let mut v = on_sandbox(village(name, 0, 0, x));
+            v.spawn_requested = true;
+            v
+        };
+        let unspawned = |name: &str, x: f64| on_sandbox(village(name, 0, 0, x));
+        // West: 2 villages waiting for their habs, 3 more to spawn; east: one full village.
+        let villages = vec![
+            pending("mining_village_01", 0.0),
+            pending("mining_village_02", 10.0),
+            unspawned("mining_village_03", 20.0),
+            unspawned("mining_village_04", 30.0),
+            unspawned("mining_village_05", 40.0),
+            on_sandbox(village("mining_village_09", 50, 0, 200.0)),
+        ];
+        let load = mesh_load::view_of(sandbox_load(0, true, 50));
+        let wanted = villages_wanted(&villages, &[], 50, 750, Some(&load));
+        assert_eq!(wanted.len(), 1);
+        assert_eq!(wanted[0].0, "uuid-west");
+        assert_eq!(wanted[0].1.len(), 3);
+        // The reserve is met (2 villages on their way = 100), nothing to ask.
+        assert!(villages_wanted(&villages, &[], 50, 100, Some(&load)).is_empty());
+        // A single village left to spawn there: not worth a split.
+        assert!(villages_wanted(&villages[..3], &[], 50, 750, Some(&load)).is_empty());
+        assert!(villages_wanted(&villages, &[], 50, 750, None).is_empty());
+    }
+
+    #[test]
+    fn a_refusing_server_with_villages_to_spawn_asks_for_a_split() {
+        // East holds 50 players in its only village, none left to spawn; west is full (it
+        // refuses) and its zones hold 2 villages to spawn, never asked of a refusing server.
+        let villages = vec![
+            on_sandbox(village("mining_village_01", 50, 0, 0.0)),
+            on_sandbox(village("mining_village_03", 0, 0, 20.0)),
+            on_sandbox(village("mining_village_04", 0, 0, 30.0)),
+            on_sandbox(village("mining_village_09", 50, 0, 200.0)),
+        ];
+        let load = mesh_load::view_of(sandbox_load(95, false, 50));
+        let wanted = villages_wanted(&villages, &[], 50, 750, Some(&load));
+        assert_eq!(wanted.len(), 1);
+        assert_eq!((wanted[0].0.as_str(), wanted[0].1.len()), ("uuid-west", 2));
+        // Loading the zones it was just handed: not refusing for long, not split again.
+        let mut pool = sandbox_load(95, false, 50);
+        pool.servers[0].loading = true;
+        assert!(villages_wanted(&villages, &[], 50, 750, Some(&mesh_load::view_of(pool))).is_empty());
+        // West takes players again: its villages are asked of it, no split.
+        assert!(villages_wanted(&villages, &[], 50, 750, Some(&mesh_load::view_of(sandbox_load(10, true, 50)))).is_empty());
+    }
+
+    #[test]
+    fn new_players_wait_for_the_prespawned_villages() {
+        let spawned = |name: &str| village(name, 0, 50, 0.0);
+        let unspawned = |name: &str| village(name, 0, 0, 0.0);
+        let villages = vec![spawned("M0001"), spawned("M0002"), unspawned("M0003"), unspawned("M0004")];
+        assert!(!prespawn_done(&villages, 3, true), "2 of 3 ready");
+        assert!(prespawn_done(&villages, 2, true));
+        assert!(prespawn_done(&villages[..2], 15, true), "fewer villages than the prespawn: all of them");
+        // A village across a border (one entry per server) counts once.
+        let split = vec![spawned("M0001"), spawned("M0001"), unspawned("M0002")];
+        assert!(!prespawn_done(&split, 2, true));
+        assert!(prespawn_done(&villages, 3, false), "no load, no prespawn: nothing to wait for");
+        assert!(prespawn_done(&villages, 0, true));
+        assert!(!prespawn_done(&[], 15, true), "startup items not imported yet");
     }
 
     #[test]
@@ -1001,7 +2159,7 @@ mod tests {
         assert_eq!(free_reserve(&villages, 50, Some(&load)), 0);
         assert_eq!(free_reserve(&villages, 50, None), 50);
         let reference = &villages[0];
-        let names: Vec<&str> = villages_to_request(&villages, reference, 50, 100, Some(&load)).iter().map(|v| v.name.as_str()).collect();
+        let names: Vec<&str> = villages_to_request(&villages, reference, 50, 100, 0.0, Some(&load)).iter().map(|v| v.name.as_str()).collect();
         assert_eq!(names, ["mining_village_10", "mining_village_09"]);
     }
 
@@ -1012,12 +2170,250 @@ mod tests {
         let mut load = sandbox_load(70, false, 70);
         load.servers[1].accepting = false;
         load.servers.push(ServerLoad {
-            uuid: "uuid-space".into(), name: "space".into(), players: 0, accepting: true, zones: vec![Zone::space()],
+            uuid: "uuid-space".into(), name: "space".into(), players: 0, accepting: true, tps: 60, loading: false, responsive: true, busy: false, zones: vec![Zone::space()],
         });
         let load = mesh_load::view_of(load);
         let villages = [on_sandbox(village("mining_village_01", 0, 100, 0.0)), on_sandbox(village("mining_village_02", 0, 0, 10.0))];
         assert_eq!(free_reserve(&villages, 50, Some(&load)), 50);
-        assert_eq!(villages_to_request(&villages, &villages[0], 50, 50, Some(&load)).len(), 0);
+        assert_eq!(villages_to_request(&villages, &villages[0], 50, 50, 0.0, Some(&load)).len(), 0);
+    }
+
+    /// `sandbox_load` with west silent / frozen (or only loading its new zones).
+    fn sandbox_load_west(west_players: u32, west_loading: bool, west_responsive: bool, east_players: u32) -> LoadView {
+        let mut load = sandbox_load(west_players, false, east_players);
+        load.servers[0].loading = west_loading;
+        load.servers[0].responsive = west_responsive;
+        mesh_load::view_of(load)
+    }
+
+    #[test]
+    fn a_frozen_server_never_gets_players_even_as_last_resort() {
+        // East's buildings full, west has room but is frozen: no apartment rather than
+        // one on a server that will not simulate the player (preprod, 2026-10-16).
+        let villages = [on_sandbox(village("mining_village_01", 10, 40, 0.0)), on_sandbox(village("mining_village_09", 50, 0, 200.0))];
+        let frozen = sandbox_load_west(10, false, false, 70);
+        assert!(select_village(&villages, &AssignRequest::default(), 50, Some(&frozen), true).is_none());
+        // Only loading: still the last resort, as before.
+        let loading = sandbox_load_west(10, true, true, 70);
+        assert_eq!(select_village(&villages, &AssignRequest::default(), 50, Some(&loading), true).unwrap().name, "mining_village_01");
+    }
+
+    #[test]
+    fn habs_pending_on_a_frozen_server_do_not_count_in_the_reserve() {
+        let mut requested = on_sandbox(village("mining_village_02", 0, 0, 10.0));
+        requested.spawn_requested = true;
+        let villages = [
+            on_sandbox(village("mining_village_01", 50, 0, 0.0)),    // west, full
+            requested,                                                // west, habs pending
+            on_sandbox(village("mining_village_09", 0, 0, 300.0)),   // east, unspawned
+        ];
+        let frozen = sandbox_load_west(50, false, false, 70);
+        assert_eq!(free_reserve(&villages, 50, Some(&frozen)), 0);
+        // So the reserve is requested on east instead.
+        let names: Vec<&str> = villages_to_request(&villages, &villages[0], 50, 50, 0.0, Some(&frozen)).iter().map(|v| v.name.as_str()).collect();
+        assert_eq!(names, ["mining_village_09"]);
+    }
+
+    #[test]
+    fn no_habs_requested_on_a_frozen_or_loading_server() {
+        let villages = [
+            on_sandbox(village("mining_village_01", 50, 0, 0.0)),    // west, full
+            on_sandbox(village("mining_village_02", 0, 0, 10.0)),    // west, unspawned
+            on_sandbox(village("mining_village_03", 0, 0, 20.0)),    // west, unspawned
+        ];
+        for load in [sandbox_load_west(50, false, false, 0), sandbox_load_west(50, true, true, 0)] {
+            assert!(villages_to_request(&villages, &villages[0], 50, 100, 0.0, Some(&load)).is_empty());
+        }
+        // Reporting again, done loading: requested.
+        let back = mesh_load::view_of(sandbox_load(50, true, 0));
+        assert_eq!(villages_to_request(&villages, &villages[0], 50, 100, 0.0, Some(&back)).len(), 2);
+    }
+
+    /// `sandbox_load` with no placement capacity: every server under its split rule.
+    fn uncapped(west_players: u32, east_players: u32) -> LoadView {
+        let mut load = sandbox_load(west_players, true, east_players);
+        load.capacity = None;
+        mesh_load::view_of(load)
+    }
+
+    #[test]
+    fn without_load_every_village_rises_by_ten_together() {
+        let villages = [village("mining_village_01", 50, 30, 0.0), village("mining_village_02", 50, 30, 10.0)];
+        assert_eq!(village_cap(&villages, &villages[0], 50, None, true), 60);
+        // Both fill to 60 before either goes to 70.
+        let villages = [village("mining_village_01", 60, 20, 0.0), village("mining_village_02", 55, 25, 10.0)];
+        assert_eq!(village_cap(&villages, &villages[0], 50, None, true), 60);
+        assert_eq!(select_village(&villages, &AssignRequest::default(), 50, None, true).unwrap().name, "mining_village_02");
+        let villages = [village("mining_village_01", 60, 20, 0.0), village("mining_village_02", 60, 20, 10.0)];
+        assert_eq!(village_cap(&villages, &villages[0], 50, None, true), 70);
+    }
+
+    #[test]
+    fn the_cap_rises_on_the_least_loaded_server_only() {
+        // West: 2 villages at 50 (100 players), east: 3 at 50 (150). West goes to 60, east stays.
+        let villages = [
+            on_sandbox(village("mining_village_01", 50, 30, 0.0)),
+            on_sandbox(village("mining_village_02", 50, 30, 10.0)),
+            on_sandbox(village("mining_village_09", 50, 30, 200.0)),
+            on_sandbox(village("mining_village_10", 50, 30, 210.0)),
+            on_sandbox(village("mining_village_11", 50, 30, 220.0)),
+        ];
+        let load = uncapped(100, 150);
+        let chosen = select_village(&villages, &AssignRequest::default(), 50, Some(&load), true).unwrap();
+        assert!(chosen.name == "mining_village_01" || chosen.name == "mining_village_02", "west: {}", chosen.name);
+        assert_eq!(village_cap(&villages, chosen, 50, Some(&load), true), 60);
+        // West past east: east takes the arrivals, its villages at 60 now.
+        let load = uncapped(160, 150);
+        let chosen = select_village(&villages, &AssignRequest::default(), 50, Some(&load), true).unwrap();
+        assert!(chosen.name.as_str() >= "mining_village_09", "east: {}", chosen.name);
+        assert_eq!(village_cap(&villages, chosen, 50, Some(&load), true), 60);
+    }
+
+    #[test]
+    fn arrivals_even_out_the_players_per_server() {
+        // West: 2 villages, east: 3, all at 50 (100 vs 150 players). 200 more arrive.
+        let mut villages = vec![
+            on_sandbox(village("mining_village_01", 50, 100, 0.0)),
+            on_sandbox(village("mining_village_02", 50, 100, 10.0)),
+            on_sandbox(village("mining_village_09", 50, 100, 200.0)),
+            on_sandbox(village("mining_village_10", 50, 100, 210.0)),
+            on_sandbox(village("mining_village_11", 50, 100, 220.0)),
+        ];
+        let (mut west, mut east) = (100u32, 150u32);
+        for _ in 0..200 {
+            let load = uncapped(west, east);
+            let chosen = select_village(&villages, &AssignRequest::default(), 50, Some(&load), true).unwrap().uuid.clone();
+            let v = villages.iter_mut().find(|v| v.uuid == chosen).unwrap();
+            v.occupancy += 1;
+            v.free -= 1;
+            if v.position.x < 100.0 { west += 1 } else { east += 1 }
+        }
+        assert!(west.abs_diff(east) <= 1, "west {} east {}", west, east);
+        // West's two villages carry the difference; east's three stay close to each other.
+        let occ: Vec<usize> = villages.iter().map(|v| v.occupancy).collect();
+        assert!(occ[0].abs_diff(occ[1]) <= CAP_STEP && occ[2..].iter().max().unwrap() - occ[2..].iter().min().unwrap() <= CAP_STEP, "{:?}", occ);
+    }
+
+    #[test]
+    fn a_village_under_the_base_cap_goes_first_whatever_the_load() {
+        // preprod 2026-10-20: the least loaded server's only village went to 130 players
+        // while a busier server taking players had villages under 50.
+        let villages = [
+            on_sandbox(village("mining_village_03", 50, 150, 0.0)),  // west, full at 50
+            on_sandbox(village("mining_village_13", 10, 40, 200.0)), // east, room under 50
+        ];
+        let load = uncapped(45, 70);
+        assert_eq!(select_village(&villages, &AssignRequest::default(), 50, Some(&load), true).unwrap().name, "mining_village_13");
+        // No village under 50 on a server taking players: the least loaded rises.
+        let villages = [
+            on_sandbox(village("mining_village_03", 50, 150, 0.0)),
+            on_sandbox(village("mining_village_13", 50, 40, 200.0)),
+        ];
+        let chosen = select_village(&villages, &AssignRequest::default(), 50, Some(&load), true).unwrap();
+        assert_eq!(chosen.name, "mining_village_03");
+        assert_eq!(village_cap(&villages, chosen, 50, Some(&load), true), 60);
+    }
+
+    #[test]
+    fn at_equal_load_a_village_under_the_base_cap_goes_first() {
+        let villages = [
+            on_sandbox(village("mining_village_01", 50, 30, 0.0)),   // west, at the cap
+            on_sandbox(village("mining_village_09", 40, 30, 200.0)), // east, room under 50
+        ];
+        let load = uncapped(100, 100);
+        assert_eq!(select_village(&villages, &AssignRequest::default(), 50, Some(&load), true).unwrap().name, "mining_village_09");
+    }
+
+    #[test]
+    fn a_server_cap_stays_while_one_of_its_villages_waits_for_habs() {
+        let mut requested = on_sandbox(village("mining_village_02", 0, 0, 10.0));
+        requested.spawn_requested = true;
+        let villages = [
+            on_sandbox(village("mining_village_01", 50, 30, 0.0)),   // west, at the cap
+            requested,                                               // west, habs coming
+            on_sandbox(village("mining_village_09", 45, 30, 200.0)), // east
+        ];
+        let load = uncapped(50, 120);
+        assert_eq!(village_cap(&villages, &villages[0], 50, Some(&load), true), 50, "habs coming: they take the next players");
+        assert_eq!(select_village(&villages, &AssignRequest::default(), 50, Some(&load), true).unwrap().name, "mining_village_09");
+        // No physical room anywhere: nothing to raise.
+        let villages = [village("mining_village_01", 50, 0, 0.0)];
+        assert_eq!(village_cap(&villages, &villages[0], 50, None, true), 50);
+    }
+
+    #[test]
+    fn an_overloaded_server_neither_gets_the_arrivals_nor_the_habs() {
+        // East over the placement capacity (75) with a fresh village under 50, west
+        // accepting with its villages at 50: west goes to 60 rather than east getting them.
+        let villages = [
+            on_sandbox(village("mining_village_01", 50, 30, 0.0)),
+            on_sandbox(village("mining_village_09", 3, 47, 200.0)),
+            on_sandbox(village("mining_village_10", 0, 0, 210.0)),   // east, unspawned
+        ];
+        let load = mesh_load::view_of(sandbox_load(50, true, 230));
+        assert_eq!(select_village(&villages, &AssignRequest::default(), 50, Some(&load), true).unwrap().name, "mining_village_01");
+        // East is full but at 60 tps: one village at a time may spawn there, ready for the
+        // split that hands it over (see HABS_MIN_TPS).
+        let names: Vec<&str> = villages_to_request(&villages, &villages[0], 50, 1000, 0.0, Some(&load)).iter().map(|v| v.name.as_str()).collect();
+        assert_eq!(names, ["mining_village_10"]);
+        // Under HABS_MIN_TPS, or in a split: no habs at all.
+        let mut slow = sandbox_load(50, true, 230);
+        slow.servers[1].tps = 40;
+        assert!(villages_to_request(&villages, &villages[0], 50, 1000, 0.0, Some(&mesh_load::view_of(slow))).is_empty());
+        let mut busy = sandbox_load(50, true, 230);
+        busy.servers[1].busy = true;
+        assert!(villages_to_request(&villages, &villages[0], 50, 1000, 0.0, Some(&mesh_load::view_of(busy))).is_empty());
+        // In a split nobody takes players: still none on the servers of the split.
+        let mut splitting = sandbox_load(50, false, 230);
+        splitting.servers[1].busy = true;
+        assert!(villages_to_request(&villages, &villages[0], 50, 1000, 0.0, Some(&mesh_load::view_of(splitting))).is_empty());
+    }
+
+    #[test]
+    fn a_server_with_players_is_asked_for_villages_at_a_pace() {
+        let villages = [
+            on_sandbox(village("mining_village_01", 50, 0, 0.0)),    // west, accepting
+            on_sandbox(village("mining_village_02", 0, 0, 10.0)),    // west, unspawned
+            on_sandbox(village("mining_village_10", 0, 0, 210.0)),   // east, refusing
+            on_sandbox(village("mining_village_11", 0, 0, 220.0)),   // east, refusing
+        ];
+        let load = mesh_load::view_of(sandbox_load(50, true, 230));
+        let mut last = HashMap::new();
+        let t0 = Instant::now();
+        let names = |picked: Vec<&VillageState>| picked.iter().map(|v| v.name.clone()).collect::<Vec<_>>();
+        let all: Vec<&VillageState> = villages[1..].iter().collect();
+        // One per server at a time: west (50 players, accepting) and east (refusing).
+        assert_eq!(names(pace_spawns(all.clone(), Some(&load), &mut last, t0)), ["mining_village_02", "mining_village_10"]);
+        assert!(pace_spawns(all.clone(), Some(&load), &mut last, t0 + Duration::from_secs(5)).is_empty());
+        // West every 10 s, east every 30 s.
+        assert_eq!(names(pace_spawns(all.clone(), Some(&load), &mut last, t0 + Duration::from_secs(11))), ["mining_village_02"]);
+        assert_eq!(names(pace_spawns(all.clone(), Some(&load), &mut last, t0 + Duration::from_secs(31))), ["mining_village_02", "mining_village_10"]);
+        // A server without players (startup, fresh child) is not paced.
+        let empty = mesh_load::view_of(sandbox_load(0, true, 230));
+        let west: Vec<&VillageState> = villages[1..2].iter().chain(villages[1..2].iter()).collect();
+        assert_eq!(pace_spawns(west, Some(&empty), &mut last, t0 + Duration::from_secs(32)).len(), 2);
+    }
+
+    #[test]
+    fn a_refusing_server_spawns_one_village_at_a_time() {
+        let villages = [
+            on_sandbox(village("mining_village_01", 50, 0, 0.0)),    // west, accepting, full village
+            on_sandbox(village("mining_village_10", 0, 0, 210.0)),   // east, unspawned
+            on_sandbox(village("mining_village_11", 0, 0, 220.0)),   // east, unspawned
+        ];
+        let load = mesh_load::view_of(sandbox_load(50, true, 230));
+        assert_eq!(villages_to_request(&villages, &villages[0], 50, 1000, 0.0, Some(&load)).len(), 1);
+    }
+
+    #[test]
+    fn a_frozen_village_does_not_hold_the_cap_down() {
+        let villages = [
+            on_sandbox(village("mining_village_01", 10, 40, 0.0)),    // west, frozen
+            on_sandbox(village("mining_village_09", 50, 30, 200.0)),  // east, at the cap
+        ];
+        let frozen = sandbox_load_west(10, false, false, 50);
+        assert_eq!(select_village(&villages, &AssignRequest::default(), 50, Some(&frozen), true).unwrap().name, "mining_village_09");
+        assert_eq!(village_cap(&villages, &villages[1], 50, Some(&frozen), true), 60);
     }
 
     #[test]
@@ -1034,8 +2430,167 @@ mod tests {
             on_sandbox(village("mining_village_07", 0, 0, 320.0)),
         ];
         let load = mesh_load::view_of(sandbox_load(50, false, 0));
-        let names: Vec<&str> = villages_to_request(&villages, &villages[0], 50, 1000, Some(&load)).iter().map(|v| v.name.as_str()).collect();
-        // East (accepting) first, one more there (2 waiting), then two on west.
+        let names: Vec<&str> = villages_to_request(&villages, &villages[0], 50, 1000, 0.0, Some(&load)).iter().map(|v| v.name.as_str()).collect();
+        // East (accepting): one more there (2 waiting). West refuses players: none there.
+        assert_eq!(names, ["mining_village_06"]);
+        // Nobody accepting: the refusing servers are asked too, east first.
+        let mut nobody = sandbox_load(50, false, 0);
+        nobody.servers[1].accepting = false;
+        let load = mesh_load::view_of(nobody);
+        let names: Vec<&str> = villages_to_request(&villages, &villages[0], 50, 1000, 0.0, Some(&load)).iter().map(|v| v.name.as_str()).collect();
         assert_eq!(names, ["mining_village_06", "mining_village_02", "mining_village_03"]);
+    }
+
+    // ---- queue
+
+    #[test]
+    fn the_pool_is_full_only_when_no_room_can_come() {
+        let full = |west: u32, east: u32, idle: Option<u32>, ops: u32| {
+            let mut pool = sandbox_load(west, true, east);
+            pool.idle_servers = idle;
+            pool.ops_running = ops;
+            mesh_load::view_of(pool).all_full()
+        };
+        // Both over the placement capacity (75), no idle server, nothing running: full.
+        assert!(full(80, 90, Some(0), 0));
+        assert!(!full(80, 60, Some(0), 0), "east takes players");
+        assert!(!full(80, 90, Some(1), 0), "an idle server left: a split makes room");
+        assert!(!full(80, 90, Some(0), 1), "a split is running");
+        assert!(!full(80, 90, None, 0), "an older Horizon: never taken as full");
+        let mut pool = sandbox_load(80, true, 90);
+        pool.idle_servers = Some(0);
+        pool.servers[0].loading = true;
+        assert!(!mesh_load::view_of(pool).all_full(), "west loads the zones it was just handed");
+    }
+
+    #[test]
+    fn a_waiting_player_is_told_all_servers_are_full_after_the_grace() {
+        let mut arrival = returning(serde_json::json!({ "name": "npc1" }));
+        let t0 = Instant::now();
+        assert!(!arrival.full_for_too_long(true, t0));
+        assert!(!arrival.full_for_too_long(true, t0 + FULL_GRACE - Duration::from_secs(1)));
+        assert!(arrival.full_for_too_long(true, t0 + FULL_GRACE));
+        // Room came back meanwhile: the grace starts over.
+        assert!(!arrival.full_for_too_long(false, t0 + FULL_GRACE));
+        assert!(!arrival.full_for_too_long(true, t0 + FULL_GRACE + Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn a_player_waits_for_a_refusing_server_however_long_it_takes() {
+        let west = on_sandbox(village("mining_village_01", 10, 40, 0.0));
+        let load = mesh_load::view_of(sandbox_load(70, false, 10));
+        assert!(!admits(Some(&load), west.world.as_ref()), "west refuses: queued, never forced in");
+        let east = on_sandbox(village("mining_village_09", 10, 40, 200.0));
+        assert!(admits(Some(&load), east.world.as_ref()), "east takes players");
+        assert!(admits(None, west.world.as_ref()), "no load: as before the queue");
+    }
+
+    #[test]
+    fn a_server_at_capacity_queues_until_a_split_makes_room() {
+        let west = on_sandbox(village("mining_village_01", 10, 40, 0.0));
+        // West at the placement capacity (75): queued.
+        let full = mesh_load::view_of(sandbox_load(75, true, 75));
+        assert!(refusing_owner(Some(&full), west.world.as_ref()).is_some());
+        assert!(!admits(Some(&full), west.world.as_ref()));
+        // Split done, 40 players left on west: in.
+        let split = mesh_load::view_of(sandbox_load(40, true, 75));
+        assert!(admits(Some(&split), west.world.as_ref()));
+    }
+
+    fn returning(stored: serde_json::Value) -> Arrival {
+        Arrival::new(&serde_json::json!({ "object_uuid": "p1", "object_data": stored.clone() }), Some(stored))
+    }
+
+    #[test]
+    fn a_returning_player_wakes_up_in_its_apartment_with_everything_it_had() {
+        let arrival = returning(serde_json::json!({
+            "name": "bob",
+            "position": { "x": 900.0, "y": 1.0, "z": 3.0 },
+            "rotation": { "x": 0.0, "y": 3.0, "z": 0.0 },
+            "parent_id": "truck-1",
+            "spawn_appartment_id": "building-1",
+            "inventory": ["pickaxe"],
+        }));
+        let data = player_object_data(&arrival, Vec3::new(1.0, 2.0, 3.0), "building-1", false);
+        assert_eq!(data["parent_id"], "building-1");
+        assert_eq!(data["position"]["x"], 1.0);
+        assert_eq!(data["rotation"]["y"], 1.708);
+        assert_eq!(data["spawn_appartment_id"], "building-1");
+        assert_eq!(data["inventory"][0], "pickaxe");
+        assert_eq!(data["name"], "bob");
+    }
+
+    #[test]
+    fn a_returning_player_keeps_its_appearance() {
+        // The game stores a player's look as the `appearance` property (set_appearance on its Godot
+        // server); persistence keeps it with everything else, and it comes back on the next spawn.
+        let arrival = returning(serde_json::json!({ "name": "bob", "appearance": "AQIDBA", "spawn_appartment_id": "b1" }));
+        assert_eq!(player_object_data(&arrival, Vec3::zero(), "b1", false)["appearance"], "AQIDBA");
+        let new = Arrival::new(&serde_json::json!({ "object_uuid": "p2", "object_data": { "name": "ann" } }), None);
+        assert!(player_object_data(&new, Vec3::zero(), "b2", true).get("appearance").is_none(),
+            "a new player has none: the game draws one from its uuid until it makes its own");
+    }
+
+    #[test]
+    fn the_apartment_of_a_player_never_changes_unless_it_gets_a_new_one() {
+        let arrival = returning(serde_json::json!({ "name": "bob", "spawn_appartment_id": "building-1" }));
+        // Its own apartment found in another building record: the stored one stays.
+        assert_eq!(player_object_data(&arrival, Vec3::zero(), "building-2", false)["spawn_appartment_id"], "building-1");
+        // No apartment of its own was found, it was given a new one.
+        assert_eq!(player_object_data(&arrival, Vec3::zero(), "building-2", true)["spawn_appartment_id"], "building-2");
+        // A player from before the apartments.
+        let old = returning(serde_json::json!({ "name": "bob" }));
+        assert_eq!(player_object_data(&old, Vec3::zero(), "building-3", false)["spawn_appartment_id"], "building-3");
+        // A new player.
+        let new = Arrival::new(&serde_json::json!({ "object_uuid": "p2", "object_data": { "name": "ann", "is_npc": true } }), None);
+        let data = player_object_data(&new, Vec3::zero(), "building-4", true);
+        assert_eq!(data["spawn_appartment_id"], "building-4");
+        assert_eq!(data["is_npc"], true);
+    }
+
+    #[test]
+    fn an_admission_lets_one_create_object_through() {
+        admitted().lock().unwrap().insert("p-admitted".to_string());
+        assert!(take_admitted("p-admitted"));
+        assert!(!take_admitted("p-admitted"), "the next one is queued again");
+        assert!(!take_admitted("p-never"));
+    }
+
+    #[test]
+    fn a_server_gets_at_most_its_share_of_arrivals_per_window() {
+        let mut throttle = Throttle { limit: 2, ..Throttle::default() };
+        let start = Instant::now();
+        throttle.record("west", start);
+        assert!(throttle.allows("west"));
+        throttle.record("west", start);
+        assert!(!throttle.allows("west"), "two in the window: the next one waits");
+        assert!(throttle.allows("east"), "per server");
+        throttle.prune(start + ADMIT_WINDOW);
+        assert!(throttle.allows("west"), "the window is over");
+        let unlimited = Throttle::default();
+        assert!(unlimited.allows("west"));
+    }
+
+    #[test]
+    fn a_server_that_had_its_share_sends_the_arrivals_elsewhere() {
+        let villages = [
+            on_sandbox(village("mining_village_01", 10, 40, 0.0)),   // west, least loaded
+            on_sandbox(village("mining_village_09", 10, 40, 200.0)), // east
+        ];
+        let mut load = mesh_load::view_of(sandbox_load(10, true, 30));
+        assert_eq!(select_village(&villages, &AssignRequest::default(), 50, Some(&load), true).unwrap().name, "mining_village_01");
+        load.refuse("uuid-west");
+        assert_eq!(select_village(&villages, &AssignRequest::default(), 50, Some(&load), true).unwrap().name, "mining_village_09");
+        assert!(refusing_owner(Some(&load), villages[0].world.as_ref()).is_some());
+    }
+
+    #[test]
+    fn a_waiting_player_hears_of_every_move_of_its_place() {
+        let start = Instant::now();
+        assert!(queued_notice_due(None, None, 40, start), "first time");
+        assert!(!queued_notice_due(Some(start), Some(40), 40, start + Duration::from_secs(2)), "same place");
+        assert!(queued_notice_due(Some(start), Some(40), 30, start + Duration::from_secs(2)), "moved");
+        assert!(!queued_notice_due(Some(start), Some(40), 30, start + Duration::from_millis(500)), "not twice a second");
+        assert!(queued_notice_due(Some(start), Some(40), 40, start + QUEUED_NOTIFY), "keep-alive");
     }
 }

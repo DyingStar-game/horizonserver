@@ -2,6 +2,10 @@
 # DyingStar plugins configuration
 # ============================================================================
 #
+# log_level (every plugin): a level or EnvFilter directives, e.g.
+# "info,dyingstar_generic_props::lod=debug". The GORC per-object INFO chatter of
+# horizon_event_system (zone entered/exited, subscribed) is silenced unless the
+# directives name horizon_event_system: "info,horizon_event_system=info" restores it.
 [ds_game_server]
 log_level = "info"
 # Godot servers pool. game_servers is a static list of addresses; game_servers_dns
@@ -21,7 +25,8 @@ servers_mode = "single"
 # Dynamic server meshing (ignored in single mode). A Godot server owns a list of
 # zones (space, or one planet, optionally bounded). When a server saturates, whole
 # zones are handed to an idle server of the pool; a server left with a single zone
-# gets that zone cut in two. Sibling servers are merged back when the load drops.
+# gets that zone cut in pieces (players / N + 1 under a players:N rule, at most 4
+# idle servers per split). Sibling servers are merged back when the load drops.
 #
 # split_rule:
 #  * "tps:20"     => split when the achieved physics ticks/s stay under 20
@@ -43,6 +48,18 @@ snapshot_timeout_secs = 5
 split_warmup_secs = 5
 split_warmup_max_secs = 30
 split_ready_tps = 58
+# Physics ticks/s under which a server takes no new player (default 45): the
+# arrivals wait in the queue of genericprops until it is back above, or until a split
+# gives them a server with room. Keep it at or under the tps: threshold of split_rule:
+# a server in between takes no player and is never split for it (warned at startup).
+placement_min_tps = 20
+# Split a server for its villages (default true): when the villages cannot be
+# spawned fast enough (the servers owning unspawned ones already wait for 2 each),
+# part of such a server's zones and villages goes to an idle server, which spawns
+# them in parallel. The cut shares the villages to spawn, moves at most 25 % of its
+# players, keeps 2 idle servers for the splits for players, and the pair is not
+# merged back for 180 s.
+village_split = true
 
 [ds_genericprops]
 log_level = "info"
@@ -54,6 +71,36 @@ log_level = "info"
 # ~15 s to minutes to build: players arriving with no room get no apartment.
 max_players_per_village = 50
 village_free_reserve = 100
+# On top of village_free_reserve: villages kept ahead for each server that owns
+# villages and takes players (default 1). A village takes Godot 16-20 s to spawn,
+# while every server is given players: one reserve for the whole pool ran dry.
+village_reserve_per_server = 1
+# Metres around a village's centre its habs stand in (default 200; the mining
+# layout spans ~165 m): a village whose disc crosses a zone border is asked for
+# after the ones inside one zone, its habs would be split between two servers.
+village_radius = 200
+# Villages kept spawned ahead even with nobody arriving, from the start (default
+# 15, 0 = only on arrivals): spawned on arrivals only, 600 players waited 110 s in
+# the queue. Spawned villages are persisted: only a persistence reset costs again.
+# At startup new players wait in the queue until those villages all have their habs.
+prespawn_villages = 15
+# A player (new, or back from an earlier session) whose village is on a server
+# taking no new player (over placement_capacity, under placement_min_tps, in a split
+# or merge) waits in a queue, told so by a "queued" message, until that server takes
+# players again, however long it takes: a server that refuses is never given a
+# player. A returning player always spawns in its own apartment. When no room can
+# come (no server takes players, no split running, no idle server left) or every
+# village is full, a waiting player is disconnected after 15 s: "All servers are full".
+# Players a server is given at most every 2 s, from the queue or not (default 10,
+# 0 = no limit): letting 49 queued players in at once took a server from 61 to 14 tps.
+queue_admit_per_server = 10
+# Seconds between two saves of every connected player's position / rotation / parent
+# to persistence (default 60, 0 = on disconnect only). Saved on disconnect anyway.
+player_save_interval_secs = 60
+# Threads delivering the channel updates to the clients (default 4). Each serves
+# its share of the objects; one thread was the ceiling of the whole replication at
+# ~800 players (100 % of its core, preprod 2026-11-03).
+lod_workers = 4
 
 [ds_player_authentication]
 log_level = "info"
@@ -102,6 +149,9 @@ subscribe = [
     "plugin:genericprops:delete_object",
     "plugin:bridge_persistence:get_all_items",
     "plugin:bridge_persistence:player_spawn",
+    # Position / rotation / parent of the players (on disconnect, and every
+    # player_save_interval_secs), merged by persistence like an update_object.
+    "plugin:bridge_persistence:update_object",
 ]
 
 # ── Monitoring service ── forwards events used for Prometheus metrics

@@ -1,18 +1,9 @@
 name: "Build & Deploy to Preprod"
 
+# Manual only: a merge into develop no longer builds. Each run from develop is
+# a dev release: its version (<NEXT_VERSION>-dev.<UTC yyyymmddhhmm>) tags the
+# built commit and cuts the [Unreleased] section of the changelog.
 on:
-  push:
-    branches:
-      - develop
-    paths:
-      - "scripts/install.sh"
-      - "Horizon"
-      - ".gitmodules"
-      - "ds_*/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "plugins.toml"
-      - ".docker/**"
   workflow_dispatch:
     inputs:
       build_server:
@@ -28,6 +19,10 @@ on:
         type: boolean
         default: true
 
+concurrency:
+  group: preprod-deploy
+  cancel-in-progress: false
+
 env:
   HARBOR_REGISTRY: harbor.dyingstar-game.space
   SERVER_IMAGE: harbor.dyingstar-game.space/dyingstar/horizon
@@ -37,65 +32,23 @@ env:
   CHART_NAME: horizon
 
 jobs:
-  detect-changes:
-    name: Detect changed paths
+  version:
+    name: Compute version
     runs-on: ubuntu-latest
     outputs:
-      server: ${{ steps.result.outputs.server }}
-      plugins: ${{ steps.result.outputs.plugins }}
-      data: ${{ steps.result.outputs.data }}
+      version: ${{ steps.version.outputs.version }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Check changed paths
-        uses: dorny/paths-filter@v3
-        id: filter
-        if: github.event_name == 'push'
-        with:
-          filters: |
-            server:
-              - 'scripts/install.sh'
-              - 'Horizon'
-              - '.gitmodules'
-              - '.docker/Dockerfile.server'
-              - '.docker/entrypoint.sh'
-              - '.docker/production_config.toml'
-            # Each filter mirrors the COPY instructions of its Dockerfile. If one
-            # moves, the other must follow — otherwise a change ships to a registry
-            # that never receives it (which is exactly what used to happen to the
-            # ds_genericprops JSON files: they matched 'plugins', an image that
-            # does not carry them).
-            data:
-              - 'ds_genericprops/props/**'
-              - 'ds_genericprops/startup_items.json'
-              - '.docker/plugins.toml'
-              - '.docker/Dockerfile.data'
-            plugins:
-              - 'ds_*/src/**'
-              - 'ds_*/Cargo.toml'
-              - 'Cargo.toml'
-              - 'Cargo.lock'
-              - 'plugins.toml'
-              - '.docker/Dockerfile.plugins'
-
-      - name: Resolve build targets
-        id: result
-        run: |
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            echo "server=${{ inputs.build_server }}" >> $GITHUB_OUTPUT
-            echo "plugins=${{ inputs.build_plugins }}" >> $GITHUB_OUTPUT
-            echo "data=${{ inputs.build_data }}" >> $GITHUB_OUTPUT
-          else
-            echo "server=${{ steps.filter.outputs.server }}" >> $GITHUB_OUTPUT
-            echo "plugins=${{ steps.filter.outputs.plugins }}" >> $GITHUB_OUTPUT
-            echo "data=${{ steps.filter.outputs.data }}" >> $GITHUB_OUTPUT
-          fi
+      - name: Compute dev version
+        id: version
+        env:
+          # Next stable version, a repository variable raised at each release
+          NEXT_VERSION: ${{ vars.NEXT_VERSION || '0.1.0' }}
+        run: echo "version=${NEXT_VERSION}-dev.$(date -u +%Y%m%d%H%M)" >> "$GITHUB_OUTPUT"
 
   build-server:
     name: Build server image
-    needs: detect-changes
-    if: needs.detect-changes.outputs.server == 'true'
+    needs: version
+    if: inputs.build_server
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -131,8 +84,8 @@ jobs:
 
   build-plugins:
     name: Build plugins image
-    needs: detect-changes
-    if: needs.detect-changes.outputs.server == 'true' || needs.detect-changes.outputs.plugins == 'true'
+    needs: version
+    if: inputs.build_server || inputs.build_plugins
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -168,8 +121,8 @@ jobs:
 
   build-data:
     name: Build data image
-    needs: detect-changes
-    if: needs.detect-changes.outputs.data == 'true'
+    needs: version
+    if: inputs.build_data
     runs-on: ubuntu-latest
     steps:
       # No submodules / install.sh / check_deps_sync.sh: Dockerfile.data is two
@@ -216,3 +169,44 @@ jobs:
           repository: ${{ github.repository_owner }}/kubernetes
           event-type: deploy-preprod
           client-payload: '{"chart": "${{ env.CHART_NAME }}"}'
+
+  dev-release:
+    name: Dev release (tag + changelog)
+    needs: [version, deploy]
+    # A build from another branch reaches preprod but is not a dev release
+    if: needs.deploy.result == 'success' && github.ref_name == 'develop'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Tag the built commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          # No "v" prefix: v* tags start the production builds
+          gh api --method POST "/repos/${{ github.repository }}/git/refs" \
+            -f "ref=refs/tags/$VERSION" -f "sha=${{ github.sha }}"
+
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: DyingStar-game
+          repositories: changelog
+
+      - name: Send release dispatch to changelog repo
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          gh api \
+            --method POST \
+            -H "Accept: application/vnd.github+json" \
+            /repos/DyingStar-game/changelog/dispatches \
+            --field event_type=release \
+            --field "client_payload[component]=horizonserver" \
+            --field "client_payload[version]=$VERSION" \
+            --field "client_payload[date]=$(date -u +%Y-%m-%d)"

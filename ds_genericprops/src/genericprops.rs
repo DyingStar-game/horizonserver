@@ -123,6 +123,27 @@ impl GorcObject for GenericProps {
 		Ok(serde_json::to_vec(&self.data[&layer.channel])?)
 	}
 
+	/// JSON clients get the channel's object as before; bitcode clients a
+	/// `ds_protocol::PropState`: position and rotation apart, the other keys as a
+	/// `DynValue` (the shape `lod` uses for later updates).
+	fn serialize_for_layer_as(
+		&self,
+		layer: &ReplicationLayer,
+		format: horizon_event_system::Format,
+	) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+		match format {
+			horizon_event_system::Format::Json => self.serialize_for_layer(layer),
+			horizon_event_system::Format::Bitcode => {
+				let data = self.data.get(&layer.channel).ok_or("Invalid channel for this object type")?;
+				let mut state = prop_state(data);
+				if let Ok(gorc_id) = GorcObjectId::from_str(&self.uuid) {
+					state.transform.epoch = crate::lod::epoch(gorc_id);
+				}
+				Ok(horizon_event_system::protocol::bitcode::encode(&state))
+			}
+		}
+	}
+
 	fn get_layers(&self) -> Vec<ReplicationLayer> {
 		//TODO make a channels type with a into<Vec>() impl
 		let mut layers = Vec::new();
@@ -133,11 +154,8 @@ impl GorcObject for GenericProps {
 					channel.distance,
 					channel.frequency.into(),
 					vec![],// Field no longer use since 0.40
-					match channel.zone {
-						0 => CompressionType::Delta,
-						1 | 2 => CompressionType::Lz4,
-						3 | _ => CompressionType::High
-					}
+					// Ignored by Horizon: compression is set per listener ([server.compression]).
+					CompressionType::None
 				)
 			)
 		}
@@ -163,4 +181,60 @@ impl GorcObject for GenericProps {
 	fn on_register(&mut self, object_id: GorcObjectId) {
         let _ = object_id; // Default implementation does nothing
     }
+}
+
+/// A channel's data as a bitcode `PropState`. Data that is not a JSON object goes
+/// whole into the other keys.
+pub fn prop_state(data: &serde_json::Value) -> ds_protocol::PropState {
+	match data.as_object() {
+		Some(map) => {
+			let (transform, rest) = ds_protocol::props::split(map);
+			ds_protocol::PropState { transform, data: ds_protocol::DynValue::from(&serde_json::Value::Object(rest)) }
+		}
+		None => ds_protocol::PropState { transform: Default::default(), data: ds_protocol::DynValue::from(data) },
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn player_def() -> ObjectDefinition {
+		let path = format!("{}/props/player_def.json", env!("CARGO_MANIFEST_DIR"));
+		ObjectDefinition::new("player".to_string(), serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap())
+	}
+
+	/// A player's look (the game's CharacterAppearance string) rides a slow channel of its own: it
+	/// changes a few times a session, and on the 30 Hz movement channel its ~100 bytes would go out with
+	/// every snapshot of every player.
+	#[test]
+	fn a_players_appearance_is_its_own_slow_channel() {
+		let def = player_def();
+		assert_eq!(def.index.get("appearance"), Some(&1));
+		assert_eq!(def.index.get("position"), Some(&0));
+		let channel = def.channel(1).expect("zone 1");
+		assert_eq!(channel.frequency, 1.0);
+		assert_eq!(channel.distance, 200.0, "seen as far as the player is");
+	}
+
+	#[test]
+	fn a_spawned_player_carries_its_appearance_on_zone_1() {
+		let player = GenericProps::new(player_def(), json!({
+			"position": { "x": 1.0, "y": 2.0, "z": 3.0 },
+			"name": "bob",
+			"appearance": "AQIDBA",
+		}), "p1".to_string());
+		assert_eq!(player.data[&1]["appearance"], "AQIDBA");
+		assert!(player.data[&0].get("appearance").is_none());
+		assert_eq!(player.data[&0]["name"], "bob");
+	}
+
+	#[test]
+	fn a_new_appearance_dirties_zone_1_alone() {
+		let mut player = GenericProps::new(player_def(), json!({ "position": { "x": 0.0, "y": 0.0, "z": 0.0 } }), "p1".to_string());
+		let dirty = player.update(json!({ "appearance": "AQIDBA" }));
+		assert_eq!(dirty, HashSet::from([1u8]), "the movement channel is not resent for a new look");
+		let dirty = player.update(json!({ "head": 0.3 }));
+		assert_eq!(dirty, HashSet::from([0u8]), "and a movement-channel property does not resend the look");
+	}
 }

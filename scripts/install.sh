@@ -20,3 +20,5 @@ git submodule update --init --recursive Horizon
 # relative to its own working directory (see scripts/run.sh).
 cp plugins.toml Horizon/plugins.toml
 cp dev_config.toml Horizon/dev_config.toml
+# The server builds with the plugins' lock (see .docker/Dockerfile.server).
+cp Cargo.lock Horizon/Cargo.lock

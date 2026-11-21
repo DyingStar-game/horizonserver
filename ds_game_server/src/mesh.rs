@@ -8,42 +8,91 @@ use ds_common::zone::{Bounds, Zone};
 use std::time::Duration;
 use tracing::warn;
 
-/// A threshold on one server metric, `"tps:20"` or `"players:50"` in the config.
+/// Thresholds on the server metrics, `"tps:20"`, `"players:50"` or both in the
+/// config: `"players:80 or tps:45"` for a split (any one over its threshold),
+/// `"players:25 and tps:55"` for a merge (all of them under it).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Rule {
+    pub tps: Option<u8>,
+    pub players: Option<u16>,
+}
+
+/// How the conditions of a rule combine: `or` for `split_rule`, `and` for `merge_rule`.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Rule {
-    Tps(u8),
-    Players(u16),
+pub enum Joiner {
+    Or,
+    And,
+}
+
+impl Joiner {
+    fn word(self) -> &'static str {
+        match self {
+            Joiner::Or => "or",
+            Joiner::And => "and",
+        }
+    }
 }
 
 impl Rule {
-    pub fn parse(s: &str) -> Result<Rule, String> {
-        let (kind, value) = s.trim().split_once(':').ok_or_else(|| format!("rule `{}` must be `tps:N` or `players:N`", s))?;
-        match kind.trim() {
-            "tps" => value.trim().parse::<u8>().map(Rule::Tps).map_err(|e| format!("bad tps in `{}`: {}", s, e)),
-            "fps" => {
-                warn!("rule `{}` uses the deprecated `fps:` prefix, read it as `tps:`", s);
-                value.trim().parse::<u8>().map(Rule::Tps).map_err(|e| format!("bad tps in `{}`: {}", s, e))
+    pub const fn tps(n: u8) -> Rule {
+        Rule { tps: Some(n), players: None }
+    }
+
+    pub const fn players(n: u16) -> Rule {
+        Rule { tps: None, players: Some(n) }
+    }
+
+    pub fn parse(s: &str, joiner: Joiner) -> Result<Rule, String> {
+        let other = match joiner {
+            Joiner::Or => Joiner::And,
+            Joiner::And => Joiner::Or,
+        };
+        let words: Vec<&str> = s.split_whitespace().collect();
+        if words.contains(&other.word()) {
+            return Err(format!("rule `{}` joins its conditions with `{}`, this rule takes `{}`", s, other.word(), joiner.word()));
+        }
+        let mut rule = Rule::default();
+        for cond in words.split(|w| *w == joiner.word()) {
+            let cond = cond.join("");
+            let (kind, value) = cond.split_once(':').ok_or_else(|| format!("rule `{}` must be `tps:N` or `players:N`", s))?;
+            let kind = match kind {
+                "fps" => {
+                    warn!("rule `{}` uses the deprecated `fps:` prefix, read it as `tps:`", s);
+                    "tps"
+                }
+                kind => kind,
+            };
+            match kind {
+                "tps" if rule.tps.is_none() => rule.tps = Some(value.parse::<u8>().map_err(|e| format!("bad tps in `{}`: {}", s, e))?),
+                "players" if rule.players.is_none() => {
+                    rule.players = Some(value.parse::<u16>().map_err(|e| format!("bad players in `{}`: {}", s, e))?)
+                }
+                "tps" | "players" => return Err(format!("rule `{}` sets `{}` twice", s, kind)),
+                other => return Err(format!("unknown rule kind `{}` in `{}`", other, s)),
             }
-            "players" => value.trim().parse::<u16>().map(Rule::Players).map_err(|e| format!("bad players in `{}`: {}", s, e)),
-            other => Err(format!("unknown rule kind `{}` in `{}`", other, s)),
         }
+        Ok(rule)
     }
 
-    /// Split when the tps falls under the threshold / the players exceed it.
+    /// Split when the tps falls under its threshold or the players exceed theirs.
     pub fn split_hit(&self, tps: u8, players: u16) -> bool {
-        match *self {
-            Rule::Tps(n) => tps < n,
-            Rule::Players(n) => players > n,
-        }
+        self.tps.is_some_and(|n| tps < n) || self.players.is_some_and(|n| players > n)
     }
 
-    /// Merge two siblings when both run above the tps threshold / their players sum
-    /// stays under it.
+    /// Merge two siblings when both run above the tps threshold and their players
+    /// sum stays under its threshold (a condition left out always holds).
     pub fn merge_hit(&self, a: (u8, u16), b: (u8, u16)) -> bool {
-        match *self {
-            Rule::Tps(n) => a.0 > n && b.0 > n,
-            Rule::Players(n) => (a.1 as u32 + b.1 as u32) < n as u32,
-        }
+        self.tps.map_or(true, |n| a.0 > n && b.0 > n) && self.players.map_or(true, |n| (a.1 as u32 + b.1 as u32) < n as u32)
+    }
+}
+
+impl std::fmt::Display for Rule {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let conds: Vec<String> = [self.players.map(|n| format!("players:{}", n)), self.tps.map(|n| format!("tps:{}", n))]
+            .into_iter()
+            .flatten()
+            .collect();
+        f.write_str(&conds.join(", "))
     }
 }
 
@@ -68,42 +117,84 @@ pub struct MeshRules {
     /// rule; set it above that threshold so a server is split before it fills up
     /// while the new players keep arriving on it.
     pub placement_capacity: Option<u32>,
+    /// Under this tps a server takes no new player (`placement_min_tps`): the arrivals
+    /// wait in genericprops' queue until it recovers or is split.
+    pub placement_min_tps: u8,
+    /// Split a server for its villages (`village_split`): when genericprops cannot get
+    /// villages spawned fast enough because the servers owning unspawned ones already
+    /// wait for 2, part of such a server's zones and villages goes to an idle server,
+    /// which spawns them in parallel (see plan_village_split).
+    pub village_split: bool,
 }
 
+/// Most idle servers one split hands zones to.
+pub const MAX_SPLIT_CHILDREN: usize = 4;
+
 impl MeshRules {
+    /// Idle servers a split asks for. A server far over the `players:` threshold of the
+    /// split rule is cut in as many pieces as it takes for each to fall under it (238
+    /// players at players:80 = 3 pieces) instead of being halved again every 35-40 s
+    /// while its arrivals kept coming (preprod 2026-10-20: 238 players on one server at
+    /// 20 tps). At least a plain split (one child, two with several zones), at most
+    /// MAX_SPLIT_CHILDREN.
+    pub fn split_children_wanted(&self, zones: usize, players: u32) -> usize {
+        let base = if zones >= 2 { 2 } else { 1 };
+        let pieces = self.split.players.map_or(1, |n| players as usize / n.max(1) as usize + 1);
+        // One zone: the parent keeps a piece. Several: the cut zone's pieces all go to children.
+        let wanted = if zones >= 2 { pieces } else { pieces - 1 };
+        wanted.clamp(base, MAX_SPLIT_CHILDREN)
+    }
+
     /// True when the placement must stop sending new players to this server.
     pub fn placement_full(&self, tps: u8, players: u16) -> bool {
-        match self.placement_capacity {
-            Some(n) => players as u32 > n || matches!(self.split, Rule::Tps(_)) && self.split.split_hit(tps, players),
+        let full = match self.placement_capacity {
+            Some(n) => players as u32 > n || self.split.tps.is_some_and(|n| tps < n),
             None => self.split.split_hit(tps, players),
-        }
+        };
+        full || tps < self.placement_min_tps
     }
 }
 
 impl MeshRules {
     pub fn from_config(config: &Config) -> MeshRules {
-        let rule = |key: &str, default: &str| -> Rule {
+        let rule = |key: &str, default: &str, joiner: Joiner| -> Rule {
             let raw = config.get_value(key).and_then(|v| v.as_str()).unwrap_or(default);
-            Rule::parse(raw).unwrap_or_else(|e| {
+            Rule::parse(raw, joiner).unwrap_or_else(|e| {
                 warn!("[mesh] {}: {} — using default `{}`", key, e, default);
-                Rule::parse(default).expect("default rule parses")
+                Rule::parse(default, joiner).expect("default rule parses")
             })
         };
         let int = |key: &str, default: i64| -> i64 {
             config.get_value(key).and_then(|v| v.as_integer()).unwrap_or(default).max(1)
         };
-        let split = rule("split_rule", "tps:20");
+        let split = rule("split_rule", "tps:20", Joiner::Or);
         let placement_capacity = config
             .get_value("placement_capacity")
             .and_then(|v| v.as_integer())
             .map(|n| n.max(1) as u32)
-            .or(match split {
-                Rule::Players(n) => Some(n as u32),
-                Rule::Tps(_) => None,
-            });
+            .or(split.players.map(u32::from));
+        if let (Some(n), Some(capacity)) = (split.players, placement_capacity) {
+            if capacity <= n as u32 {
+                // The server stops taking players before it is over the rule: never split,
+                // its queued arrivals wait until players leave it.
+                warn!(
+                    "[mesh] placement_capacity {} is not above the split rule players:{}: a full server is never split",
+                    capacity, n
+                );
+            }
+        }
+        let placement_min_tps = config.get_value("placement_min_tps").and_then(|v| v.as_integer()).unwrap_or(45).clamp(0, 255) as u8;
+        if placement_min_tps > split.tps.unwrap_or(0) {
+            // Between the two the server takes no player and is not split: genericprops'
+            // queue never gives up on a server, its arrivals wait until the tps comes back.
+            warn!(
+                "[mesh] placement_min_tps {} is above the tps threshold of the split rule `{}`: a server in between takes no player and is never split for it",
+                placement_min_tps, split
+            );
+        }
         MeshRules {
             split,
-            merge: rule("merge_rule", "players:10"),
+            merge: rule("merge_rule", "players:10", Joiner::And),
             split_after: int("split_after_samples", 10) as u32,
             merge_after: int("merge_after_samples", 30) as u32,
             snapshot_timeout: Duration::from_secs(int("snapshot_timeout_secs", 5) as u64),
@@ -111,6 +202,8 @@ impl MeshRules {
             warmup_max: Duration::from_secs(int("split_warmup_max_secs", 30) as u64),
             ready_tps: int("split_ready_tps", 58).clamp(1, 255) as u8,
             placement_capacity,
+            placement_min_tps,
+            village_split: config.get_value("village_split").and_then(|v| v.as_bool()).unwrap_or(true),
         }
     }
 }
@@ -128,14 +221,15 @@ pub struct SplitPlan {
 /// Divides `zones` between a parent and a child. With several zones, whole zones
 /// move (greedy: heaviest first, each to the lighter side, the child getting the
 /// heaviest). With a single zone, its bounds are cut through the population (see
-/// `split_bounds`). `None` only when there is no zone at all.
-pub fn plan_split(zones: &[Zone], players: &[ObjectWorld]) -> Option<SplitPlan> {
+/// `split_bounds`), clear of the `villages` (the worlds of each village's habs) when
+/// it can. `None` only when there is no zone at all.
+pub fn plan_split(zones: &[Zone], players: &[ObjectWorld], villages: &[Vec<ObjectWorld>]) -> Option<SplitPlan> {
     match zones {
         [] => None,
         [zone] => {
             let locals: Vec<Point3> = players.iter().filter(|w| zone.contains(w)).map(|w| w.local_position).collect();
             let base = zone.bounds.clone().unwrap_or_else(Bounds::unbounded);
-            let (b1, b2) = split_bounds(&base, &locals);
+            let (b1, b2) = split_bounds(&base, &locals, &footprints_in(zone, villages));
             let keep = Zone { id: zone.id.clone(), world: zone.world.clone(), bounds: Some(b1) };
             let give = zone.with_new_bounds(b2);
             let keep_players = locals.iter().filter(|p| keep.bounds.as_ref().unwrap().contains(p)).count();
@@ -199,45 +293,50 @@ impl SplitPlanN {
 /// When the parent holds several zones and one of them carries more than half of
 /// its players (the first server: space + the planet where everybody spawns),
 /// moving that zone whole would only move the overload to the child. The zone is
-/// cut through its population instead (`split_bounds`): with two children each
-/// half goes to one of them and the parent keeps the other zones; with one child
-/// the parent also keeps the first half. Anything else is `plan_split`.
-pub fn plan_split_n(zones: &[Zone], players: &[ObjectWorld], children: usize) -> Option<SplitPlanN> {
+/// cut through its population instead (`split_bounds_n`): with two children or
+/// more, each piece goes to one of them and the parent keeps the other zones; with
+/// one child the parent also keeps the first piece. A parent holding a single zone
+/// with two children or more keeps one piece of it and gives one to each child.
+/// Anything else is `plan_split`. The cuts stay clear of the `villages` when they can.
+pub fn plan_split_n(zones: &[Zone], players: &[ObjectWorld], children: usize, villages: &[Vec<ObjectWorld>]) -> Option<SplitPlanN> {
     if children == 0 {
         return None;
     }
     let total = players.iter().filter(|w| zones.iter().any(|z| z.contains(w))).count();
-    let dominant = if zones.len() >= 2 {
-        zones
+    let dominant = match zones.len() {
+        0 => None,
+        1 if children >= 2 => Some((0, total)),
+        1 => None,
+        _ => zones
             .iter()
             .enumerate()
             .map(|(i, z)| (i, players.iter().filter(|w| z.contains(w)).count()))
             .max_by_key(|&(_, count)| count)
-            .filter(|&(_, count)| count >= 2 && count * 2 > total)
-    } else {
-        None
+            .filter(|&(_, count)| count >= 2 && count * 2 > total),
     };
     let Some((index, _)) = dominant else {
-        return plan_split(zones, players).map(SplitPlanN::from);
+        return plan_split(zones, players, villages).map(SplitPlanN::from);
     };
     let zone = &zones[index];
-    let others: Vec<Zone> = zones.iter().enumerate().filter(|&(i, _)| i != index).map(|(_, z)| z.clone()).collect();
+    let mut keep: Vec<Zone> = zones.iter().enumerate().filter(|&(i, _)| i != index).map(|(_, z)| z.clone()).collect();
     let count_in = |zs: &[Zone]| players.iter().filter(|w| zs.iter().any(|z| z.contains(w))).count();
     let locals: Vec<Point3> = players.iter().filter(|w| zone.contains(w)).map(|w| w.local_position).collect();
     let base = zone.bounds.clone().unwrap_or_else(Bounds::unbounded);
-    let (b1, b2) = split_bounds(&base, &locals);
-    let second = vec![zone.with_new_bounds(b2)];
-    if children >= 2 {
-        let first = vec![zone.with_new_bounds(b1)];
-        let (n1, n2) = (count_in(&first), count_in(&second));
-        Some(SplitPlanN { keep_players: count_in(&others), keep: others, gives: vec![(first, n1), (second, n2)] })
-    } else {
-        // The parent keeps the zone's identity on the first half, like `plan_split`.
-        let mut keep = others;
-        keep.push(Zone { id: zone.id.clone(), world: zone.world.clone(), bounds: Some(b1) });
-        let n2 = count_in(&second);
-        Some(SplitPlanN { keep_players: count_in(&keep), keep, gives: vec![(second, n2)] })
+    let parent_keeps_a_piece = keep.is_empty() || children == 1;
+    let pieces = if parent_keeps_a_piece { children + 1 } else { children };
+    let mut cut = split_bounds_n(&base, &locals, pieces, &footprints_in(zone, villages)).into_iter();
+    if parent_keeps_a_piece {
+        // The parent keeps the zone's identity on the first piece, like `plan_split`.
+        keep.push(Zone { id: zone.id.clone(), world: zone.world.clone(), bounds: cut.next() });
     }
+    let gives: Vec<(Vec<Zone>, usize)> = cut
+        .map(|bounds| {
+            let give = vec![zone.with_new_bounds(bounds)];
+            let n = count_in(&give);
+            (give, n)
+        })
+        .collect();
+    Some(SplitPlanN { keep_players: count_in(&keep), keep, gives })
 }
 
 fn round3(v: f64) -> f64 {
@@ -250,31 +349,99 @@ fn round3(v: f64) -> f64 {
 /// anyway — an overloaded server must be split, ping-pong or not.
 pub const MIN_CUT_GAP: f64 = 20.0;
 
+/// Most of the parent's players a split for villages may move to the child: it is made
+/// to spread the villages to spawn, a hand-over of players costs a freeze and a load.
+pub const VILLAGE_SPLIT_MAX_PLAYERS_SHARE: f64 = 0.25;
+
+/// A split for villages, with one child: `plan_split_n` with the villages to spawn
+/// (`wanted`, their centres) as the population, clear of the `spawned` villages. The
+/// child gets the piece with fewer `players` (the parent keeps the cut zone's identity on
+/// the other); `give_players` counts the players. None when the child would get no village
+/// to spawn, or more than VILLAGE_SPLIT_MAX_PLAYERS_SHARE of the parent's players.
+pub fn plan_village_split(zones: &[Zone], wanted: &[ObjectWorld], players: &[ObjectWorld], spawned: &[Vec<ObjectWorld>]) -> Option<SplitPlanN> {
+    let mut plan = plan_split_n(zones, wanted, 1, spawned)?;
+    if plan.gives.len() != 1 {
+        return None;
+    }
+    let count = |zs: &[Zone], worlds: &[ObjectWorld]| worlds.iter().filter(|w| zs.iter().any(|z| z.contains(w))).count();
+    if count(&plan.gives[0].0, players) > count(&plan.keep, players) && plan.gives[0].0.len() == 1 {
+        let give = &mut plan.gives[0].0[0];
+        if let Some(kept) = plan.keep.iter_mut().find(|z| z.world == give.world && !zones.contains(z)) {
+            std::mem::swap(&mut kept.bounds, &mut give.bounds);
+        }
+    }
+    let moved = count(&plan.gives[0].0, players);
+    if count(&plan.gives[0].0, wanted) == 0 || moved as f64 > VILLAGE_SPLIT_MAX_PLAYERS_SHARE * count(zones, players) as f64 {
+        return None;
+    }
+    plan.keep_players = count(&plan.keep, players);
+    plan.gives[0].1 = moved;
+    Some(plan)
+}
+
+/// Metres a cut keeps from a village's habs: a hab spans ~20 m past its origin and a cut
+/// 3.9 m past one left its occupants on another server (preprod, 2026-10-21); 300 m keeps
+/// the whole village and its surroundings on one side.
+pub const VILLAGE_MARGIN: f64 = 300.0;
+
+/// The box each village with a hab in `zone` stands in (its habs' planet-local
+/// positions), grown by VILLAGE_MARGIN.
+fn footprints_in(zone: &Zone, villages: &[Vec<ObjectWorld>]) -> Vec<Bounds> {
+    villages
+        .iter()
+        .filter(|habs| habs.iter().any(|w| zone.contains(w)))
+        .map(|habs| {
+            let fold = |pick: fn(&Point3) -> f64, init: f64, f: fn(f64, f64) -> f64| {
+                habs.iter().map(|w| pick(&w.local_position)).fold(init, f)
+            };
+            Bounds {
+                min_x: fold(|p| p.x, f64::INFINITY, f64::min) - VILLAGE_MARGIN,
+                max_x: fold(|p| p.x, f64::NEG_INFINITY, f64::max) + VILLAGE_MARGIN,
+                min_y: fold(|p| p.y, f64::INFINITY, f64::min) - VILLAGE_MARGIN,
+                max_y: fold(|p| p.y, f64::NEG_INFINITY, f64::max) + VILLAGE_MARGIN,
+                min_z: fold(|p| p.z, f64::INFINITY, f64::min) - VILLAGE_MARGIN,
+                max_z: fold(|p| p.z, f64::NEG_INFINITY, f64::max) + VILLAGE_MARGIN,
+            }
+        })
+        .collect()
+}
+
+/// `cut` on `axis` moved out of the villages it runs through, to the closest edge of
+/// one that is clear of every village and within `lo..=hi` (the balance the cut was
+/// chosen for); `cut` itself when it runs through none or no such edge exists. A cut
+/// through a village splits its habs and their occupants between two servers.
+fn clear_of_villages(cut: f64, axis: usize, villages: &[Bounds], lo: f64, hi: f64) -> f64 {
+    let range = |b: &Bounds| match axis {
+        0 => (b.min_x, b.max_x),
+        1 => (b.min_y, b.max_y),
+        _ => (b.min_z, b.max_z),
+    };
+    let inside = |c: f64| villages.iter().any(|b| {
+        let (min, max) = range(b);
+        c > min && c < max
+    });
+    if !inside(cut) {
+        return cut;
+    }
+    villages
+        .iter()
+        .flat_map(|b| {
+            let (min, max) = range(b);
+            [min, max]
+        })
+        .filter(|&c| c >= lo && c <= hi && !inside(c))
+        .min_by(|a, b| (a - cut).abs().total_cmp(&(b - cut).abs()))
+        .map(round3)
+        .unwrap_or(cut)
+}
+
 /// Cuts a box in two along the axis where the players are the most spread: in the
 /// widest gap of the middle half of the population when one is at least
 /// `MIN_CUT_GAP` wide, else at the median. With at most one player the box is
-/// simply halved.
-pub fn split_bounds(bounds: &Bounds, positions: &[Point3]) -> (Bounds, Bounds) {
-    let axis_values = |axis: usize| -> Vec<f64> {
-        positions.iter().map(|p| match axis { 0 => p.x, 1 => p.y, _ => p.z }).collect()
-    };
-    let spread = |values: &[f64]| -> f64 {
-        if values.is_empty() {
-            return 0.0;
-        }
-        let min = values.iter().cloned().fold(f64::INFINITY, f64::min);
-        let max = values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-        (max - min).abs()
-    };
-    let (xs, ys, zs) = (axis_values(0), axis_values(1), axis_values(2));
-    let (sx, sy, sz) = (spread(&xs), spread(&ys), spread(&zs));
-    let (axis, mut values, lo, hi) = if sx >= sy && sx >= sz {
-        (0, xs, bounds.min_x, bounds.max_x)
-    } else if sy >= sx && sy >= sz {
-        (1, ys, bounds.min_y, bounds.max_y)
-    } else {
-        (2, zs, bounds.min_z, bounds.max_z)
-    };
+/// simply halved. A cut through one of the `villages` (boxes, see footprints_in)
+/// moves to the closest village edge still in the middle half, when there is one.
+pub fn split_bounds(bounds: &Bounds, positions: &[Point3], villages: &[Bounds]) -> (Bounds, Bounds) {
+    let (axis, mut values, lo, hi) = widest_axis(bounds, positions);
 
     let mid = if values.len() <= 1 {
         round3((lo + hi) / 2.0)
@@ -293,21 +460,93 @@ pub fn split_bounds(bounds: &Bounds, positions: &[Point3]) -> (Bounds, Bounds) {
                 best_mid = (values[i] + values[i + 1]) / 2.0;
             }
         }
-        if best_gap >= MIN_CUT_GAP {
+        let cut = if best_gap >= MIN_CUT_GAP {
             round3(best_mid)
         } else {
             let m = n / 2;
             round3((values[m - 1] + values[m]) / 2.0)
-        }
+        };
+        clear_of_villages(cut, axis, villages, values[first], values[last])
     };
 
-    let (mut first, mut second) = (bounds.clone(), bounds.clone());
-    match axis {
-        0 => { first.max_x = mid; second.min_x = mid + 0.001; }
-        1 => { first.max_y = mid; second.min_y = mid + 0.001; }
-        _ => { first.max_z = mid; second.min_z = mid + 0.001; }
+    (with_axis_range(bounds, axis, lo, mid), with_axis_range(bounds, axis, mid + 0.001, hi))
+}
+
+/// The axis (0 = x, 1 = y, 2 = z) along which the players are the most spread, their
+/// coordinates on it, and the range of `bounds` on it.
+fn widest_axis(bounds: &Bounds, positions: &[Point3]) -> (usize, Vec<f64>, f64, f64) {
+    let axis_values = |axis: usize| -> Vec<f64> {
+        positions.iter().map(|p| match axis { 0 => p.x, 1 => p.y, _ => p.z }).collect()
+    };
+    let spread = |values: &[f64]| -> f64 {
+        if values.is_empty() {
+            return 0.0;
+        }
+        let min = values.iter().cloned().fold(f64::INFINITY, f64::min);
+        let max = values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        (max - min).abs()
+    };
+    let (xs, ys, zs) = (axis_values(0), axis_values(1), axis_values(2));
+    let (sx, sy, sz) = (spread(&xs), spread(&ys), spread(&zs));
+    if sx >= sy && sx >= sz {
+        (0, xs, bounds.min_x, bounds.max_x)
+    } else if sy >= sx && sy >= sz {
+        (1, ys, bounds.min_y, bounds.max_y)
+    } else {
+        (2, zs, bounds.min_z, bounds.max_z)
     }
-    (first, second)
+}
+
+/// `bounds` with its range on `axis` replaced by `lo..hi`.
+fn with_axis_range(bounds: &Bounds, axis: usize, lo: f64, hi: f64) -> Bounds {
+    let mut b = bounds.clone();
+    match axis {
+        0 => { b.min_x = lo; b.max_x = hi; }
+        1 => { b.min_y = lo; b.max_y = hi; }
+        _ => { b.min_z = lo; b.max_z = hi; }
+    }
+    b
+}
+
+/// Cuts a box into `pieces` boxes of about as many players each, along the axis where
+/// the players are the most spread: a cut between the players at every 1/`pieces` of
+/// the population. Two pieces: `split_bounds` (it prefers a wide gap to the median).
+/// Players stacked on the same coordinate can leave fewer pieces than asked, two at
+/// least. A cut through one of the `villages` moves to the closest village edge within
+/// half a piece of the population around it, when there is one.
+pub fn split_bounds_n(bounds: &Bounds, positions: &[Point3], pieces: usize, villages: &[Bounds]) -> Vec<Bounds> {
+    if pieces <= 1 {
+        return vec![bounds.clone()];
+    }
+    if pieces == 2 || positions.len() < 3 {
+        let (first, second) = split_bounds(bounds, positions, villages);
+        return vec![first, second];
+    }
+    let (axis, mut values, lo, hi) = widest_axis(bounds, positions);
+    values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let n = values.len();
+    let mut cuts: Vec<f64> = Vec::new();
+    for i in 1..pieces {
+        let k = (i * n / pieces).clamp(1, n - 1);
+        let half = n / (2 * pieces);
+        let cut = round3((values[k - 1] + values[k]) / 2.0);
+        let cut = clear_of_villages(cut, axis, villages, values[k.saturating_sub(half + 1)], values[(k + half).min(n - 1)]);
+        if cut > lo && cut < hi && cuts.last().map_or(true, |last| cut > last + 0.001) {
+            cuts.push(cut);
+        }
+    }
+    if cuts.is_empty() {
+        let (first, second) = split_bounds(bounds, positions, villages);
+        return vec![first, second];
+    }
+    let mut boxes = Vec::with_capacity(cuts.len() + 1);
+    let mut start = lo;
+    for cut in cuts {
+        boxes.push(with_axis_range(bounds, axis, start, cut));
+        start = cut + 0.001;
+    }
+    boxes.push(with_axis_range(bounds, axis, start, hi));
+    boxes
 }
 
 #[cfg(test)]
@@ -331,15 +570,36 @@ mod tests {
 
     #[test]
     fn rule_parsing() {
-        assert_eq!(Rule::parse("tps:20"), Ok(Rule::Tps(20)));
-        assert_eq!(Rule::parse("players:50"), Ok(Rule::Players(50)));
-        assert_eq!(Rule::parse("fps:15"), Ok(Rule::Tps(15)));
-        assert!(Rule::parse("cpu:3").is_err());
-        assert!(Rule::parse("tps").is_err());
-        assert!(Rule::Tps(20).split_hit(19, 0) && !Rule::Tps(20).split_hit(20, 0));
-        assert!(Rule::Players(3).split_hit(60, 4) && !Rule::Players(3).split_hit(60, 3));
-        assert!(Rule::Players(10).merge_hit((60, 4), (60, 5)) && !Rule::Players(10).merge_hit((60, 5), (60, 5)));
-        assert!(Rule::Tps(50).merge_hit((55, 0), (51, 0)) && !Rule::Tps(50).merge_hit((55, 0), (50, 0)));
+        assert_eq!(Rule::parse("tps:20", Joiner::Or), Ok(Rule::tps(20)));
+        assert_eq!(Rule::parse("players:50", Joiner::Or), Ok(Rule::players(50)));
+        assert_eq!(Rule::parse("fps:15", Joiner::Or), Ok(Rule::tps(15)));
+        assert!(Rule::parse("cpu:3", Joiner::Or).is_err());
+        assert!(Rule::parse("tps", Joiner::Or).is_err());
+        assert!(Rule::parse("", Joiner::Or).is_err());
+        assert!(Rule::tps(20).split_hit(19, 0) && !Rule::tps(20).split_hit(20, 0));
+        assert!(Rule::players(3).split_hit(60, 4) && !Rule::players(3).split_hit(60, 3));
+        assert!(Rule::players(10).merge_hit((60, 4), (60, 5)) && !Rule::players(10).merge_hit((60, 5), (60, 5)));
+        assert!(Rule::tps(50).merge_hit((55, 0), (51, 0)) && !Rule::tps(50).merge_hit((55, 0), (50, 0)));
+    }
+
+    #[test]
+    fn combined_rules() {
+        let split = Rule::parse("players:80 or tps: 45", Joiner::Or).unwrap();
+        assert_eq!(split, Rule { tps: Some(45), players: Some(80) });
+        assert_eq!(split.to_string(), "players:80, tps:45");
+        // 2026-10-20 preprod: 72 players at 30 tps never went over players:80.
+        assert!(split.split_hit(30, 72));
+        assert!(split.split_hit(60, 81));
+        assert!(!split.split_hit(45, 80));
+        let merge = Rule::parse("players:25 and tps:55", Joiner::And).unwrap();
+        assert!(merge.merge_hit((60, 10), (58, 10)));
+        assert!(!merge.merge_hit((60, 10), (50, 10)));
+        assert!(!merge.merge_hit((60, 20), (60, 10)));
+        // The joiner says how the conditions combine: the wrong one is refused.
+        assert!(Rule::parse("players:80 and tps:45", Joiner::Or).is_err());
+        assert!(Rule::parse("players:25 or tps:55", Joiner::And).is_err());
+        assert!(Rule::parse("tps:20 or tps:30", Joiner::Or).is_err());
+        assert!(Rule::parse("players:80 or", Joiner::Or).is_err());
     }
 
     #[test]
@@ -347,11 +607,11 @@ mod tests {
         let b = Bounds::unbounded();
         // two groups 100 m apart on X: the cut lands between them, at 50
         let players = [Point3::new(-10.0, 0.0, 0.0), Point3::new(0.0, 1.0, 0.0), Point3::new(100.0, 2.0, 0.0), Point3::new(110.0, 0.0, 0.0)];
-        let (b1, b2) = split_bounds(&b, &players);
+        let (b1, b2) = split_bounds(&b, &players, &[]);
         assert_eq!(b1.max_x, 50.0);
         assert_eq!(b2.min_x, 50.001);
         assert_eq!(b1.min_y, b.min_y);
-        let (c1, c2) = split_bounds(&b, &[Point3::new(0.0, -40.0, 0.0), Point3::new(0.0, 60.0, 1.0)]);
+        let (c1, c2) = split_bounds(&b, &[Point3::new(0.0, -40.0, 0.0), Point3::new(0.0, 60.0, 1.0)], &[]);
         assert_eq!(c1.max_y, 10.0);
         assert_eq!(c2.min_y, 10.001);
     }
@@ -361,21 +621,100 @@ mod tests {
         let b = Bounds::unbounded();
         // 52 players within 26 m on X: no 20 m gap, so the median (between #25 and #26)
         let crowd: Vec<Point3> = (0..52).map(|i| Point3::new(i as f64 * 0.5, 0.0, -3675750.0 + (i % 7) as f64)).collect();
-        let (b1, b2) = split_bounds(&b, &crowd);
+        let (b1, b2) = split_bounds(&b, &crowd, &[]);
         assert_eq!(b1.max_x, 12.75);
         assert_eq!(b2.min_x, 12.751);
         let zones = vec![Zone::planet("p", "x")];
         let worlds: Vec<ObjectWorld> = crowd.iter().map(|p| on_planet("p", p.x, p.y, p.z)).collect();
-        let plan = plan_split(&zones, &worlds).unwrap();
+        let plan = plan_split(&zones, &worlds, &[]).unwrap();
         assert_eq!((plan.keep_players, plan.give_players), (26, 26));
+    }
+
+    /// Three villages of 20 players along X (habs at x .. x+600), 2 km apart.
+    fn three_villages() -> (Vec<ObjectWorld>, Vec<Vec<ObjectWorld>>) {
+        let mut players = Vec::new();
+        let mut villages = Vec::new();
+        for start in [0.0, 2600.0, 5200.0] {
+            players.extend((0..20).map(|i| on_planet("p", start + i as f64 * 30.0, 0.0, 0.0)));
+            villages.push(vec![on_planet("p", start, 0.0, 0.0), on_planet("p", start + 600.0, 0.0, 0.0)]);
+        }
+        (players, villages)
+    }
+
+    #[test]
+    fn a_cut_moves_out_of_the_village_it_runs_through() {
+        // Village A (habs 0..200, 10 players), 10 players walking from 800 to 1610, village B
+        // (habs 2000..2600, 40 players).
+        let mut players: Vec<ObjectWorld> = (0..10).map(|i| on_planet("p", i as f64 * 20.0, 0.0, 0.0)).collect();
+        players.extend((0..10).map(|i| on_planet("p", 800.0 + i as f64 * 90.0, 0.0, 0.0)));
+        players.extend((0..40).map(|i| on_planet("p", 2000.0 + i as f64 * 15.0, 0.0, 0.0)));
+        let villages = vec![
+            vec![on_planet("p", 0.0, 0.0, 0.0), on_planet("p", 200.0, 0.0, 0.0)],
+            vec![on_planet("p", 2000.0, 0.0, 0.0), on_planet("p", 2600.0, 0.0, 0.0)],
+        ];
+        let zones = vec![Zone::planet("p", "x")];
+        // The widest gap of the middle half, 1805: 195 m from B's first hab.
+        let plain = plan_split(&zones, &players, &[]).unwrap();
+        assert_eq!(plain.keep[0].bounds.as_ref().unwrap().max_x, 1805.0);
+        // With the villages: B's edge, VILLAGE_MARGIN before its first hab.
+        let plan = plan_split(&zones, &players, &villages).unwrap();
+        assert_eq!(plan.keep[0].bounds.as_ref().unwrap().max_x, 2000.0 - VILLAGE_MARGIN);
+        assert_eq!((plan.keep_players, plan.give_players), (20, 40), "B whole on one server");
+    }
+
+    #[test]
+    fn a_split_for_villages_shares_the_villages_to_spawn_not_the_players() {
+        let zones = vec![Zone::planet("p", "x")];
+        let wanted: Vec<ObjectWorld> = [2000.0, 3000.0, 4000.0, 5000.0].iter().map(|&x| on_planet("p", x, 0.0, 0.0)).collect();
+        let spawned = vec![vec![on_planet("p", 0.0, 0.0, 0.0), on_planet("p", 30.0, 0.0, 0.0)]];
+        // The players are in the spawned village, on the left: the child gets the right half.
+        let players: Vec<ObjectWorld> = (0..50).map(|i| on_planet("p", i as f64 * 0.5, 0.0, 0.0)).collect();
+        let plan = plan_village_split(&zones, &wanted, &players, &spawned).unwrap();
+        assert_eq!(plan.keep[0].id, zones[0].id);
+        assert_eq!(plan.keep[0].bounds.as_ref().unwrap().max_x, 3500.0);
+        assert_eq!((plan.keep_players, plan.gives[0].1), (50, 0));
+        // On the right: the halves swap, the child still gets the one without players.
+        let players: Vec<ObjectWorld> = (0..50).map(|i| on_planet("p", 6000.0 + i as f64 * 0.5, 0.0, 0.0)).collect();
+        let plan = plan_village_split(&zones, &wanted, &players, &[]).unwrap();
+        assert_eq!(plan.keep[0].id, zones[0].id, "the parent keeps the zone's identity");
+        assert_eq!(plan.gives[0].0[0].bounds.as_ref().unwrap().max_x, 3500.0);
+        assert_eq!((plan.keep_players, plan.gives[0].1), (50, 0));
+        // Players on both sides: either half moves half of them, over 25 %.
+        let spread: Vec<ObjectWorld> = (0..40).map(|i| on_planet("p", i as f64 * 150.0, 0.0, 0.0)).collect();
+        assert!(plan_village_split(&zones, &wanted, &spread, &[]).is_none());
+    }
+
+    #[test]
+    fn a_cut_stays_put_when_no_village_edge_keeps_the_balance() {
+        // One single crowded village: no edge within the middle half of its players.
+        let players: Vec<ObjectWorld> = (0..40).map(|i| on_planet("p", i as f64, 0.0, 0.0)).collect();
+        let village = vec![vec![on_planet("p", 0.0, 0.0, 0.0), on_planet("p", 39.0, 0.0, 0.0)]];
+        let zones = vec![Zone::planet("p", "x")];
+        let plan = plan_split(&zones, &players, &village).unwrap();
+        assert_eq!((plan.keep_players, plan.give_players), (20, 20), "cut through it rather than unbalanced");
+    }
+
+    #[test]
+    fn cuts_in_pieces_move_out_of_the_villages_too() {
+        let (players, villages) = three_villages();
+        let zones = vec![Zone::planet("p", "x")];
+        // Three pieces of 20: every village whole on one server.
+        let plan = plan_split_n(&zones, &players, 2, &villages).unwrap();
+        let mut counts = vec![plan.keep_players];
+        counts.extend(plan.gives.iter().map(|(_, n)| *n));
+        assert_eq!(counts, [20, 20, 20]);
+        let footprints = footprints_in(&zones[0], &villages);
+        for cut in std::iter::once(&plan.keep).chain(plan.gives.iter().map(|(z, _)| z)).map(|z| z[0].bounds.as_ref().unwrap().max_x) {
+            assert!(!footprints.iter().any(|b| cut > b.min_x && cut < b.max_x), "cut {cut} runs through a village");
+        }
     }
 
     #[test]
     fn split_bounds_falls_back_to_middle() {
         let b = Bounds { min_x: 0.0, max_x: 100.0, min_y: 0.0, max_y: 10.0, min_z: 0.0, max_z: 10.0 };
-        let (b1, _) = split_bounds(&b, &[]);
+        let (b1, _) = split_bounds(&b, &[], &[]);
         assert_eq!(b1.max_x, 50.0);
-        let (b1, _) = split_bounds(&b, &[Point3::new(90.0, 0.0, 0.0)]);
+        let (b1, _) = split_bounds(&b, &[Point3::new(90.0, 0.0, 0.0)], &[]);
         assert_eq!(b1.max_x, 50.0);
     }
 
@@ -384,7 +723,7 @@ mod tests {
         let zones = vec![Zone::planet("p", "tarsis_3")];
         let players = [on_planet("p", -100.0, 0.0, 0.0), on_planet("p", 100.0, 0.0, 0.0), in_space(5.0, 5.0, 5.0)];
         // the cut is halfway between the two players on the planet: x = 0
-        let plan = plan_split(&zones, &players).unwrap();
+        let plan = plan_split(&zones, &players, &[]).unwrap();
         assert_eq!(plan.keep.len(), 1);
         assert_eq!(plan.give.len(), 1);
         assert_eq!(plan.keep[0].id, zones[0].id);
@@ -401,7 +740,7 @@ mod tests {
         for _ in 0..5 { players.push(on_planet("a", 0.0, 0.0, 0.0)); }
         for _ in 0..3 { players.push(on_planet("b", 0.0, 0.0, 0.0)); }
         for _ in 0..2 { players.push(in_space(0.0, 0.0, 0.0)); }
-        let plan = plan_split(&zones, &players).unwrap();
+        let plan = plan_split(&zones, &players, &[]).unwrap();
         // heaviest (a:5) goes to the child, b:3 and space:2 to the parent, c:0 to the child
         assert_eq!(plan.give_players, 5);
         assert_eq!(plan.keep_players, 5);
@@ -421,7 +760,7 @@ mod tests {
         let mut players = crowd_on("a", 80);
         players.push(in_space(0.0, 0.0, 0.0));
         players.push(on_planet("b", 0.0, 0.0, 0.0));
-        let plan = plan_split_n(&zones, &players, 2).unwrap();
+        let plan = plan_split_n(&zones, &players, 2, &[]).unwrap();
         // the parent keeps space and b whole, each child gets half of a
         assert_eq!(plan.keep.len(), 2);
         assert!(plan.keep.iter().all(|z| z.planet_uuid() != Some("a")));
@@ -440,7 +779,7 @@ mod tests {
     #[test]
     fn dominant_zone_is_cut_in_place_with_one_child() {
         let zones = vec![Zone::space(), Zone::planet("a", "a")];
-        let plan = plan_split_n(&zones, &crowd_on("a", 80), 1).unwrap();
+        let plan = plan_split_n(&zones, &crowd_on("a", 80), 1, &[]).unwrap();
         assert_eq!(plan.gives.len(), 1);
         assert_eq!((plan.keep_players, plan.gives[0].1), (40, 40));
         // the parent keeps space and the first half, under the zone's own id
@@ -454,23 +793,87 @@ mod tests {
         let zones = vec![Zone::space(), Zone::planet("a", "a"), Zone::planet("b", "b")];
         let mut players = crowd_on("a", 5);
         players.extend(crowd_on("b", 5));
-        let plan = plan_split_n(&zones, &players, 2).unwrap();
+        let plan = plan_split_n(&zones, &players, 2, &[]).unwrap();
         assert_eq!(plan.gives.len(), 1);
         assert!(plan.gives[0].0.iter().all(|z| z.bounds.is_none()));
         assert_eq!((plan.keep_players, plan.give_players()), (5, 5));
-        // a single zone is still halved between the parent and one child
+        // a single zone with one child is still halved between the parent and it
         let single = vec![Zone::planet("a", "a")];
-        let plan = plan_split_n(&single, &crowd_on("a", 10), 2).unwrap();
+        let plan = plan_split_n(&single, &crowd_on("a", 10), 1, &[]).unwrap();
         assert_eq!(plan.gives.len(), 1);
         assert_eq!(plan.keep[0].id, single[0].id);
-        assert!(plan_split_n(&zones, &players, 0).is_none());
+        assert!(plan_split_n(&zones, &players, 0, &[]).is_none());
+    }
+
+    #[test]
+    fn a_crowded_single_zone_is_cut_in_one_piece_per_server() {
+        // preprod 2026-10-20: 238 players on a server holding one zone of a planet
+        let single = vec![Zone::planet("a", "a")];
+        let plan = plan_split_n(&single, &crowd_on("a", 238), 2, &[]).unwrap();
+        assert_eq!(plan.gives.len(), 2);
+        assert_eq!(plan.keep.len(), 1);
+        assert_eq!(plan.keep[0].id, single[0].id, "the parent keeps the zone's id on its piece");
+        let counts = [plan.keep_players, plan.gives[0].1, plan.gives[1].1];
+        assert_eq!(counts.iter().sum::<usize>(), 238);
+        assert!(counts.iter().all(|&n| (78..=81).contains(&n)), "{:?}", counts);
+        assert_ne!(plan.gives[0].0[0].id, plan.gives[1].0[0].id);
+        // the pieces do not overlap
+        let b: Vec<Bounds> = std::iter::once(&plan.keep[0]).chain(plan.gives.iter().map(|(z, _)| &z[0])).map(|z| z.bounds.clone().unwrap()).collect();
+        assert!(b[0].max_x < b[1].min_x && b[1].max_x < b[2].min_x);
+    }
+
+    #[test]
+    fn a_dominant_zone_is_cut_in_one_piece_per_child() {
+        let zones = vec![Zone::space(), Zone::planet("a", "a")];
+        let mut players = crowd_on("a", 240);
+        players.push(in_space(0.0, 0.0, 0.0));
+        let plan = plan_split_n(&zones, &players, 3, &[]).unwrap();
+        assert_eq!(plan.keep.len(), 1, "the parent keeps space");
+        assert_eq!(plan.keep_players, 1);
+        assert_eq!(plan.gives.iter().map(|(_, n)| *n).collect::<Vec<_>>(), [80, 80, 80]);
+    }
+
+    #[test]
+    fn split_bounds_n_keeps_two_pieces_at_least_with_stacked_players() {
+        let base = Bounds::unbounded();
+        let stacked = vec![Point3::new(5.0, 0.0, 0.0); 10];
+        assert_eq!(split_bounds_n(&base, &stacked, 4, &[]).len(), 2);
+        assert_eq!(split_bounds_n(&base, &stacked, 1, &[]), vec![base.clone()]);
+    }
+
+    #[test]
+    fn split_children_follow_the_overload() {
+        let mut rules = MeshRules {
+            split: Rule::parse("players:80 or tps:45", Joiner::Or).unwrap(),
+            merge: Rule::players(25),
+            split_after: 10,
+            merge_after: 15,
+            snapshot_timeout: Duration::from_secs(5),
+            warmup: Duration::from_secs(5),
+            warmup_max: Duration::from_secs(30),
+            ready_tps: 58,
+            placement_capacity: Some(95),
+            placement_min_tps: 45,
+            village_split: true,
+        };
+        // one zone: the parent keeps a piece
+        assert_eq!(rules.split_children_wanted(1, 81), 1, "just over: halved");
+        assert_eq!(rules.split_children_wanted(1, 50), 1, "split on tps: halved");
+        assert_eq!(rules.split_children_wanted(1, 238), 2, "238 = 3 pieces of 79");
+        assert_eq!(rules.split_children_wanted(1, 2000), MAX_SPLIT_CHILDREN);
+        // several zones: the pieces of the cut zone all go to children
+        assert_eq!(rules.split_children_wanted(3, 81), 2);
+        assert_eq!(rules.split_children_wanted(3, 238), 3);
+        // a tps rule alone: a plain split
+        rules.split = Rule::tps(20);
+        assert_eq!(rules.split_children_wanted(1, 238), 1);
     }
 
     #[test]
     fn placement_capacity_defaults_to_the_players_rule() {
         let mut rules = MeshRules {
-            split: Rule::Players(60),
-            merge: Rule::Players(25),
+            split: Rule::players(60),
+            merge: Rule::players(25),
             split_after: 10,
             merge_after: 15,
             snapshot_timeout: Duration::from_secs(5),
@@ -478,21 +881,43 @@ mod tests {
             warmup_max: Duration::from_secs(30),
             ready_tps: 58,
             placement_capacity: Some(75),
+            placement_min_tps: 0,
+            village_split: true,
         };
         assert!(!rules.placement_full(60, 75) && rules.placement_full(60, 76));
         rules.placement_capacity = None;
         assert!(rules.placement_full(60, 61) && !rules.placement_full(60, 60));
-        rules.split = Rule::Tps(20);
+        rules.split = Rule::tps(20);
         rules.placement_capacity = Some(75);
         assert!(rules.placement_full(10, 3) && !rules.placement_full(30, 3));
     }
 
     #[test]
+    fn a_server_under_the_placement_min_tps_is_full() {
+        let rules = MeshRules {
+            split: Rule::players(60),
+            merge: Rule::players(25),
+            split_after: 10,
+            merge_after: 15,
+            snapshot_timeout: Duration::from_secs(5),
+            warmup: Duration::from_secs(5),
+            warmup_max: Duration::from_secs(30),
+            ready_tps: 58,
+            placement_capacity: Some(75),
+            placement_min_tps: 45,
+            village_split: true,
+        };
+        // Far under the capacity, but too slow to take more players.
+        assert!(rules.placement_full(44, 10));
+        assert!(!rules.placement_full(45, 10));
+    }
+
+    #[test]
     fn parent_keeps_at_least_one_zone() {
         let zones = vec![Zone::space(), Zone::planet("a", "a")];
-        let plan = plan_split(&zones, &[]).unwrap();
+        let plan = plan_split(&zones, &[], &[]).unwrap();
         assert_eq!(plan.keep.len(), 1);
         assert_eq!(plan.give.len(), 1);
-        assert!(plan_split(&[], &[]).is_none());
+        assert!(plan_split(&[], &[], &[]).is_none());
     }
 }

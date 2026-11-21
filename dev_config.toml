@@ -20,12 +20,12 @@
 #   - Specific IP address for a particular interface
 # PORT should be available and not blocked by firewall
 bind_address = "0.0.0.0:7040"
-messagepack = false
 # Maximum number of concurrent client connections
 # PERFORMANCE IMPACT: Each connection consumes memory (~1-5MB per player)
 # SIDE EFFECTS: Higher values may require increasing OS file descriptor limits
-# RECOMMENDED: Start with 1000, scale based on server resources
-max_connections = 1000
+# Enforced since Horizon Client Transport v2: past it, new connections are closed
+# with code 4007 (SERVER_FULL). Preprod load tests reach ~1,800 players.
+max_connections = 5000
 
 # Connection timeout in seconds
 # How long to wait for client responses before dropping the connection
@@ -50,6 +50,27 @@ tick_interval_ms = 33
 # ============================================================================
 # Defines the 3D coordinate space that this server instance manages
 # For distributed servers, each instance should handle a different region
+# Client listeners (Horizon Client Transport v2). Every key is optional; without
+# these sections Horizon serves WebSocket + JSON on bind_address, as before.
+# Target: every client on WebTransport + bitcode; WebSocket + JSON stays only until
+# the Godot client speaks bitcode.
+# [server.websocket]
+# protocol = "json"            # "json" | "bitcode"
+# compression = "none"         # "none" | "zstd" | "lz4"
+#
+# [server.webtransport]        # HTTP/3 over QUIC, one UDP port
+# enabled = false
+# bind_address = "0.0.0.0:7043"
+# protocol = "bitcode"
+# compression = "zstd"
+# cert_path = "tls/cert.pem"   # required: WebTransport always runs over TLS
+# key_path = "tls/key.pem"
+# unreliable_max_age_ms = 100  # older unreliable frames are dropped
+#
+# [server.compression]         # listeners with compression = "zstd" or "lz4"
+# level = 1
+# min_size = 128
+
 [server.region]
 # World boundaries (in game units)
 # PERFORMANCE IMPACT: Larger regions require more spatial indexing resources

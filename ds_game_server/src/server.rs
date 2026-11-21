@@ -15,7 +15,7 @@ use ds_common::world::{ObjectWorld, Point3};
 use ds_common::zone::{is_world_object, zone_containing, zones_contain, zones_label, Zone};
 use fake::{faker::lorem::en::Word, faker::number::en::NumberWithFormat, Fake};
 use horizon_event_system::{
-    ClientConnectionRef, ClientEventWrapper, EventSystem, GorcObjectId, PlayerDisconnectedEvent, PlayerId, PluginError, ServerContext, Vec3,
+    ClientConnectionRef, ClientEventWrapper, EventError, EventSystem, GorcObjectId, PlayerDisconnectedEvent, PlayerId, PluginError, ServerContext, Vec3,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -23,7 +23,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tracing::{debug, error, info, warn};
@@ -40,9 +40,25 @@ pub const PREWARM_DISTANCE: f64 = 300.0;
 /// Minimum interval between two prewarms for the same player.
 const PREWARM_REPEAT: std::time::Duration = std::time::Duration::from_secs(3);
 
+/// One player's entry of a `players/position` message.
+#[derive(Debug, Clone, PartialEq)]
+struct PlayerPosition {
+    player_id: PlayerId,
+    position: (f64, f64, f64),
+    rotation: (f64, f64, f64),
+    out_of_zone: Option<String>,
+    parent_id: Option<String>,
+    /// The game server's simulation time (ms) of this position, sent for the
+    /// players who asked for the clocks of their moves (handlers::move_clocks).
+    servergodot_ms: Option<f64>,
+    /// When we read the message from the game server (unix ms), for those same
+    /// positions only.
+    horizon_received_ms: Option<u64>,
+}
+
 #[derive(Debug)]
 enum GameServerMessage {
-    PlayerPositions(Vec<(GorcObjectId, PlayerId, f64, f64, f64, f64, f64, f64, Option<String>, Option<String>)>),
+    PlayerPositions(Vec<PlayerPosition>),
     PropPosition(serde_json::Value),
     PropCreate(serde_json::Value),
     PropDelete(serde_json::Value),
@@ -79,8 +95,6 @@ pub struct Server {
     /// Tracks player UUIDs currently being transferred (freeze on source / spawn on destination).
     /// Prevents duplicate out_of_zone events from triggering multiple simultaneous transfers.
     pub transferring_players: Arc<Mutex<HashSet<String>>>,
-    /// Handlers are registered once per server, at its first connection.
-    pub handlers_registered: Arc<AtomicBool>,
     /// Direct parent of each player we manage (planet, vehicle, building uuid or ""),
     /// seeded at spawn and updated from the `parent_id` a position packet carries.
     /// Lets us tell when a planet-local position is approaching a zone border.
@@ -99,9 +113,88 @@ pub struct Server {
     /// Grows when the processor cannot keep up, e.g. the burst a Godot server
     /// flushes after a long frame.
     pub pending: Arc<AtomicUsize>,
-    /// Messages queued towards the Godot server and not written yet (see `Outbox`):
-    /// grows while it is frozen.
-    pub outbox_pending: Arc<AtomicUsize>,
+}
+
+/// Wall-clock time in unix milliseconds.
+fn unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
+}
+
+/// The servers the plugin's handlers dispatch to: every server whose handlers were
+/// registered and that was not retired since. The handlers used to be registered per
+/// server and Horizon cannot unregister one: ~10 more per address ever seen in DNS (every
+/// godotserver rollout), each holding its Server alive and each deserializing every
+/// spawn_object / update_prop / movement event once more.
+fn live_servers() -> &'static RwLock<Vec<Server>> {
+    static LIVE: OnceLock<RwLock<Vec<Server>>> = OnceLock::new();
+    LIVE.get_or_init(|| RwLock::new(Vec::new()))
+}
+
+/// The plugin's handlers are registered (by the first server to connect).
+static HANDLERS_INSTALLED: AtomicBool = AtomicBool::new(false);
+
+/// Registers `body` once for `plugin:name`, run for each live server in turn.
+async fn on_each_plugin<F>(events: &Arc<EventSystem>, plugin: &str, name: &str, body: F) -> Result<(), PluginError>
+where
+    F: Fn(&Server, &serde_json::Value) -> Result<(), EventError> + Send + Sync + Clone + 'static,
+{
+    let label = format!("{}:{}", plugin, name);
+    events
+        .on_plugin(plugin, name, move |event: serde_json::Value| {
+            for server in live_servers().read().unwrap().iter() {
+                if let Err(e) = body(server, &event) {
+                    error!("🔧 DsGameServerPlugin: {} on {}: {}", label, server.server_name, e);
+                }
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|e| PluginError::ExecutionError(e.to_string()))
+}
+
+/// Same for a client event, whose payload is a `T` in the client's format (JSON or
+/// bitcode). The body gets it as JSON, the form the Godot servers read.
+async fn on_each_client<T, F>(events: &Arc<EventSystem>, namespace: &str, name: &str, body: F) -> Result<(), PluginError>
+where
+    T: serde::de::DeserializeOwned + serde::Serialize + horizon_event_system::protocol::bitcode::DecodeOwned + Send + 'static,
+    F: Fn(&Server, &ClientEventWrapper<serde_json::Value>) -> Result<(), EventError> + Send + Sync + Clone + 'static,
+{
+    let label = format!("{}:{}", namespace, name);
+    events
+        .on_client_packed(namespace, name, move |payload: T, player_id: PlayerId, _connection: ClientConnectionRef| {
+            let data = serde_json::to_value(&payload)
+                .map_err(|e| EventError::HandlerExecution(format!("{}: {}", label, e)))?;
+            let event = ClientEventWrapper::new(player_id, data);
+            for server in live_servers().read().unwrap().iter() {
+                if let Err(e) = body(server, &event) {
+                    error!("🔧 DsGameServerPlugin: {} on {}: {}", label, server.server_name, e);
+                }
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|e| PluginError::ExecutionError(e.to_string()))
+}
+
+/// Same for `core:player_disconnected`.
+async fn on_each_core<F>(events: &Arc<EventSystem>, name: &str, body: F) -> Result<(), PluginError>
+where
+    F: Fn(&Server, &PlayerDisconnectedEvent) -> Result<(), EventError> + Send + Sync + Clone + 'static,
+{
+    let label = name.to_string();
+    events
+        .on_core(name, move |event: PlayerDisconnectedEvent| {
+            for server in live_servers().read().unwrap().iter() {
+                if let Err(e) = body(server, &event) {
+                    error!("🔧 DsGameServerPlugin: core:{} on {}: {}", label, server.server_name, e);
+                }
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|e| PluginError::ExecutionError(e.to_string()))
 }
 
 impl Server {
@@ -122,10 +215,8 @@ impl Server {
             managed_objects: Arc::new(Mutex::new(HashSet::new())),
             managed_players: Arc::new(Mutex::new(Vec::new())),
             transferring_players: Arc::new(Mutex::new(HashSet::new())),
-            handlers_registered: Arc::new(AtomicBool::new(false)),
             connection_generation: Arc::new(AtomicU64::new(0)),
             pending: Arc::new(AtomicUsize::new(0)),
-            outbox_pending: Arc::new(AtomicUsize::new(0)),
             player_parents: Arc::new(Mutex::new(HashMap::new())),
             prewarm_sent: Arc::new(Mutex::new(HashMap::new())),
             last_info: Arc::new(Mutex::new(None)),
@@ -169,13 +260,28 @@ impl Server {
     /// Connects the websocket. Writes INTO the shared Arcs so the handler closures
     /// registered earlier keep talking to the live socket after a reconnection.
     pub fn connect(&mut self) -> Result<(), WebSocketError> {
-        let client = websocket::client::ClientBuilder::new(&self.address).unwrap().connect_insecure()?;
+        let client = Self::open_socket(&self.address)?;
+        self.install(client);
+        Ok(())
+    }
+
+    /// Opens a websocket to `address` without touching any server: blocking, the
+    /// handshake has no timeout of its own.
+    pub fn open_socket(address: &str) -> Result<websocket::sync::Client<std::net::TcpStream>, WebSocketError> {
+        websocket::client::ClientBuilder::new(address).unwrap().connect_insecure()
+    }
+
+    /// Makes `client` this server's connection: Online, writes go through it. Its reader
+    /// is started by `receive_messages`. Installed only once the caller knows it is
+    /// waited for: a handshake completing after its timeout used to install the socket
+    /// with nobody reading it — sends worked, the serverinfo never came back, and the
+    /// server sat "loading" with its players for good (preprod, 2026-10-21).
+    pub fn install(&mut self, client: websocket::sync::Client<std::net::TcpStream>) {
         let (receiver, sender) = client.split().unwrap();
-        *self.websocket_sender.lock().unwrap() = Some(Outbox::spawn(sender, &self.server_name, Arc::clone(&self.outbox_pending)));
+        *self.websocket_sender.lock().unwrap() = Some(Outbox::spawn(sender, &self.server_name));
         *self.websocket_receiver.lock().unwrap() = Some(receiver);
         self.connection_generation.fetch_add(1, Ordering::SeqCst);
         self.set_state(ServerState::Online);
-        Ok(())
     }
 
     fn send_zones(&self, tag: &str) -> bool {
@@ -237,9 +343,16 @@ impl Server {
         self.set_state(if sent { ServerState::Online } else { ServerState::Offline });
     }
 
+    /// Messages queued towards the Godot server and not written yet (see `Outbox`):
+    /// grows while it is frozen.
+    pub fn outbox_pending(&self) -> usize {
+        self.websocket_sender.lock().unwrap().as_ref().map_or(0, |outbox| outbox.pending())
+    }
+
     /// Takes the server out of the pool for good (its address left DNS while it
     /// was offline): the reconnect loop stops at its next attempt.
     pub fn retire(&self) {
+        live_servers().write().unwrap().retain(|s| s.uuid != self.uuid);
         self.set_state(ServerState::Maintenance);
         *self.websocket_sender.lock().unwrap() = None;
         crate::ownership::release_all(&self.uuid);
@@ -348,21 +461,33 @@ impl Server {
     }
 
     pub async fn register_handlers(&self, context: Arc<dyn ServerContext>) -> Result<(), PluginError> {
-        if self.handlers_registered.swap(true, Ordering::SeqCst) {
-            debug!("🔧 DsGameServerPlugin: handlers already registered for {}", self.uuid);
+        {
+            let mut live = live_servers().write().unwrap();
+            if !live.iter().any(|s| s.uuid == self.uuid) {
+                live.push(self.clone());
+            }
+        }
+        // The handlers below are the plugin's, registered by the first server and shared
+        // by all (see live_servers).
+        if HANDLERS_INSTALLED.swap(true, Ordering::SeqCst) {
+            debug!("🔧 DsGameServerPlugin: {} joins the live servers", self.uuid);
             return Ok(());
         }
         let events = context.events();
 
         // --- gameserverplugin:spawn_object: a new prop; forward it if it lives in our zones.
         {
-            let server = self.clone();
             let rt = crate::plugin_rt();
-            events.on_plugin("gameserverplugin", "spawn_object", move |event: serde_json::Value| {
+            on_each_plugin(&events, "gameserverplugin", "spawn_object", move |server: &Server, event: &serde_json::Value| {
                 let object_type = event["object_type"].as_str().unwrap_or_default().to_string();
                 let object_uuid = event["object_uuid"].as_str().unwrap_or_default().to_string();
                 let world_object = is_world_object(&object_type);
                 if !(if world_object { server.is_connected() } else { server.is_running() }) {
+                    return Ok(());
+                }
+                // A prop a Godot server created itself, sent on to its zone's owner: the
+                // creator already has it.
+                if event["_except_server"].as_str() == Some(server.uuid.as_str()) {
                     return Ok(());
                 }
                 debug!("🔧 DsGameServerPlugin: Adding prop with event: {:?}", event);
@@ -376,18 +501,24 @@ impl Server {
                         debug!("🔧 DsGameServerPlugin: prop {} is outside our zones, skipping spawn.", object_uuid);
                         return Ok(());
                     }
+                    if event["_except_server"].is_string() {
+                        info!("🔧 DsGameServerPlugin: {} {} created by another server lands in our zones, spawned on {}",
+                            object_type, object_uuid, server.server_name);
+                    }
                     server.managed_objects.lock().unwrap().insert(object_uuid);
                 }
 
                 let websocket_sender = Arc::clone(&server.websocket_sender);
-                let mut wire = event;
+                let mut wire = event.clone();
                 ObjectWorld::strip_internal_keys(&mut wire["object_data"]);
+                if let Some(wire) = wire.as_object_mut() {
+                    wire.remove("_except_server");
+                }
                 rt.spawn(async move {
                     let _ = spawn_prop::handle_spawn_prop(wire, websocket_sender).await;
                 });
                 Ok(())
-            }).await
-            .map_err(|e| PluginError::ExecutionError(e.to_string()))?;
+            }).await?;
         }
 
         // --- gameserverplugin:update_prop: property update; forward it when the object
@@ -397,9 +528,8 @@ impl Server {
         //     would leave it stuck at the border. Prop handover is a follow-up; the
         //     seated player is transferred through player_out_of_zone meanwhile.
         {
-            let server = self.clone();
             let rt = crate::plugin_rt();
-            events.on_plugin("gameserverplugin", "update_prop", move |event: serde_json::Value| {
+            on_each_plugin(&events, "gameserverplugin", "update_prop", move |server: &Server, event: &serde_json::Value| {
                 let object_type = event["object_type"].as_str().unwrap_or_default().to_string();
                 let object_uuid = event["object_uuid"].as_str().unwrap_or_default().to_string();
                 let world_object = is_world_object(&object_type);
@@ -421,22 +551,20 @@ impl Server {
                     }
                 }
 
-                let mut wire = event;
+                let mut wire = event.clone();
                 ObjectWorld::strip_internal_keys(&mut wire["object_data"]);
                 let websocket_sender = Arc::clone(&server.websocket_sender);
                 rt.spawn(async move {
                     let _ = update_prop::handle_update_prop(wire, websocket_sender).await;
                 });
                 Ok(())
-            }).await
-            .map_err(|e| PluginError::ExecutionError(e.to_string()))?;
+            }).await?;
         }
 
         // --- plugingameserver:new_player: a player just spawned in Horizon.
         {
-            let server = self.clone();
             let rt = crate::plugin_rt();
-            events.on_plugin("plugingameserver", "new_player", move |event: serde_json::Value| {
+            on_each_plugin(&events, "plugingameserver", "new_player", move |server: &Server, event: &serde_json::Value| {
                 if !server.is_running() {
                     return Ok(());
                 }
@@ -480,12 +608,12 @@ impl Server {
                 }
 
                 let websocket_sender = Arc::clone(&server.websocket_sender);
+                let event = event.clone();
                 rt.spawn(async move {
                     let _ = spawn_player::handle_spawn_player(event, websocket_sender).await;
                 });
                 Ok(())
-            }).await
-            .map_err(|e| PluginError::ExecutionError(e.to_string()))?;
+            }).await?;
         }
 
         // --- client movement: forwarded to the server managing that player.
@@ -494,8 +622,7 @@ impl Server {
         // kept the player walking with nobody on the keys. send_ws only queues on the connection's
         // writer, so this does not block the handler.
         {
-            let server = self.clone();
-            events.on_client("movement", "update_velocity", move |event: ClientEventWrapper<serde_json::Value>, _player_id: PlayerId, _connection: ClientConnectionRef| {
+            on_each_client::<ds_protocol::UpdateVelocity, _>(&events, "movement", "update_velocity", move |server: &Server, event: &ClientEventWrapper<serde_json::Value>| {
                 // Kept whoever manages the player: the client only sends a velocity when
                 // it changes, and the server they are transferred to needs the last one.
                 player_movement::remember_velocity(&event.player_id.to_string(), &event.data);
@@ -506,15 +633,13 @@ impl Server {
                 debug!("📝 LoggerPlugin: 🦘 Client movement from player {}", event.player_id);
                 let _ = player_movement::handle_player_movement(&event, &server.websocket_sender);
                 Ok(())
-            }).await
-            .map_err(|e| PluginError::ExecutionError(e.to_string()))?;
+            }).await?;
         }
 
         // --- client action (jump, press...): forwarded to the server managing that player, in order
         // (same reason as the movement above: a held key's press and release must not swap).
         {
-            let server = self.clone();
-            events.on_client("player", "client_action", move |event: ClientEventWrapper<serde_json::Value>, _player_id: PlayerId, _connection: ClientConnectionRef| {
+            on_each_client::<ds_protocol::ClientAction, _>(&events, "player", "client_action", move |server: &Server, event: &ClientEventWrapper<serde_json::Value>| {
                 // Kept whoever manages the player: the next server replays it (see LAST_HELD).
                 player_action::remember_input(&event.player_id.to_string(), &event.data);
                 if !server.is_running() || !server.is_managed_player(&event.player_id.to_string()) {
@@ -524,18 +649,15 @@ impl Server {
                 debug!("📝 LoggerPlugin: 🦘 Client action from player {}", event.player_id);
                 let _ = player_action::handle_player_action(&event, &server.websocket_sender);
                 Ok(())
-            }).await
-            .map_err(|e| PluginError::ExecutionError(e.to_string()))?;
+            }).await?;
         }
 
         // --- gameserverplugin:player_quit
         {
-            let server = self.clone();
-            events.on_plugin("gameserverplugin", "player_quit", move |event: serde_json::Value| {
+            on_each_plugin(&events, "gameserverplugin", "player_quit", move |server: &Server, event: &serde_json::Value| {
                 server.quit_player(event["item"].clone());
                 Ok(())
-            }).await
-            .map_err(|e| PluginError::ExecutionError(e.to_string()))?;
+            }).await?;
         }
 
         // --- core:player_disconnected
@@ -548,8 +670,9 @@ impl Server {
         // here as well: same cleanup, on this plugin's own runtime, and whichever
         // of the two runs second is a no-op (`is_managed_player` is false by then).
         {
-            let server = self.clone();
-            events.on_core("player_disconnected", move |event: PlayerDisconnectedEvent| {
+            on_each_core(&events, "player_disconnected", move |server: &Server, event: &PlayerDisconnectedEvent| {
+                crate::handlers::move_clocks::forget(&event.player_id.to_string());
+                crate::handlers::player_roles::forget(&event.player_id.to_string());
                 server.quit_player(json!({
                     "object_type": "player",
                     "object_uuid": event.player_id.to_string(),
@@ -557,15 +680,13 @@ impl Server {
                     "broadcast_only": null,
                 }));
                 Ok(())
-            }).await
-            .map_err(|e| PluginError::ExecutionError(e.to_string()))?;
+            }).await?;
         }
 
         // --- gameserverplugin:prewarm: a player of another server approaches a border
         //     we share; load the ground on our side before the handover.
         {
-            let server = self.clone();
-            events.on_plugin("gameserverplugin", "prewarm", move |event: serde_json::Value| {
+            on_each_plugin(&events, "gameserverplugin", "prewarm", move |server: &Server, event: &serde_json::Value| {
                 if !server.is_running() || event["server_uuid"] == server.uuid {
                     return Ok(());
                 }
@@ -579,8 +700,7 @@ impl Server {
                     server.send_prewarm(&planet_uuid, &[pos]);
                 }
                 Ok(())
-            }).await
-            .map_err(|e| PluginError::ExecutionError(e.to_string()))?;
+            }).await?;
         }
 
         // --- gameserverplugin:object_out_of_zone: a prop (a vehicle) drove out of its
@@ -588,9 +708,8 @@ impl Server {
         //     The source freezes the subtree, the server owning the destination zone
         //     spawns the prop then its descendants, parents first.
         {
-            let server = self.clone();
             let rt = crate::plugin_rt();
-            events.on_plugin("gameserverplugin", "object_out_of_zone", move |event: serde_json::Value| {
+            on_each_plugin(&events, "gameserverplugin", "object_out_of_zone", move |server: &Server, event: &serde_json::Value| {
                 if !server.is_running() {
                     return Ok(());
                 }
@@ -666,17 +785,15 @@ impl Server {
                     }
                 });
                 Ok(())
-            }).await
-            .map_err(|e| PluginError::ExecutionError(e.to_string()))?;
+            }).await?;
         }
 
         // --- gameserverplugin:player_out_of_zone: a Godot server reports a player that
         //     left its zones. The source server freezes it; the server whose zones
         //     contain the player's world spawns it.
         {
-            let server = self.clone();
             let rt = crate::plugin_rt();
-            events.on_plugin("gameserverplugin", "player_out_of_zone", move |event: serde_json::Value| {
+            on_each_plugin(&events, "gameserverplugin", "player_out_of_zone", move |server: &Server, event: &serde_json::Value| {
                 if !server.is_running() {
                     return Ok(());
                 }
@@ -816,8 +933,7 @@ impl Server {
                     info!("🔧 DsGameServerPlugin: Spawn complete, cleared transfer guard for player {}", object_uuid);
                 });
                 Ok(())
-            }).await
-            .map_err(|e| PluginError::ExecutionError(e.to_string()))?;
+            }).await?;
         }
 
         Ok(())
@@ -840,7 +956,9 @@ impl Server {
             debug!("🔧 DsGameServerPlugin: Processing message: {:?}", msg);
             match msg {
                 GameServerMessage::PlayerPositions(position_updates) => {
-                    for (_gorc_id, player_id, x, y, z, rotx, roty, rotz, out_of_zone, parent_id) in position_updates {
+                    for update in position_updates {
+                        let PlayerPosition { player_id, position: (x, y, z), rotation: (rotx, roty, rotz), out_of_zone,
+                            parent_id, servergodot_ms, horizon_received_ms } = update;
                         let player_uuid = player_id.to_string();
                         if let Some(planet_uuid) = self.near_own_border(&player_uuid, parent_id.as_deref(), Point3::new(x, y, z)) {
                             if let Err(e) = events_processor.emit_plugin("gameserverplugin", "prewarm", &json!({
@@ -861,6 +979,8 @@ impl Server {
                                 "rotation": Vec3::new(rotx, roty, rotz),
                                 "out_of_zone": out_of_zone,
                                 "parent_id": parent_id,
+                                "servergodot_ms": servergodot_ms,
+                                "horizon_received_ms": horizon_received_ms,
                             },
                         })).await {
                             error!("Failed to emit plugin event to propsplugin: {}", e);
@@ -877,10 +997,14 @@ impl Server {
                     }
                 }
                 GameServerMessage::PropCreate(prop_data) => {
+                    // `_source_server`: genericprops sends the prop on to the server owning
+                    // its zone when that is not us (a village's habs spawn here but each has
+                    // its own coordinates).
                     if let Err(e) = events_processor.emit_plugin("genericprops", "create_object_from_gameserver", &json!({
                         "object_type": prop_data["type"],
                         "object_uuid": prop_data["uuid"],
                         "object_data": prop_data,
+                        "_source_server": self.uuid,
                     })).await {
                         error!("Failed to emit plugin event to propsplugin: {}", e);
                     }
@@ -912,8 +1036,9 @@ impl Server {
         warn!("🔧 DsGameServerPlugin: Async processor channel closed for {}", self.server_name);
     }
 
-    /// Parses one `players/position` message into position updates.
-    fn parse_player_positions(value: &serde_json::Value) -> Vec<(GorcObjectId, PlayerId, f64, f64, f64, f64, f64, f64, Option<String>, Option<String>)> {
+    /// Parses one `players/position` message into position updates, read at
+    /// `received_ms` (unix ms).
+    fn parse_player_positions(value: &serde_json::Value, received_ms: u64) -> Vec<PlayerPosition> {
         let mut position_updates = Vec::new();
         let Some(players) = value["data"].as_array() else {
             error!("players/position without data array: {:?}", value);
@@ -924,7 +1049,7 @@ impl Server {
                 error!("Missing player_id in player data: {:?}", player_data);
                 continue;
             };
-            let (Ok(player_id), Ok(gorc_id)) = (PlayerId::from_str(uuid_str), GorcObjectId::from_str(uuid_str)) else {
+            let (Ok(player_id), Ok(_)) = (PlayerId::from_str(uuid_str), GorcObjectId::from_str(uuid_str)) else {
                 error!("Invalid player_id format: {:?}", player_data["player_id"]);
                 continue;
             };
@@ -941,7 +1066,16 @@ impl Server {
             };
             let out_of_zone = player_data.get("out_of_zone").and_then(|v| v.as_str()).map(|s| s.to_string());
             let parent_id = player_data.get("parent_id").and_then(|v| v.as_str()).map(|s| s.to_string());
-            position_updates.push((gorc_id, player_id, x, y, z, rx, ry, rz, out_of_zone, parent_id));
+            let servergodot_ms = player_data.get("servergodot_ms").and_then(|v| v.as_f64());
+            position_updates.push(PlayerPosition {
+                player_id,
+                position: (x, y, z),
+                rotation: (rx, ry, rz),
+                out_of_zone,
+                parent_id,
+                servergodot_ms,
+                horizon_received_ms: servergodot_ms.map(|_| received_ms),
+            });
         }
         position_updates
     }
@@ -997,7 +1131,7 @@ impl Server {
         let event = value["event"].as_str().unwrap_or_default();
         match (namespace, event) {
             ("players", "position") => {
-                let position_updates = Self::parse_player_positions(&value);
+                let position_updates = Self::parse_player_positions(&value, unix_ms());
                 if !position_updates.is_empty() {
                     if !self.enqueue(tx, GameServerMessage::PlayerPositions(position_updates)) {
                         error!("Failed to send position updates to processor of {}", self.server_name);
@@ -1080,5 +1214,28 @@ impl Server {
             info!("🔧 DsGameServerPlugin: WebSocket receiver task started for {}", server.server_name);
             server.receive_ws_to_queue(tx, manager_tx);
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn player_positions_carry_the_clocks_of_the_trip() {
+        let id = PlayerId::new().to_string();
+        let message = json!({"namespace": "players", "event": "position", "data": [
+            {"player_id": id, "pos": {"x": 1.0, "y": 2.0, "z": 3.0}, "rot": {"x": 0.0, "y": 0.5, "z": 0.0},
+             "parent_id": "planet", "servergodot_ms": 1761090000123.5},
+            {"player_id": id, "pos": {"x": 1.0, "y": 2.0, "z": 3.0}, "rot": {"x": 0.0, "y": 0.0, "z": 0.0}},
+        ]});
+        let updates = Server::parse_player_positions(&message, 42);
+        assert_eq!(updates.len(), 2);
+        assert_eq!(updates[0].position, (1.0, 2.0, 3.0));
+        assert_eq!(updates[0].parent_id.as_deref(), Some("planet"));
+        assert_eq!(updates[0].servergodot_ms, Some(1761090000123.5));
+        assert_eq!(updates[0].horizon_received_ms, Some(42));
+        assert_eq!(updates[1].servergodot_ms, None, "a player who did not ask for the clocks");
+        assert_eq!(updates[1].horizon_received_ms, None, "nor gets ours");
     }
 }

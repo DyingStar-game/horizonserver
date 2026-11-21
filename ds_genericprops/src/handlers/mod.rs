@@ -5,6 +5,7 @@ pub mod player_movement;
 pub mod new_player;
 pub mod world;
 pub mod mesh_load;
+pub mod player_state;
 
 pub use update::*;
 pub use delete::*;

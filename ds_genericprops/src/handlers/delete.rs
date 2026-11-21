@@ -19,7 +19,7 @@ pub fn handle_object_delete(
 		props: Arc<DashMap<String, GorcObjectId>>,
 		events: Arc<EventSystem>,
 		event: serde_json::Value,
-		handle: luminal::Handle
+		handle: tokio::runtime::Handle
 	) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 		// Parse request first
 		debug!("🎮 GenericPropsPlugin: Handling object delete event {:?}", event);
@@ -48,7 +48,7 @@ pub fn handle_object_delete(
 				match GorcObjectId::from_str(&req_data.object_uuid) {
 					Ok(gorc_id) => {
 						// Check if this GORC ID actually exists in the instance manager
-						if gorc_instances.get_object(gorc_id).await.is_some() {
+						if gorc_instances.get_object_type(gorc_id).await.is_some() {
 							debug!("🎮 GORC: ✅ Found object via direct GORC ID lookup: {}", req_data.object_uuid);
 							// Add to props map for faster future lookups
 							props_clone.insert(req_data.object_uuid.clone(), gorc_id);
@@ -66,12 +66,14 @@ pub fn handle_object_delete(
 				props_clone.remove(&req_data.object_uuid);
 				crate::children::forget(&req_data.object_uuid);
 				// Remove the object instance from GORC
-				if let Err(e) = events.emit_gorc_instance(
+				if let Err(e) = events.emit_gorc_instance_packed(
 					gorc_id,
 					6,
 					"gorc_zone_exit",
-					&serde_json::json!({}),
-					horizon_event_system::Dest::Client
+					// DynValue: the JSON object for JSON clients, carried as is by bitcode.
+					&ds_protocol::DynValue::from(&serde_json::json!({})),
+					horizon_event_system::Dest::Client,
+					None,
 				).await {
 					error!("🎮 GORC: ❌ Failed to send GORC info to client: {}", e);
 				} else {

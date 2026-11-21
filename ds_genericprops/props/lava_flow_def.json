@@ -1,0 +1,42 @@
+{
+	"channels": [
+		{
+			"zone": 0,
+			"distance": 25000.0,
+			"frequency": 1.0,
+			"properties": [
+				"position",
+				"rotation",
+				"parent_id"
+			]
+		},
+		{
+			"zone": 6,
+			"distance": 25000.0,
+			"frequency": 1.0,
+			"properties": [
+				"scenename",
+				"planet_name",
+				"volcano_key",
+				"patch_key",
+				"frame",
+				"source_radius_mm",
+				"source_temperature_t",
+				"source_rate_q",
+				"crater_rows",
+				"field_radius_m",
+				"plan",
+				"grid"
+			]
+		},
+		{
+			"zone": 2,
+			"distance": 25000.0,
+			"frequency": 1.0,
+			"properties": [
+				"summary",
+				"summary_tick"
+			]
+		}
+	]
+}

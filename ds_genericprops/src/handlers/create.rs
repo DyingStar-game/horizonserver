@@ -14,14 +14,31 @@ use crate::objectdefinition::ObjectDefinition;
 use crate::genericprops::GenericProps;
 use crate::handlers::world;
 
+/// Creates waiting for their parent, by parent uuid. Every create used to scan the
+/// whole queue, cloning and parsing each waiting create, under the write lock: 4 031
+/// children waited at a preprod start (2026-11-03), whose world took 12 minutes to load
+/// on 37 busy cores.
+pub type PendingChildren = Arc<RwLock<HashMap<String, Vec<serde_json::Value>>>>;
+
+/// Holds `create` until `parent_uuid` is created. A child queued again replaces its
+/// earlier create.
+async fn wait_for_parent(queue: &PendingChildren, parent_uuid: &str, child_uuid: &str, create: serde_json::Value) {
+	let mut queue = queue.write().await;
+	let waiting = queue.entry(parent_uuid.to_string()).or_default();
+	match waiting.iter().position(|queued| queued["object_uuid"].as_str() == Some(child_uuid)) {
+		Some(index) => waiting[index] = create,
+		None => waiting.push(create),
+	}
+}
+
 pub fn handle_object_create(
 		definitions: Arc<DashMap<String, ObjectDefinition>>,
 		props: Arc<DashMap<String, GorcObjectId>>,
 		events: Arc<EventSystem>,
 		event: serde_json::Value,
-		handle: luminal::Handle,
+		handle: tokio::runtime::Handle,
 		spawn_in_gameserver: bool,
-		queue_objects_create: Arc<RwLock<HashMap<String, serde_json::Value>>>,
+		queue_objects_create: PendingChildren,
 		live_players: Arc<DashSet<PlayerId>>,
 	) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 		
@@ -67,9 +84,9 @@ pub fn handle_object_create(
 				// Check if parent already exists in gorc_instances, if not put in queue for later processing
 				if let Some(ref pid) = parent_id {
 					if let Ok(parent_gorc_id) = GorcObjectId::from_str(pid) {
-						if !gorc_instances.get_object(parent_gorc_id).await.is_some() {
+						if !gorc_instances.get_object_type(parent_gorc_id).await.is_some() {
 							warn!("🚀 GORC: ⚠️ Parent object {} for child {} not found in GORC instances during creation", pid, uuid);
-							queue_objects_create.write().await.insert(req_data.object_uuid.clone(), serde_json::to_value(&req_data).unwrap());
+							wait_for_parent(&queue_objects_create, pid, &req_data.object_uuid, serde_json::to_value(&req_data).unwrap()).await;
 							return;
 						}
 					}
@@ -88,11 +105,9 @@ pub fn handle_object_create(
 						}
 						
 						if let Some(parent_pos) = parent_global_position {
-							obj.global_position = horizon_event_system::Vec3 {
-								x: parent_pos.x + position.x,
-								y: parent_pos.y + position.y,
-								z: parent_pos.z + position.z,
-							};
+							// Turned by the parent's frame, as Godot places it (see crate::frame).
+							let parent_basis = crate::frame::global_basis_of(&gorc_instances, parent_id_str).await;
+							obj.global_position = crate::frame::compose(parent_pos, &parent_basis, position);
 							debug!("🚀 GORC: Setting child object {} global_position based on parent {} global_position: {:?}", 
 								uuid, parent_id_str, obj.global_position);
 						} else {
@@ -133,6 +148,13 @@ pub fn handle_object_create(
 				let gorc_id = gorc_instances.register_object_with_uuid(obj, global_position, maybe_obj_id).await;
 				debug!("🚀 GORC: object register {} completed with id {}", uuid, gorc_id.to_string());
 				props.insert(uuid, gorc_id.clone());
+				if req_data.object_type == "spawnbuilding" {
+					// Habs of a village: the players waiting for an apartment look again.
+					crate::handlers::new_player::habs_arrived();
+				}
+				// A player back within the LOD idle retention reuses its id: start its
+				// delivery streams over rather than inherit the last session's.
+				crate::lod::forget_object(gorc_id);
 				if let Some(mut object_instance) = gorc_instances.get_object(gorc_id).await {
 					// Drop subscribers that are no longer connected.
 					//
@@ -163,13 +185,7 @@ pub fn handle_object_create(
 
 					if &req_data.object_type == "player" {
 						// Send GORC object info to client on channel 0 (player's own object)
-						if let Err(e) = events.emit_gorc_instance(
-							gorc_id,
-							0, // Channel 0 for critical info
-							"gorc_zone_enter",
-							&req_data.object_data,
-							horizon_event_system::Dest::Client
-						).await {
+						if let Err(e) = announce_new_player(&events, gorc_id, &req_data.object_data).await {
 							error!("🎮 GORC: ❌ Failed to send GORC info to client: {}", e);
 						} else {
 							debug!("🎮 GORC: ✅ Sent GORC object info to client: {}", &req_data.object_data);
@@ -190,7 +206,7 @@ pub fn handle_object_create(
 						// (space / planet + local position) so ds_game_server can pick
 						// the Godot server owning that zone.
 						let mut event_with_position = event.clone();
-						let object_world = world::resolve_world(&gorc_instances, position, parent_id.clone()).await;
+						let object_world = world::resolve_player_world(&gorc_instances, position, parent_id.clone()).await;
 						world::inject_global_position(&mut event_with_position["object_data"], global_position);
 						world::inject_world(&mut event_with_position["object_data"], &object_world);
 
@@ -213,11 +229,23 @@ pub fn handle_object_create(
 				// the Godot server create the player a second time from a payload without
 				// `_global_position`, which drops the first instance
 				// ("Player reconnecting, removing stale instance").
-				if spawn_in_gameserver && req_data.object_type != "player" {
+				// A prop a Godot server created (a village's habs) lives on the server owning
+				// its own position, which may not be its creator: sent on to every server but
+				// the creator, ds_game_server keeps the one whose zones hold it. Without it,
+				// players given an apartment in a hab across a zone border landed on a server
+				// without the hab ("parent_id not found", preprod 2026-10-20).
+				let source_server = event_clone["_source_server"].as_str().map(str::to_string);
+				if (spawn_in_gameserver || source_server.is_some()) && req_data.object_type != "player" {
 					// Send to ds_game_server to spawn in game world. A copy carries the
 					// object's world + global position (Horizon-internal keys, stripped
 					// before the Godot wire); the persisted event stays untouched.
 					let mut spawn_event = event_clone.clone();
+					if let Some(fields) = spawn_event.as_object_mut() {
+						fields.remove("_source_server");
+						if let (false, Some(source)) = (spawn_in_gameserver, &source_server) {
+							fields.insert("_except_server".to_string(), serde_json::Value::String(source.clone()));
+						}
+					}
 					let object_world = world::resolve_world(&gorc_instances, position, parent_id.clone()).await;
 					world::inject_global_position(&mut spawn_event["object_data"], global_position);
 					world::inject_world(&mut spawn_event["object_data"], &object_world);
@@ -231,40 +259,11 @@ pub fn handle_object_create(
 					}
 				}
 
-				   // Check queue_objects_create for objects waiting on this parent
-				   let created_uuid = req_data.object_uuid.clone();
-				   let mut to_process: Vec<serde_json::Value> = Vec::new();
-				   {
-					   let mut queue = queue_objects_create.write().await;
-					   debug!("[QUEUE DEBUG] Checking queued children after parent {} creation. Queue size: {}", created_uuid, queue.len());
-					   for (key, value) in queue.iter() {
-						   debug!("[QUEUE DEBUG] Key: {} Value: {}", key, value);
-					   }
-					   let keys_to_remove: Vec<String> = queue.iter()
-						   .filter_map(|(key, value)| {
-							   if let Ok(queued_req) = serde_json::from_value::<GenericPropsRequest>(value.clone()) {
-								   // Check if parent_id matches the object we just created
-								   let parent_id = queued_req.object_data.as_object()
-									   .and_then(|obj| obj.get("parent_id"))
-									   .and_then(|v| v.as_str())
-									   .filter(|s| !s.is_empty());
-								   debug!("[QUEUE DEBUG] For queued key {}: parent_id={:?}, created_uuid={}", key, parent_id, created_uuid);
-								   if parent_id == Some(created_uuid.as_str()) {
-									   debug!("[QUEUE DEBUG] Match found: queued child {} will be processed.", key);
-									   return Some(key.clone());
-								   }
-							   }
-							   None
-						   })
-						   .collect();
-					   for key in &keys_to_remove {
-						   debug!("[QUEUE DEBUG] Removing and processing queued child: {}", key);
-					   }
-					   for key in keys_to_remove {
-						   if let Some(value) = queue.remove(&key) {
-							   to_process.push(value);
-						   }
-					   }
+				   // The creates that waited for this object, now their parent exists.
+				   let to_process: Vec<serde_json::Value> =
+					   queue_objects_create.write().await.remove(&req_data.object_uuid).unwrap_or_default();
+				   if !to_process.is_empty() {
+					   debug!("[QUEUE] {} queued child(ren) of {} created now", to_process.len(), req_data.object_uuid);
 				   }
 
 				   // Process queued objects outside of the lock
@@ -288,3 +287,91 @@ pub fn handle_object_create(
 		Ok(())
 	}
 
+
+/// Shows a new player's object to the subscribers of its channel 0: the player itself,
+/// and the players already around.
+///
+/// A JSON client gets the GORC event `gorc_zone_enter` it has always got, which names
+/// the object. A bitcode client gets a `ZoneEnter` frame instead: it learns an object's
+/// handle only there, so the same event as a GORC frame named a handle it had never
+/// seen, waited for that zone entry in vain and was dropped — the player never spawned
+/// (7002).
+async fn announce_new_player(
+	events: &EventSystem,
+	gorc_id: GorcObjectId,
+	object_data: &serde_json::Value,
+) -> Result<(), String> {
+	use horizon_event_system::protocol::{bitcode, encode_server, json, ServerFrame};
+	use horizon_event_system::{Format, Outbound};
+
+	let gorc_instances = events.get_gorc_instances().ok_or("no GORC instances manager")?;
+	let sender = events.get_client_response_sender().ok_or("no client response sender")?;
+	let instance = gorc_instances
+		.get_object(gorc_id)
+		.await
+		.ok_or_else(|| format!("object instance {} not found", gorc_id))?;
+	let subscribers = instance.get_subscribers(0);
+	if subscribers.is_empty() {
+		return Ok(());
+	}
+
+	let object_id = gorc_id.to_string();
+	let json_frame: bytes::Bytes = serde_json::to_vec(&json::GorcEvent {
+		channel: 0,
+		data: object_data,
+		event_type: "gorc_zone_enter",
+		object_id: object_id.clone(),
+		object_type: &instance.type_name,
+		player_id: object_id,
+		seq: None,
+		timestamp: horizon_event_system::utils::current_timestamp(),
+	})
+	.map_err(|e| e.to_string())?
+	.into();
+	let bitcode_frame = gorc_instances.object_handle(gorc_id).map(|handle| {
+		encode_server(&ServerFrame::ZoneEnter {
+			handle,
+			object_id: *gorc_id.0.as_bytes(),
+			object_type: instance.type_name.clone(),
+			channel: 0,
+			zone_data: bitcode::encode(&crate::genericprops::prop_state(object_data)),
+		})
+	});
+
+	for player_id in subscribers {
+		let format = sender.connection_profile(player_id).await.map(|profile| profile.format).unwrap_or_default();
+		let frame = match format {
+			Format::Json => json_frame.clone(),
+			Format::Bitcode => match &bitcode_frame {
+				Some(frame) => frame.clone(),
+				None => {
+					warn!("🎮 GORC: player object {} has no wire handle, not shown to bitcode player {}", gorc_id, player_id);
+					continue;
+				}
+			},
+		};
+		if let Err(e) = sender.send_frame(player_id, Outbound::reliable(frame)).await {
+			debug!("🎮 GORC: player object {} not shown to player {}: {}", gorc_id, player_id, e);
+		}
+	}
+	Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[tokio::test]
+	async fn children_wait_by_parent_and_a_requeue_replaces() {
+		let queue: PendingChildren = Default::default();
+		wait_for_parent(&queue, "hab", "crate-1", serde_json::json!({"object_uuid": "crate-1", "v": 1})).await;
+		wait_for_parent(&queue, "hab", "crate-2", serde_json::json!({"object_uuid": "crate-2"})).await;
+		wait_for_parent(&queue, "hab", "crate-1", serde_json::json!({"object_uuid": "crate-1", "v": 2})).await;
+		wait_for_parent(&queue, "other", "crate-3", serde_json::json!({"object_uuid": "crate-3"})).await;
+
+		let children = queue.write().await.remove("hab").unwrap();
+		assert_eq!(children.len(), 2);
+		assert_eq!(children[0]["v"], 2, "queued again: the latest create");
+		assert_eq!(queue.read().await.len(), 1, "the other parent's child still waits");
+	}
+}

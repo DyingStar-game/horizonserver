@@ -17,11 +17,14 @@
 			"properties": [
 				"position",
 				"rotation",
+				"parent_id",
 				"pilot_uuid",
 				"steering",
 				"speed",
 				"velocity_local",
 				"wheel_kmh",
+				"grounded",
+				"power",
 				"handbrake",
 				"headlights",
 				"engine",
@@ -29,7 +32,11 @@
 				"seats",
 				"components",
 				"limiter_on",
-				"limiter_kmh"
+				"limiter_kmh",
+				"cruise_on",
+				"cruise_kmh",
+				"rear_screen",
+				"chart_view"
 			]
 		},
 		{
@@ -46,12 +53,20 @@
 			]
 		},
 		{
+			"zone": 2,
+			"distance": 200.0,
+			"frequency": 30.0,
+			"properties": [
+				"suspension_shocks"
+			]
+		},
+		{
 			"zone": 6,
 			"distance": 200.0,
 			"frequency": 1.0,
 			"properties": [
 				"scenename",
-				"parent_id"
+				"spawned_by"
 			]
 		}
 	]

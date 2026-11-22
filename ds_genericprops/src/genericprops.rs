@@ -237,4 +237,25 @@ mod tests {
 		let dirty = player.update(json!({ "head": 0.3 }));
 		assert_eq!(dirty, HashSet::from([0u8]), "and a movement-channel property does not resend the look");
 	}
+
+	/// A VR player's hands (the game's VrHandsCodec, 40 characters) ride a near channel of their own:
+	/// 20 Hz within 15 m, 8 Hz to 40 m, and nothing at all past it -- nobody farther sees fingers.
+	#[test]
+	fn a_vr_players_hands_reach_near_players_only() {
+		let def = player_def();
+		assert_eq!(def.index.get("vr_hands"), Some(&2));
+		let channel = def.channel(2).expect("zone 2");
+		assert_eq!(channel.distance, 40.0);
+		let tiers: Vec<(f64, f64)> = channel.lod.iter().map(|t| (t.distance, t.frequency)).collect();
+		assert_eq!(tiers, vec![(15.0, 20.0), (40.0, 8.0)], "the last tier is the whole audience");
+	}
+
+	#[test]
+	fn new_hands_dirty_zone_2_alone() {
+		let mut player = GenericProps::new(player_def(), json!({ "position": { "x": 0.0, "y": 0.0, "z": 0.0 } }), "p1".to_string());
+		let dirty = player.update(json!({ "vr_hands": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" }));
+		assert_eq!(dirty, HashSet::from([2u8]), "the hands do not resend the movement channel");
+		let dirty = player.update(json!({ "head": 0.3 }));
+		assert_eq!(dirty, HashSet::from([0u8]), "and the head does not resend the hands");
+	}
 }

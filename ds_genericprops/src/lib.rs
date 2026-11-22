@@ -634,7 +634,7 @@ impl GenericPropsPlugin {
             debug!("plugin genericprops (items_chunk): Receive items chunk message with {} items", event.items.len());
 
             for item in event.items {
-                if matches!(item.object_type.as_str(), "planet" | "player" | "star") {
+                if matches!(item.object_type.as_str(), "planet" | "player" | "star" | "weather_system") {
                     debug!("plugin genericprops (items_chunk): skipping object_type '{}'", item.object_type);
                     continue;
                 }

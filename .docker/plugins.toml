@@ -18,9 +18,34 @@ game_servers_dns = "godotserver:8980"
 
 # Values posible for servers_mode:
 #  * "single" (only 1 server)
-#  * "development" (multiple servers, use game_servers list)
-#  * "production" (multiple servers, will use kubernetes to create and start servers on demand, so ignore game_servers list)
+#  * "development" (multiple servers: game_servers list and/or game_servers_dns)
+#  * "production" (same as development + the pool sized on kubernetes, see autoscale_*)
+# The GAME_SERVER_AUTOSCALE env var turns the autoscaler on ("1"), in dry run
+# ("dry-run") or off ("0") whatever the mode: one file for minikube and preprod.
 servers_mode = "development"
+
+# Pool autoscaling (servers_mode "production" or GAME_SERVER_AUTOSCALE): Horizon keeps
+# autoscale_min_idle idle servers ready by raising the replicas of the godotserver
+# Deployment, and gives back the idle ones above autoscale_max_idle once idle for
+# autoscale_scale_down_after_secs: their pod is marked (pod-deletion-cost) then the
+# replicas go down. A server holding zones is never given back. Needs the horizon
+# chart's Role (deployments get, deployments/scale patch, pods list/patch).
+autoscale_deployment = "godotserver"
+autoscale_pod_selector = "app.kubernetes.io/name=godotserver"
+# A split takes up to 4 idle servers at once.
+autoscale_min_idle = 4
+autoscale_max_idle = 6
+autoscale_min_replicas = 5
+# Node1 holds ~45 pods at 12 GiB each.
+autoscale_max_replicas = 40
+autoscale_scale_down_after_secs = 600
+# No scale-down while the pool connects after a Horizon start.
+autoscale_startup_grace_secs = 300
+# A pod unschedulable longer than this means the cluster is full: no more replicas.
+autoscale_unschedulable_after_secs = 120
+# Idle servers on these nodes (names) are given back first: overflow nodes.
+autoscale_drain_first_nodes = []
+autoscale_dry_run = false
 
 # Dynamic server meshing (ignored in single mode). A Godot server owns a list of
 # zones (space, or one planet, optionally bounded). When a server saturates, whole
